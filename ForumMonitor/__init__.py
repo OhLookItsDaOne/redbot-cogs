@@ -1,4 +1,4 @@
-from .ForumMessage import ForumMessage
+from .mycog import Mycog
 
 def setup(bot):
-    bot.add_cog(ForumMessage(bot))
+    bot.add_cog(Mycog())
