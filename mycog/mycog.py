@@ -22,29 +22,28 @@ class ForumPostNotifier(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """Listener for when a new message is posted in the thread."""
-        # No action needed here, just for logging purposes if required
-        # This part can be omitted if you only need to log or if you want to take other actions.
-        if isinstance(message.channel, discord.Thread) and message.channel.parent_id == 1172448935772704788:
-            logging.info(f"Message detected in thread: {message.content} from {message.author}")
+        # This is commented out to reduce log output
+        # if isinstance(message.channel, discord.Thread) and message.channel.parent_id == 1172448935772704788:
+        #     logging.info(f"Message detected in thread: {message.content} from {message.author}")
 
     def create_troubleshooting_message(self):
         """Creates the troubleshooting message."""
         message = (
             """Hello! 👋
             
-            Provide info to help us help you!
-            ```
-            Please answer all these, unless we say otherwise:
-            1. GPU
-            2. CPU
-            3. RAM
-            4. Which VR headset do you use?
-            5. Where is SkyrimVR installed? (provide us with full path and a screenshot of the content inside)
-            6. Where is FUS installed? (provide us with full path and a screenshot)
-            7. Which FUS profile are you using?
-            8. Did you move SkyrimVR or FUS after installing FUS?
-            9. Have you downloaded and added any mods?
-            10. Which version of the modlist are you on? (This can be found highlighted near the top of the list in MO2)
-            ```"""
+Provide info to help us help you!
+        
+Please answer all these, unless we say otherwise:
+1. **GPU**
+2. **CPU**
+3. **RAM**
+4. **Which VR headset do you use?**
+5. **Where is SkyrimVR installed?** (provide us with full path and a screenshot of the content inside)
+6. **Where is FUS installed?** (provide us with full path and a screenshot)
+7. **Which FUS profile are you using?**
+8. **Did you move SkyrimVR or FUS after installing FUS?**
+9. **Have you downloaded and added any mods?**
+10. **Which version of the modlist are you on?** (This can be found highlighted near the top of the list in MO2)
+"""
         )
         return message
