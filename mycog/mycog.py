@@ -23,20 +23,21 @@ class ForumPostNotifier(commands.Cog):
         """Creates the troubleshooting message."""
         message = (
             f"Hello! 👋\n\n"
-            Provide info to help us help you<<
+            Provide info to help us help you
             ```
             Please answer all these, unless we say otherwise-
-            1. GPU
-            2. CPU
-            3. RAM
-            4. Which VR headset do you use
-            5. Where is SkyrimVR installed? (provide us with full path and a screenshot of the content inside)
-            6. Where is FUS installed? (provide us with full path and a screenshot)
-            7. Which FUS profile are you using?
-            8. Did you move SkyrimVR or FUS after installing FUS?
-            9. Have you downloaded and added any mods?
-            10.Which version of the modlist are you on? (This can be found highlighted near the top of the list in MO2)`
+            1  GPU
+            2  CPU
+            3  RAM
+            4  Which VR headset do you use
+            5  Where is SkyrimVR installed? (provide us with full path and a screenshot of the content inside)
+            6  Where is FUS installed? (provide us with full path and a screenshot)
+            7  Which FUS profile are you using?
+            8  Did you move SkyrimVR or FUS after installing FUS?
+            9  Have you downloaded and added any mods?
+            10 Which version of the modlist are you on? (This can be found highlighted near the top of the list in MO2)
             ```
+            
 
         )
         return message
