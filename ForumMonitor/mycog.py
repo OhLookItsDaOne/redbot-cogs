@@ -1,13 +1,15 @@
 from discord import ForumChannel
 from redbot.core import commands
 
-class Mycog(commands.Cog):
+class ForumMessage(commands.Cog):
     """A cog to send messages in a newly created forum post."""
+
+    def __init__(self, bot):
+        self.bot = bot
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread):
         """Send a message when a new forum thread is created."""
-        # Check if the thread is in the specific forum channel
         if isinstance(thread.parent, ForumChannel) and thread.parent.id == 1172448935772704788:
             message_content = (
                 "Hey there! Thanks for creating a post in the support forum.\n\n"
@@ -28,5 +30,4 @@ class Mycog(commands.Cog):
                 "```\n"
                 "If you've tried these steps and still need assistance, feel free to provide more details and we'll help you out!"
             )
-            # Send the message to the newly created thread
             await thread.send(message_content)
