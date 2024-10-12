@@ -22,7 +22,7 @@ class ForumPostNotifier(commands.Cog):
     def create_troubleshooting_message(self):
         """Creates the troubleshooting message."""
         message = (
-            f"Hello! 👋\n\n"
+            Hello! 👋
             Provide info to help us help you
             ```
             Please answer all these, unless we say otherwise-
