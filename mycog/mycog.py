@@ -21,9 +21,9 @@ class ForumPostNotifier(commands.Cog):
 
     def create_troubleshooting_message(self):
         """Creates the troubleshooting message."""
-        message = (
-            Hello!
-            Provide info to help us help you
+        message = ("
+            Hello!👋
+            # Provide info to help us help you!
             ```
             Please answer all these, unless we say otherwise-
             1  GPU
@@ -37,7 +37,7 @@ class ForumPostNotifier(commands.Cog):
             9  Have you downloaded and added any mods?
             10 Which version of the modlist are you on? (This can be found highlighted near the top of the list in MO2)
             ```
-            
+            "
 
         )
         return message
