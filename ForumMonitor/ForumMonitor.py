@@ -1,11 +1,8 @@
 from discord import ForumChannel
 from redbot.core import commands
 
-class ForumMessage(commands.Cog):
+class Mycog(commands.Cog):
     """A cog to send messages in a newly created forum post."""
-
-    def __init__(self, bot):
-        self.bot = bot
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread):
