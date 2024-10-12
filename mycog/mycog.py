@@ -1,4 +1,8 @@
+import logging
 from redbot.core import commands
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 class ForumPostNotifier(commands.Cog):
     """A cog to send troubleshooting steps in response to new forum posts."""
@@ -7,13 +11,21 @@ class ForumPostNotifier(commands.Cog):
         self.bot = bot
 
     @commands.Cog.listener()
+    async def on_thread_create(self, thread):
+        """Listener for when a new thread is created in the forum."""
+        # Check if the thread is part of the specific forum
+        if thread.parent_id == 1172448935772704788:  # Forum ID
+            logging.info(f"New thread created: {thread.name} (ID: {thread.id})")
+            await thread.send(self.create_troubleshooting_message())
+
+    @commands.Cog.listener()
     async def on_message(self, message):
-        """Listener for when a new message is posted in the forum channel."""
-        # Check if the message is in the correct forum channel
-        if message.channel.id == 1172448935772704788 and not message.author.bot:
-            # Create and send the troubleshooting message
-            troubleshooting_message = self.create_troubleshooting_message()
-            await message.channel.send(troubleshooting_message)
+        """Listener for when a new message is posted in the thread."""
+        # Check if the message is in a thread under the specific forum
+        if isinstance(message.channel, discord.Thread) and message.channel.parent_id == 1172448935772704788:
+            if not message.author.bot:  # Ignore bot messages
+                logging.info(f"Detected message in thread: {message.content} from {message.author}")
+                await message.channel.send(self.create_troubleshooting_message())
 
     def create_troubleshooting_message(self):
         """Creates the troubleshooting message."""
