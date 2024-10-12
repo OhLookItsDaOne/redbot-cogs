@@ -1,5 +1,5 @@
 import logging
-import discord
+import discord  # Import discord module
 from redbot.core import commands
 
 # Configure logging
@@ -22,11 +22,10 @@ class ForumPostNotifier(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """Listener for when a new message is posted in the thread."""
-        # Check if the message is in a thread under the specific forum
+        # No action needed here, just for logging purposes if required
+        # This part can be omitted if you only need to log or if you want to take other actions.
         if isinstance(message.channel, discord.Thread) and message.channel.parent_id == 1172448935772704788:
-            if not message.author.bot:  # Ignore bot messages
-                logging.info(f"Detected message in thread: {message.content} from {message.author}")
-                await message.channel.send(self.create_troubleshooting_message())
+            logging.info(f"Message detected in thread: {message.content} from {message.author}")
 
     def create_troubleshooting_message(self):
         """Creates the troubleshooting message."""
