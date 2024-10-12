@@ -1,4 +1,4 @@
 from .mycog import ForumPostNotifier
 
-def setup(bot):
-    bot.add_cog(ForumPostNotifier(bot))
+async def setup(bot):
+    await bot.add_cog(ForumPostNotifier(bot))
