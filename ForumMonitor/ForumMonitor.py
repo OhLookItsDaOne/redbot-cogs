@@ -31,7 +31,7 @@ class ForumMonitor(commands.Cog):
             7. Which FUS profile are you using?
             8. Did you move SkyrimVR or FUS after installing FUS?
             9. Have you downloaded and added any mods?
-            10.Which version of the modlist are you on? (This can be found highlighted near the top of the list in MO2)
+            10. Which version of the modlist are you on? (This can be found highlighted near the top of the list in MO2)
             ```
             If you've tried these steps and still need assistance, feel free to provide more details and we'll help you out!
             """
