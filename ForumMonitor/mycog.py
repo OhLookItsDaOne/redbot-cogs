@@ -1,7 +1,7 @@
 from discord import ForumChannel
 from redbot.core import commands
 
-class Mycog(commands.Cog):
+class mycog(commands.Cog):
     """A cog to send messages in a newly created forum post."""
 
     @commands.Cog.listener()
