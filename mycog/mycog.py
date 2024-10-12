@@ -1,4 +1,5 @@
 import logging
+import discord
 from redbot.core import commands
 
 # Configure logging
