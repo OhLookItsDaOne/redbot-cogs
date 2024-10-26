@@ -44,6 +44,10 @@ Please answer all these, unless we say otherwise:
 8. **Did you move SkyrimVR or FUS after installing FUS?**
 9. **Have you downloaded and added any mods?**
 10. **Which version of the modlist are you on?** (This can be found highlighted near the top of the list in MO2)
+If your game is crashing upon launch please provide us with your crashlog. It can be found at ```Documents\My Games\Skyrim VR\SKSE\sksevr.log```
+Look for the most recent file starting with crash- + the date and time of the crash.
+
+Lastly, if you use a pirated version of the game, the list will not work. We do not support piracy, buy the game. It is regularly on sale anyways.
 """
         )
         return message
