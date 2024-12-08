@@ -86,7 +86,7 @@ class KeywordHelp(commands.Cog):
             return
 
         content = message.content.lower()
-        keywords = await self.get_all_keywords()
+        keywords = await self.config.keywords()  # Fetch keywords directly from config
 
         # Use the match_keywords_in_sentence function for better keyword matching
         matched_keywords = self.match_keywords_in_sentence(content, keywords)
