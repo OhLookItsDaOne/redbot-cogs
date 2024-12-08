@@ -57,12 +57,12 @@ class KeywordHelp(commands.Cog):
             elif mentioned:
                 # Fuzzy matching with SequenceMatcher for slight variations
                 similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                if similarity > 0.6:
+                if similarity > 0.5:  # Lowered the threshold for fuzzy matching
                     matched_keywords.append((keyword, response))
             # Alternative: Fuzzy match even without mention but for highly relevant cases
             else:
                 similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                if similarity > 0.7:  # Slightly higher threshold for non-mentioned cases
+                if similarity > 0.5:  # Further lowered threshold for non-mentioned cases
                     matched_keywords.append((keyword, response))
 
         return matched_keywords
