@@ -1,5 +1,6 @@
 import discord
 import time
+import difflib
 from redbot.core import commands, Config
 import logging
 import re
@@ -65,6 +66,16 @@ class KeywordHelp(commands.Cog):
         keywords = await self.config.keywords()
         return keywords
 
+    def match_keyword_with_fuzzy_search(self, content, keywords):
+        """Matches content with keywords, considering minor spelling errors and missing spaces."""
+        matched_keywords = []
+        for keyword, response in keywords.items():
+            # Use difflib to compare strings for fuzzy matching
+            ratio = difflib.SequenceMatcher(None, content, keyword.lower()).ratio()
+            if ratio > 0.8:  # 80% similarity threshold
+                matched_keywords.append((keyword, response))
+        return matched_keywords
+
     @commands.Cog.listener()
     async def on_message(self, message):
         """Listen for messages and respond to keywords."""
@@ -79,13 +90,8 @@ class KeywordHelp(commands.Cog):
         content = message.content.lower()
         keywords = await self.get_all_keywords()
 
-        matched_keywords = []
-        # Check for exact matches (multi-word should come first)
-        for keyword, response in keywords.items():
-            # Match keywords with boundaries to avoid partial matches
-            keyword_pattern = r'\b' + re.escape(keyword.lower()) + r'\b'
-            if re.search(keyword_pattern, content):
-                matched_keywords.append((keyword, response))
+        # Find fuzzy matched keywords with a tolerance for minor errors
+        matched_keywords = self.match_keyword_with_fuzzy_search(content, keywords)
 
         if matched_keywords:
             # Generate a unique response for each matched keyword
@@ -96,13 +102,14 @@ class KeywordHelp(commands.Cog):
                 if await self.can_help_user(message.author.id, keyword, timeout_minutes):
                     response_message += f"**{keyword.capitalize()}**: {response}\n"
                     await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
+                # If the user is on cooldown, don't send a message
                 else:
-                    # Notify user about the cooldown if needed
-                    response_message += f"**{keyword.capitalize()}**: You need to wait before I can help again.\n"
+                    continue  # Skip sending any message for this keyword if it's on cooldown
 
-            await message.channel.send(f"<@{message.author.id}> {response_message}")
+            if response_message:  # Send only if there is a valid response
+                await message.channel.send(f"<@{message.author.id}> {response_message}")
         else:
-            # Only respond if there are keywords, no generic response
+            # No valid keyword matched, do nothing
             pass  # Nothing happens here unless a keyword is found.
 
     @commands.group(name="kw")
@@ -213,7 +220,7 @@ class KeywordHelp(commands.Cog):
 
     @kw.command(name="list")
     async def kwlist(self, ctx):
-        """List all available commands for the keyword help cog."""
+        """List all available commands for the keyword help cog.""" 
         command_list = """
 **Keyword Help Cog Commands:**
 - `!kw addkeyword <keyword> <response>`: Add a new keyword and response pair.
@@ -227,7 +234,7 @@ class KeywordHelp(commands.Cog):
 
     @kw.command()
     async def setdebugchannel(self, ctx, channel_id: int):
-        """Set a debug channel to log errors."""
+        """Set a debug channel to log errors.""" 
         if not await self.bot.is_owner(ctx.author):
             await ctx.send("You do not have permission to set the debug channel.")
             return
