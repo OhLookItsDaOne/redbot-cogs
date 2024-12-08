@@ -170,9 +170,9 @@ class KeywordHelp(commands.Cog):
         if channel_id not in channel_ids:
             channel_ids.append(channel_id)
             await self.config.channel_ids.set(channel_ids)
-            await ctx.send(f"Added channel ID {channel_id} to the monitored channels.")
+            await ctx.send(f"Added channel <#{channel_id}> to the monitored channels.")
         else:
-            await ctx.send(f"Channel ID {channel_id} is already in the monitored list.")
+            await ctx.send(f"Channel <#{channel_id}> is already in the monitored list.")
 
     @kw.command()
     async def removechannel(self, ctx, channel_id: int):
@@ -185,9 +185,9 @@ class KeywordHelp(commands.Cog):
         if channel_id in channel_ids:
             channel_ids.remove(channel_id)
             await self.config.channel_ids.set(channel_ids)
-            await ctx.send(f"Removed channel ID {channel_id} from the monitored channels.")
+            await ctx.send(f"Removed channel <#{channel_id}> from the monitored list.")
         else:
-            await ctx.send(f"Channel ID {channel_id} not found in the monitored list.")
+            await ctx.send(f"Channel <#{channel_id}> not found in the monitored list.")
 
     @kw.command()
     async def showconfig(self, ctx):
@@ -204,7 +204,7 @@ class KeywordHelp(commands.Cog):
         config_message = (
             f"Timeout: {timeout_minutes} minutes\n"
             f"Keywords: {', '.join(keywords.keys()) if keywords else 'No keywords added'}\n"
-            f"Monitored channels: {', '.join(map(str, channel_ids)) if channel_ids else 'No channels added'}"
+            f"Monitored channels: {', '.join([f'<#{channel_id}>' for channel_id in channel_ids]) if channel_ids else 'No channels added'}"
         )
         await ctx.send(config_message)
 
@@ -212,15 +212,25 @@ class KeywordHelp(commands.Cog):
     async def kwlist(self, ctx):
         """List all available commands for the keyword help cog."""
         command_list = """
-        !kw addkeyword <keyword> <response> - Add a new keyword with a response
-        !kw removekeyword <keyword> - Remove an existing keyword
-        !kw showconfig - Show current keyword help config
-        !kw settimeout <minutes> - Set the timeout between user responses
-        !kw addchannel <channel_id> - Add a channel to monitor
-        !kw removechannel <channel_id> - Remove a channel from the monitored list
-        """
+**Keyword Help Cog Commands:**
+- `!kw addkeyword <keyword> <response>`: Add a new keyword and response pair.
+- `!kw removekeyword <keyword>`: Remove a keyword from the configuration.
+- `!kw settimeout <timeout>`: Set the timeout (in minutes) for user help responses.
+- `!kw addchannel <channel_id>`: Add a channel to the monitored list.
+- `!kw removechannel <channel_id>`: Remove a channel from the monitored list.
+- `!kw showconfig`: Show the current configuration of the cog.
+"""
         await ctx.send(command_list)
 
-# Add cog to bot
+    @kw.command()
+    async def setdebugchannel(self, ctx, channel_id: int):
+        """Set a debug channel to log errors."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("You do not have permission to set the debug channel.")
+            return
+
+        await self.config.debug_channel_id.set(channel_id)
+        await ctx.send(f"Debug channel set to <#{channel_id}>.")
+
 def setup(bot):
     bot.add_cog(KeywordHelp(bot))
