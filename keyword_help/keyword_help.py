@@ -17,7 +17,8 @@ class KeywordHelp(commands.Cog):
             "channel_ids": [],  # List of channel IDs to monitor
             "timeout_minutes": 10,  # Timeout duration in minutes
             "debug_channel_id": None,  # ID for the debug channel to log errors
-            "user_help_times": {}  # User help log, persist across restarts
+            "user_help_times": {},  # User help log, persist across restarts
+            "ignored_roles": []  # List of role IDs to ignore
         }
         self.config.register_global(**default_global)
 
@@ -85,6 +86,12 @@ class KeywordHelp(commands.Cog):
 
         return matched_keywords
 
+    async def user_has_ignored_role(self, user):
+        """Check if the user has any ignored roles."""
+        ignored_roles = await self.config.ignored_roles()
+        user_roles = [role.id for role in user.roles]
+        return any(role in ignored_roles for role in user_roles)
+
     @commands.Cog.listener()
     async def on_message(self, message):
         """Listen for messages and respond to keywords."""
@@ -96,27 +103,34 @@ class KeywordHelp(commands.Cog):
         if message.channel.id not in channel_ids:
             return
 
+        # If the bot is mentioned, skip timeout checks
+        mentioned = any(mention.id == self.bot.user.id for mention in message.mentions)
+
         content = message.content.lower()
         keywords = await self.config.keywords()  # Fetch keywords directly from config
+
+        # Check if the user has an ignored role
+        if await self.user_has_ignored_role(message.author):
+            return  # Do not respond to users with ignored roles
 
         # Use the match_keywords_in_sentence function for better keyword matching
         matched_keywords = self.match_keywords_in_sentence(content, keywords)
 
         if matched_keywords:
-            # Generate a unique response for each matched keyword
-            response_message = ""
+            # Prepare response with found keywords
+            response_message = f"<@{message.author.id}> I found the following keywords:\n"
             for keyword, response in matched_keywords:
-                # Ensure that the user can only be helped after the timeout
+                # Ensure that the user can only be helped after the timeout, unless the bot is mentioned
                 timeout_minutes = await self.config.timeout_minutes()
-                if await self.can_help_user(message.author.id, keyword, timeout_minutes):
+                if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
                     response_message += f"**{keyword.capitalize()}**: {response}\n"
                     await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
-                # If the user is on cooldown, don't send a message
+                # If the user is on cooldown and the bot is not mentioned, skip responding
                 else:
                     continue  # Skip sending any message for this keyword if it's on cooldown
 
             if response_message:  # Send only if there is a valid response
-                await message.channel.send(f"<@{message.author.id}> {response_message}")
+                await message.channel.send(response_message)
         else:
             # No valid keyword matched, do nothing
             print(f"No keywords matched for message: {message.content}")  # Debug: No matches case
@@ -209,39 +223,6 @@ class KeywordHelp(commands.Cog):
             await ctx.send(f"Channel <#{channel_id}> not found in the monitored list.")
 
     @kw.command()
-    async def showconfig(self, ctx):
-        """Show the current configuration for the cog."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to view the configuration.")
-            return
-
-        timeout_minutes = await self.config.timeout_minutes()
-        keywords = await self.config.keywords()
-        channel_ids = await self.config.channel_ids()
-
-        # Show configuration details
-        config_message = (
-            f"Timeout: {timeout_minutes} minutes\n"
-            f"Keywords: {', '.join(keywords.keys()) if keywords else 'No keywords added'}\n"
-            f"Monitored channels: {', '.join([f'<#{channel_id}>' for channel_id in channel_ids]) if channel_ids else 'No channels added'}"
-        )
-        await ctx.send(config_message)
-
-    @kw.command(name="list")
-    async def kwlist(self, ctx):
-        """List all available commands for the keyword help cog.""" 
-        command_list = """
-**Keyword Help Cog Commands:**
-- `!kw addkeyword <keyword> <response>`: Add a new keyword and response pair.
-- `!kw removekeyword <keyword>`: Remove a keyword from the configuration.
-- `!kw settimeout <timeout>`: Set the timeout (in minutes) for user help responses.
-- `!kw addchannel <channel_id>`: Add a channel to the monitored list.
-- `!kw removechannel <channel_id>`: Remove a channel from the monitored list.
-- `!kw showconfig`: Show the current configuration of the cog.
-"""
-        await ctx.send(command_list)
-
-    @kw.command()
     async def setdebugchannel(self, ctx, channel_id: int):
         """Set a debug channel to log errors.""" 
         if not await self.bot.is_owner(ctx.author):
@@ -250,6 +231,36 @@ class KeywordHelp(commands.Cog):
 
         await self.config.debug_channel_id.set(channel_id)
         await ctx.send(f"Debug channel set to <#{channel_id}>.")
+
+    @kw.command()
+    async def addignoredrole(self, ctx, role_id: int):
+        """Add a role to the ignored roles list."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("You do not have permission to modify ignored roles.")
+            return
+
+        ignored_roles = await self.config.ignored_roles()
+        if role_id not in ignored_roles:
+            ignored_roles.append(role_id)
+            await self.config.ignored_roles.set(ignored_roles)
+            await ctx.send(f"Added role <@&{role_id}> to ignored roles.")
+        else:
+            await ctx.send(f"Role <@&{role_id}> is already in the ignored list.")
+
+    @kw.command()
+    async def removeignoredrole(self, ctx, role_id: int):
+        """Remove a role from the ignored roles list."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("You do not have permission to modify ignored roles.")
+            return
+
+        ignored_roles = await self.config.ignored_roles()
+        if role_id in ignored_roles:
+            ignored_roles.remove(role_id)
+            await self.config.ignored_roles.set(ignored_roles)
+            await ctx.send(f"Removed role <@&{role_id}> from ignored roles.")
+        else:
+            await ctx.send(f"Role <@&{role_id}> not found in ignored roles.")
 
 def setup(bot):
     bot.add_cog(KeywordHelp(bot))
