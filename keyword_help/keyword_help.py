@@ -8,17 +8,17 @@ import re
 class KeywordHelp(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=123456789)  # Unique identifier for the cog
-        self.user_help_log = {}  # Track user keyword responses (in memory for now)
+        self.config = Config.get_conf(self, identifier=123456789)
+        self.user_help_log = {}
 
         # Default configuration
         default_global = {
             "keywords": {},  # {keyword: response}
-            "channel_ids": [],  # List of channel IDs to monitor
-            "timeout_minutes": 10,  # Timeout duration in minutes
-            "debug_channel_id": None,  # ID for the debug channel to log errors
-            "user_help_times": {},  # User help log, persist across restarts
-            "ignored_roles": []  # List of role IDs to ignore
+            "channel_ids": [],
+            "timeout_minutes": 10,
+            "debug_channel_id": None,
+            "user_help_times": {},
+            "ignored_roles": []
         }
         self.config.register_global(**default_global)
 
@@ -29,8 +29,8 @@ class KeywordHelp(commands.Cog):
         """Check if the user can be helped again based on the cooldown."""
         current_time = time.time()
 
-        # Retrieve the user's last help time from the persistent config
-        user_help_times = await self.config.user_help_times()  # Dictionary of user ID => keyword => timestamp
+        # Retrieve the user's last help time
+        user_help_times = await self.config.user_help_times()
         last_help_time = user_help_times.get(str(user_id), {}).get(keyword, 0)
         time_diff = current_time - last_help_time
         timeout_seconds = timeout_minutes * 60
@@ -47,43 +47,27 @@ class KeywordHelp(commands.Cog):
         user_help_times[str(user_id)][keyword] = current_time
         await self.config.user_help_times.set(user_help_times)
 
-    async def log_error(self, error):
-        """Logs the error to the debug channel if specified."""
-        debug_channel_id = await self.config.debug_channel_id()
-        if debug_channel_id:
-            channel = self.bot.get_channel(debug_channel_id)
-            if channel:
-                await channel.send(f"Error: {error}")
-        self.logger.error(error)
-
-    def normalize_string(self, string):
+    async def normalize_string(self, string):
         """Normalize strings by removing excessive spaces and converting to lowercase."""
         return re.sub(r'\s+', ' ', string.lower()).strip()
 
-    def match_keywords_in_sentence(self, content, keywords, mentioned):
+    def match_keywords_in_sentence(self, content, keywords):
         """Match keywords in a sentence, allowing for minor typos or missing spaces."""
         matched_keywords = []
         normalized_content = self.normalize_string(content)
 
-        print(f"Normalized content: {normalized_content}")  # Debug: Check normalized content
-        
         for keyword, response in keywords.items():
             normalized_keyword = self.normalize_string(keyword)
-
-            # Debugging logs for keyword normalization
-            print(f"Checking keyword: '{keyword}' -> '{normalized_keyword}'")  # Debug: Checking normalized keyword
 
             # Check for exact match first
             if normalized_keyword in normalized_content:
                 matched_keywords.append((keyword, response))
                 continue
 
-            # Fuzzy matching for more tolerance (if exact match fails) - only if mentioned
-            if mentioned:
-                ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                print(f"Fuzzy match ratio: {ratio}")  # Debug: Check fuzzy match ratio
-                if ratio > 0.5:  # 50% similarity threshold (more sensitive)
-                    matched_keywords.append((keyword, response))
+            # Fuzzy matching if exact match fails
+            ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
+            if ratio > 0.5:  # 50% similarity threshold
+                matched_keywords.append((keyword, response))
 
         return matched_keywords
 
@@ -115,11 +99,10 @@ class KeywordHelp(commands.Cog):
             return  # Do not respond to users with ignored roles
 
         # Use the match_keywords_in_sentence function for better keyword matching
-        matched_keywords = self.match_keywords_in_sentence(content, keywords, mentioned)
+        matched_keywords = self.match_keywords_in_sentence(content, keywords)
 
-        # If no valid keyword matched and no mention, do nothing
+        # If no valid keyword matched, do nothing
         if not matched_keywords:
-            # If no keywords matched and the user is not mentioned, do nothing
             return
 
         # Prepare to send a response if there are matched keywords
@@ -131,18 +114,17 @@ class KeywordHelp(commands.Cog):
             if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
                 response_message += f"**{keyword.capitalize()}**: {response}\n"
                 await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
-            # If on cooldown, do not add the keyword to the response
             else:
+                # Skip adding this keyword to the response if it's on cooldown
                 continue
 
         # Check if the response message contains valid keywords (not just the initial message)
         if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
             # Send response only if valid keywords are found (and user is not on cooldown)
             await message.channel.send(response_message)
-        # If no valid keywords, do nothing (no response)
         else:
+            # If no valid keywords, do nothing (no response)
             return
-
 
     @commands.group(name="kw")
     async def kw(self, ctx):
@@ -157,23 +139,11 @@ class KeywordHelp(commands.Cog):
             await ctx.send("You do not have permission to add keywords.")
             return
 
-        # Validate the keyword format (check if multi-word keywords are enclosed in quotes)
-        if " " in keyword and not (keyword.startswith('"') and keyword.endswith('"')):
-            await ctx.send(f"Invalid keyword format. Please wrap multi-word keywords in quotes like this: \"black square\".")
-            return
-
         # Retrieve current keywords from the config
         keywords = await self.config.keywords()
-        if keyword in keywords:
-            # Update the existing keyword
-            keywords[keyword] = response
-            await self.config.keywords.set(keywords)
-            await ctx.send(f"Updated keyword: `{keyword}` with new response: `{response}`")
-        else:
-            # Add new keyword
-            keywords[keyword] = response
-            await self.config.keywords.set(keywords)
-            await ctx.send(f"Added new keyword: `{keyword}` with response: `{response}`")
+        keywords[keyword] = response
+        await self.config.keywords.set(keywords)
+        await ctx.send(f"Added new keyword: `{keyword}` with response: `{response}`")
 
     @kw.command()
     async def removekeyword(self, ctx, keyword: str):
@@ -230,46 +200,6 @@ class KeywordHelp(commands.Cog):
             await ctx.send(f"Removed channel <#{channel_id}> from the monitored list.")
         else:
             await ctx.send(f"Channel <#{channel_id}> not found in the monitored list.")
-
-    @kw.command()
-    async def setdebugchannel(self, ctx, channel_id: int):
-        """Set a debug channel to log errors.""" 
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to set the debug channel.")
-            return
-
-        await self.config.debug_channel_id.set(channel_id)
-        await ctx.send(f"Debug channel set to <#{channel_id}>.")
-
-    @kw.command()
-    async def addignoredrole(self, ctx, role_id: int):
-        """Add a role to the ignored roles list."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to modify ignored roles.")
-            return
-
-        ignored_roles = await self.config.ignored_roles()
-        if role_id not in ignored_roles:
-            ignored_roles.append(role_id)
-            await self.config.ignored_roles.set(ignored_roles)
-            await ctx.send(f"Added role <@&{role_id}> to ignored roles.")
-        else:
-            await ctx.send(f"Role <@&{role_id}> is already in the ignored list.")
-
-    @kw.command()
-    async def removeignoredrole(self, ctx, role_id: int):
-        """Remove a role from the ignored roles list."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to modify ignored roles.")
-            return
-
-        ignored_roles = await self.config.ignored_roles()
-        if role_id in ignored_roles:
-            ignored_roles.remove(role_id)
-            await self.config.ignored_roles.set(ignored_roles)
-            await ctx.send(f"Removed role <@&{role_id}> from ignored roles.")
-        else:
-            await ctx.send(f"Role <@&{role_id}> not found in ignored roles.")
 
 def setup(bot):
     bot.add_cog(KeywordHelp(bot))
