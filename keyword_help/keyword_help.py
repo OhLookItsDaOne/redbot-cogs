@@ -182,7 +182,11 @@ class KeywordHelp(commands.Cog):
         # Get the channel names for the IDs
         channel_mentions = [self.bot.get_channel(channel_id).mention for channel_id in channel_ids]
         # Get the role names for the ignored role IDs
-        ignored_role_names = [discord.utils.get(ctx.guild.roles, id=role_id).name for role_id in ignored_roles]
+        ignored_role_names = []
+        for role_id in ignored_roles:
+            role = discord.utils.get(ctx.guild.roles, id=role_id)
+            if role:  # Only add the role name if the role was found
+                ignored_role_names.append(role.name)
 
         response_message = "Current Keyword Configuration:\n"
         response_message += f"**Timeout (Cooldown)**: {timeout_minutes} minutes\n\n"
