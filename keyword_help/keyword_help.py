@@ -39,8 +39,12 @@ class KeywordHelp(commands.Cog):
         await self.config.user_help_times.set(user_help_times)
 
     def normalize_string(self, string):
-        """Normalize a string by removing extra spaces and converting to lowercase."""
-        return re.sub(r'\s+', ' ', string.lower()).strip()
+        """Normalize a string by removing extra spaces, converting to lowercase, and removing common delimiters."""
+        # Entferne extra Leerzeichen und vereinheitliche das Format
+        string = re.sub(r'\s+', ' ', string.lower()).strip()
+        # Entferne Bindestriche, sodass "blackbox" und "black box" gleich sind
+        string = string.replace(" ", "").replace("-", "")
+        return string
 
     def match_keywords(self, content, keywords, mentioned):
         """Match keywords with tolerance for errors."""
@@ -57,12 +61,12 @@ class KeywordHelp(commands.Cog):
             elif mentioned:
                 # Fuzzy matching with SequenceMatcher for slight variations
                 similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                if similarity > 0.5:  # Lowered the threshold for fuzzy matching
+                if similarity > 0.4:  # Further lowered the threshold for fuzzy matching
                     matched_keywords.append((keyword, response))
             # Alternative: Fuzzy match even without mention but for highly relevant cases
             else:
                 similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                if similarity > 0.5:  # Further lowered threshold for non-mentioned cases
+                if similarity > 0.4:  # Further lowered threshold for non-mentioned cases
                     matched_keywords.append((keyword, response))
 
         return matched_keywords
