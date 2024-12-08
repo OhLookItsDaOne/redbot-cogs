@@ -106,15 +106,12 @@ class KeywordHelp(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
         """Handles new thread creation and scans the first 3 messages for keywords."""
-        if not thread.first_message:
-            return
-        
         # Get the creator of the thread
         creator = thread.owner
 
-        # Get the first 3 messages
-        messages = [thread.first_message]
-        async for message in thread.history(limit=2):
+        # Get the first 3 messages in the thread
+        messages = []
+        async for message in thread.history(limit=3):  # Limit to first 3 messages
             messages.append(message)
 
         # Check if we should skip the cooldown check for these first messages
@@ -137,6 +134,7 @@ class KeywordHelp(commands.Cog):
                     if valid_responses:
                         response_message += "\n".join(valid_responses)
                         await message.channel.send(response_message)
+
 
     @commands.group(name="kw")
     async def kw(self, ctx):
