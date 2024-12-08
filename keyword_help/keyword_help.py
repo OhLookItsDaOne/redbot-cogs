@@ -82,7 +82,7 @@ class KeywordHelp(commands.Cog):
             if mentioned:
                 ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
                 print(f"Fuzzy match ratio: {ratio}")  # Debug: Check fuzzy match ratio
-                if ratio > 0.6:  # 60% similarity threshold (sensitive)
+                if ratio > 0.5:  # 50% similarity threshold (more sensitive)
                     matched_keywords.append((keyword, response))
 
         return matched_keywords
