@@ -68,24 +68,20 @@ class KeywordHelp(commands.Cog):
         keywords = await self.get_all_keywords()
 
         matched_keywords = []
+        # Check for exact matches (multi-word should come first)
         for keyword, response in keywords.items():
-            # Check for exact matches (multi-word should come first)
             if keyword in content:
                 matched_keywords.append((keyword, response))
 
-            elif isinstance(message.channel, discord.TextChannel):
-                # Check if the user is allowed to be helped again
-                user_id = message.author.id
-                timeout_minutes = await self.config.timeout_minutes()
-                if self.can_help_user(user_id, keyword, timeout_minutes):
-                    matched_keywords.append((keyword, response))
-                    self.log_help(user_id, keyword)
-
         if matched_keywords:
+            # Generate a unique response for each matched keyword
+            response_message = ""
             for keyword, response in matched_keywords:
-                await message.channel.send(f"<@{message.author.id}> {response}")
+                response_message += f"**{keyword.capitalize()}**: {response}\n"
+            await message.channel.send(f"<@{message.author.id}> {response_message}")
         else:
-            await message.channel.send("Sorry, I couldn't find any relevant responses.")
+            # Only respond if there are keywords, no generic response
+            pass  # Nothing happens here unless a keyword is found.
 
     @commands.group(name="kw")
     async def kw(self, ctx):
