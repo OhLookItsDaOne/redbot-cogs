@@ -110,6 +110,25 @@ class KeywordHelp(commands.Cog):
             await ctx.send_help(ctx.command)
 
     @kw.command()
+    async def list(self, ctx):
+        """List all available commands for the keyword manager."""
+        commands_list = """
+        Here are the available commands for managing keywords:
+
+        **!kw addkeyword <keyword> <response>** - Add a new keyword and response
+        **!kw removekeyword <keyword>** - Remove a keyword
+        **!kw settimeout <minutes>** - Set the cooldown period for user responses
+        **!kw addchannel <channel>** - Add a channel to the monitored list
+        **!kw removechannel <channel>** - Remove a channel from the monitored list
+        **!kw setdebugchannel <channel>** - Set a debug channel for logging errors
+        **!kw addignoredrole <role>** - Add a role to the ignored roles list
+        **!kw removeignoredrole <role>** - Remove a role from the ignored roles list
+
+        Usage: Type `!kw <command>` to execute any of the above actions.
+        """
+        await ctx.send(commands_list)
+
+    @kw.command()
     async def addkeyword(self, ctx, keyword: str, response: str):
         """Add a keyword-response pair."""
         if not ctx.author.guild_permissions.administrator:
