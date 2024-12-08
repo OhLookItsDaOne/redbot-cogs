@@ -92,13 +92,13 @@ class KeywordHelp(commands.Cog):
         except Exception as e:
             await self.log_error(f"Error in on_thread_create: {e}")
 
-    @commands.group()
-    async def kwhelp(self, ctx):
+    @commands.group(name="kw")
+    async def kw(self, ctx):
         """Base command for managing keywords and monitored channels."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
-    @kwhelp.command()
+    @kw.command()
     async def addkeyword(self, ctx, keyword: str, response: str):
         """Add a new keyword and response pair."""
         if not await self.bot.is_owner(ctx.author):
@@ -111,7 +111,7 @@ class KeywordHelp(commands.Cog):
         await self.config.keywords.set(keywords)
         await ctx.send(f"Added new keyword: `{keyword}` with response: `{response}`")
 
-    @kwhelp.command()
+    @kw.command()
     async def removekeyword(self, ctx, keyword: str):
         """Remove a keyword from the configuration."""
         if not await self.bot.is_owner(ctx.author):
@@ -127,7 +127,7 @@ class KeywordHelp(commands.Cog):
         else:
             await ctx.send(f"Keyword `{keyword}` not found.")
 
-    @kwhelp.command()
+    @kw.command()
     async def settimeout(self, ctx, timeout_minutes: int):
         """Set the timeout (in minutes) between user help responses."""
         if not await self.bot.is_owner(ctx.author):
@@ -137,7 +137,7 @@ class KeywordHelp(commands.Cog):
         await self.config.timeout_minutes.set(timeout_minutes)
         await ctx.send(f"Timeout set to {timeout_minutes} minutes.")
 
-    @kwhelp.command()
+    @kw.command()
     async def addchannel(self, ctx, channel_id: int):
         """Add a channel to the monitored list."""
         if not await self.bot.is_owner(ctx.author):
@@ -152,7 +152,7 @@ class KeywordHelp(commands.Cog):
         else:
             await ctx.send(f"Channel ID {channel_id} is already in the monitored list.")
 
-    @kwhelp.command()
+    @kw.command()
     async def removechannel(self, ctx, channel_id: int):
         """Remove a channel from the monitored list."""
         if not await self.bot.is_owner(ctx.author):
@@ -167,9 +167,13 @@ class KeywordHelp(commands.Cog):
         else:
             await ctx.send(f"Channel ID {channel_id} not found in the monitored list.")
 
-    @kwhelp.command()
+    @kw.command()
     async def showconfig(self, ctx):
         """Show the current configuration for the cog."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("You do not have permission to view the configuration.")
+            return
+
         timeout_minutes = await self.config.timeout_minutes()
         keywords = await self.config.keywords()
         channel_ids = await self.config.channel_ids()
@@ -182,17 +186,7 @@ class KeywordHelp(commands.Cog):
         )
         await ctx.send(config_message)
 
-    @kwhelp.command()
-    async def setdebugchannel(self, ctx, channel_id: int):
-        """Set the channel where errors will be logged."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to set the debug channel.")
-            return
-
-        await self.config.debug_channel_id.set(channel_id)
-        await ctx.send(f"Debugging channel set to {channel_id}. All errors will be logged there.")
-
-    @kwhelp.command()
+    @kw.command()
     async def kwlist(self, ctx):
         """List all available commands in this cog."""
         commands_list = [
@@ -202,7 +196,6 @@ class KeywordHelp(commands.Cog):
             "addchannel <channel_id> - Add a channel to the monitored channels",
             "removechannel <channel_id> - Remove a channel from the monitored channels",
             "showconfig - Show the current configuration",
-            "setdebugchannel <channel_id> - Set the debug channel",
         ]
         await ctx.send("\n".join(commands_list))
 
