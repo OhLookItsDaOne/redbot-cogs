@@ -191,3 +191,21 @@ class KeywordHelp(commands.Cog):
 
         await self.config.debug_channel_id.set(channel_id)
         await ctx.send(f"Debugging channel set to {channel_id}. All errors will be logged there.")
+
+    @kwhelp.command()
+    async def kwlist(self, ctx):
+        """List all available commands in this cog."""
+        commands_list = [
+            "addkeyword <keyword> <response> - Add a new keyword and response",
+            "removekeyword <keyword> - Remove a keyword",
+            "settimeout <minutes> - Set the timeout for keyword responses",
+            "addchannel <channel_id> - Add a channel to the monitored channels",
+            "removechannel <channel_id> - Remove a channel from the monitored channels",
+            "showconfig - Show the current configuration",
+            "setdebugchannel <channel_id> - Set the debug channel",
+        ]
+        await ctx.send("\n".join(commands_list))
+
+# Setup function to load the cog
+def setup(bot):
+    bot.add_cog(KeywordHelp(bot))
