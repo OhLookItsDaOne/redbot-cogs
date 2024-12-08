@@ -129,6 +129,33 @@ class KeywordHelp(commands.Cog):
         await ctx.send(commands_list)
 
     @kw.command()
+    async def conf(self, ctx):
+        """Display the current configuration of keywords and monitored channels."""
+        keywords = await self.config.keywords()
+        channel_ids = await self.config.channel_ids()
+        timeout_minutes = await self.config.timeout_minutes()
+
+        # Get the channel names for the IDs
+        channel_mentions = [self.bot.get_channel(channel_id).mention for channel_id in channel_ids]
+
+        response_message = "Current Keyword Configuration:\n"
+        response_message += f"**Timeout (Cooldown)**: {timeout_minutes} minutes\n\n"
+
+        if keywords:
+            response_message += "**Keywords:**\n"
+            for keyword, response in keywords.items():
+                response_message += f"**{keyword}**: {response}\n"
+        else:
+            response_message += "**No keywords configured.**\n"
+
+        if channel_mentions:
+            response_message += "\n**Monitored Channels:**\n" + "\n".join(channel_mentions)
+        else:
+            response_message += "\n**No channels monitored.**\n"
+
+        await ctx.send(response_message)
+
+    @kw.command()
     async def addkeyword(self, ctx, keyword: str, response: str):
         """Add a keyword-response pair."""
         if not ctx.author.guild_permissions.administrator:
