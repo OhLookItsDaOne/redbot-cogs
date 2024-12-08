@@ -173,21 +173,24 @@ class KeywordHelp(commands.Cog):
 
     @kw.command()
     async def conf(self, ctx):
-        """Display the current configuration of keywords and monitored channels."""
+        """Display the current configuration of keywords, monitored channels, and ignored roles."""
         keywords = await self.config.keywords()
         channel_ids = await self.config.channel_ids()
+        ignored_roles = await self.config.ignored_roles()  # Get ignored roles
         timeout_minutes = await self.config.timeout_minutes()
 
         # Get the channel names for the IDs
         channel_mentions = [self.bot.get_channel(channel_id).mention for channel_id in channel_ids]
+        # Get the role names for the ignored role IDs
+        ignored_role_names = [discord.utils.get(ctx.guild.roles, id=role_id).name for role_id in ignored_roles]
 
         response_message = "Current Keyword Configuration:\n"
         response_message += f"**Timeout (Cooldown)**: {timeout_minutes} minutes\n\n"
 
         if keywords:
             response_message += "**Keywords:**\n"
-            for keyword, response in keywords.items():
-                response_message += f"**{keyword}**: {response}\n"
+            for keyword in keywords.keys():  # Only display keywords, not responses
+                response_message += f"**{keyword}**\n"
         else:
             response_message += "**No keywords configured.**\n"
 
@@ -195,6 +198,11 @@ class KeywordHelp(commands.Cog):
             response_message += "\n**Monitored Channels:**\n" + "\n".join(channel_mentions)
         else:
             response_message += "\n**No channels monitored.**\n"
+
+        if ignored_role_names:
+            response_message += "\n**Ignored Roles:**\n" + "\n".join(ignored_role_names)
+        else:
+            response_message += "\n**No roles are ignored.**\n"
 
         await ctx.send(response_message)
 
