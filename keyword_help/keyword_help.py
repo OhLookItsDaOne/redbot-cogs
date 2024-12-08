@@ -43,7 +43,7 @@ class KeywordHelp(commands.Cog):
         return re.sub(r'\s+', ' ', string.lower()).strip()
 
     def match_keywords(self, content, keywords, mentioned):
-        """Match keywords with some tolerance for errors."""
+        """Match keywords with tolerance for errors."""
         matched_keywords = []
         normalized_content = self.normalize_string(content)
 
@@ -55,9 +55,16 @@ class KeywordHelp(commands.Cog):
                 matched_keywords.append((keyword, response))
             # Fuzzy match (only if mentioned)
             elif mentioned:
+                # Fuzzy matching with SequenceMatcher for slight variations
                 similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
                 if similarity > 0.6:
                     matched_keywords.append((keyword, response))
+            # Alternative: Fuzzy match even without mention but for highly relevant cases
+            else:
+                similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
+                if similarity > 0.7:  # Slightly higher threshold for non-mentioned cases
+                    matched_keywords.append((keyword, response))
+
         return matched_keywords
 
     async def user_has_ignored_role(self, user):
@@ -134,7 +141,6 @@ class KeywordHelp(commands.Cog):
                     if valid_responses:
                         response_message += "\n".join(valid_responses)
                         await message.channel.send(response_message)
-
 
     @commands.group(name="kw")
     async def kw(self, ctx):
