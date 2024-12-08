@@ -55,23 +55,21 @@ class KeywordHelp(commands.Cog):
                 await channel.send(f"Error: {error}")
         self.logger.error(error)
 
-    def is_valid_keyword(self, keyword):
-        """Check if a keyword is valid (must be wrapped in quotes if it contains spaces)."""
-        if " " in keyword and not (keyword.startswith('"') and keyword.endswith('"')):
-            return False
-        return True
+    def normalize_string(self, string):
+        """Normalize strings by removing spaces and converting to lowercase."""
+        return re.sub(r'\s+', '', string.lower())
 
-    async def get_all_keywords(self):
-        """Get all keywords and responses."""
-        keywords = await self.config.keywords()
-        return keywords
-
-    def match_keyword_with_fuzzy_search(self, content, keywords):
-        """Matches content with keywords, considering minor spelling errors and missing spaces."""
+    def match_keywords_in_sentence(self, content, keywords):
+        """Match keywords in a sentence, allowing for minor typos or missing spaces."""
         matched_keywords = []
+        normalized_content = self.normalize_string(content)
+        
         for keyword, response in keywords.items():
-            # Use difflib to compare strings for fuzzy matching
-            ratio = difflib.SequenceMatcher(None, content, keyword.lower()).ratio()
+            # Normalize the keyword as well
+            normalized_keyword = self.normalize_string(keyword)
+            
+            # Check if the normalized content contains the normalized keyword (fuzzy matching)
+            ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
             if ratio > 0.8:  # 80% similarity threshold
                 matched_keywords.append((keyword, response))
         return matched_keywords
@@ -90,8 +88,8 @@ class KeywordHelp(commands.Cog):
         content = message.content.lower()
         keywords = await self.get_all_keywords()
 
-        # Find fuzzy matched keywords with a tolerance for minor errors
-        matched_keywords = self.match_keyword_with_fuzzy_search(content, keywords)
+        # Use the match_keywords_in_sentence function for better keyword matching
+        matched_keywords = self.match_keywords_in_sentence(content, keywords)
 
         if matched_keywords:
             # Generate a unique response for each matched keyword
@@ -209,7 +207,7 @@ class KeywordHelp(commands.Cog):
         timeout_minutes = await self.config.timeout_minutes()
         keywords = await self.config.keywords()
         channel_ids = await self.config.channel_ids()
-        
+
         # Show configuration details
         config_message = (
             f"Timeout: {timeout_minutes} minutes\n"
