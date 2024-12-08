@@ -7,14 +7,15 @@ class KeywordHelp(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=123456789)  # Unique identifier for the cog
-        self.user_help_log = {}  # Track user keyword responses
+        self.user_help_log = {}  # Track user keyword responses (in memory for now)
 
         # Default configuration
         default_global = {
             "keywords": {},  # {keyword: response}
             "channel_ids": [],  # List of channel IDs to monitor
             "timeout_minutes": 10,  # Timeout duration in minutes
-            "debug_channel_id": None  # ID for the debug channel to log errors
+            "debug_channel_id": None,  # ID for the debug channel to log errors
+            "user_help_times": {}  # User help log, persist across restarts
         }
         self.config.register_global(**default_global)
 
@@ -24,14 +25,24 @@ class KeywordHelp(commands.Cog):
     def can_help_user(self, user_id, keyword, timeout_minutes):
         """Check if the user can be helped again based on the cooldown."""
         current_time = time.time()
-        last_help_time = self.user_help_log.get((user_id, keyword), 0)
+
+        # Retrieve the user's last help time from the persistent config
+        user_help_times = self.config.user_help_times()  # Dictionary of user ID => keyword => timestamp
+        last_help_time = user_help_times.get(str(user_id), {}).get(keyword, 0)
         time_diff = current_time - last_help_time
         timeout_seconds = timeout_minutes * 60
         return time_diff > timeout_seconds
 
-    def log_help(self, user_id, keyword):
+    async def log_help(self, user_id, keyword):
         """Log the time when a user was helped with a keyword."""
-        self.user_help_log[(user_id, keyword)] = time.time()
+        current_time = time.time()
+        user_help_times = await self.config.user_help_times()
+        if str(user_id) not in user_help_times:
+            user_help_times[str(user_id)] = {}
+
+        # Log the help time for this keyword
+        user_help_times[str(user_id)][keyword] = current_time
+        await self.config.user_help_times.set(user_help_times)
 
     async def log_error(self, error):
         """Logs the error to the debug channel if specified."""
@@ -77,7 +88,15 @@ class KeywordHelp(commands.Cog):
             # Generate a unique response for each matched keyword
             response_message = ""
             for keyword, response in matched_keywords:
-                response_message += f"**{keyword.capitalize()}**: {response}\n"
+                # Ensure that the user can only be helped after the timeout
+                timeout_minutes = await self.config.timeout_minutes()
+                if await self.can_help_user(message.author.id, keyword, timeout_minutes):
+                    response_message += f"**{keyword.capitalize()}**: {response}\n"
+                    await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
+                else:
+                    # Notify user about the cooldown if needed
+                    response_message += f"**{keyword.capitalize()}**: You need to wait before I can help again.\n"
+
             await message.channel.send(f"<@{message.author.id}> {response_message}")
         else:
             # Only respond if there are keywords, no generic response
@@ -189,19 +208,19 @@ class KeywordHelp(commands.Cog):
         )
         await ctx.send(config_message)
 
-    @kw.command()
+    @kw.command(name="list")
     async def kwlist(self, ctx):
-        """List all available commands in this cog."""
-        commands_list = [
-            "addkeyword <keyword> <response> - Add a new keyword and response",
-            "removekeyword <keyword> - Remove a keyword",
-            "settimeout <minutes> - Set the timeout for keyword responses",
-            "addchannel <channel_id> - Add a channel to the monitored channels",
-            "removechannel <channel_id> - Remove a channel from the monitored channels",
-            "showconfig - Show the current configuration",
-        ]
-        await ctx.send("\n".join(commands_list))
+        """List all available commands for the keyword help cog."""
+        command_list = """
+        !kw addkeyword <keyword> <response> - Add a new keyword with a response
+        !kw removekeyword <keyword> - Remove an existing keyword
+        !kw showconfig - Show current keyword help config
+        !kw settimeout <minutes> - Set the timeout between user responses
+        !kw addchannel <channel_id> - Add a channel to monitor
+        !kw removechannel <channel_id> - Remove a channel from the monitored list
+        """
+        await ctx.send(command_list)
 
-# Setup function to load the cog
+# Add cog to bot
 def setup(bot):
     bot.add_cog(KeywordHelp(bot))
