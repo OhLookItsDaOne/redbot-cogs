@@ -2,157 +2,132 @@ import discord
 import time
 import difflib
 from redbot.core import commands, Config
-import logging
 import re
+import logging
 
 class KeywordHelp(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=123456789)
-        self.user_help_log = {}
+        self.logger = logging.getLogger(__name__)
 
-        # Default configuration
+        # Default settings
         default_global = {
             "keywords": {},  # {keyword: response}
-            "channel_ids": [],
-            "timeout_minutes": 10,
-            "debug_channel_id": None,
-            "user_help_times": {},
-            "ignored_roles": []
+            "channel_ids": [],  # List of monitored channel IDs
+            "timeout_minutes": 10,  # Cooldown time
+            "debug_channel_id": None,  # Debug channel ID
+            "user_help_times": {},  # Tracks user help cooldowns
+            "ignored_roles": []  # Role IDs to ignore
         }
         self.config.register_global(**default_global)
 
-        # Set up logging
-        self.logger = logging.getLogger(__name__)
-
     async def can_help_user(self, user_id, keyword, timeout_minutes):
-        """Check if the user can be helped again based on the cooldown."""
+        """Check if user can be helped again based on cooldown."""
         current_time = time.time()
-
-        # Retrieve the user's last help time
         user_help_times = await self.config.user_help_times()
         last_help_time = user_help_times.get(str(user_id), {}).get(keyword, 0)
-        time_diff = current_time - last_help_time
-        timeout_seconds = timeout_minutes * 60
-        return time_diff > timeout_seconds
+        return (current_time - last_help_time) > (timeout_minutes * 60)
 
     async def log_help(self, user_id, keyword):
-        """Log the time when a user was helped with a keyword."""
+        """Log the time when a user was helped."""
         current_time = time.time()
         user_help_times = await self.config.user_help_times()
         if str(user_id) not in user_help_times:
             user_help_times[str(user_id)] = {}
-
-        # Log the help time for this keyword
         user_help_times[str(user_id)][keyword] = current_time
         await self.config.user_help_times.set(user_help_times)
 
-    async def normalize_string(self, string):
-        """Normalize strings by removing excessive spaces and converting to lowercase."""
+    def normalize_string(self, string):
+        """Normalize a string by removing extra spaces and converting to lowercase."""
         return re.sub(r'\s+', ' ', string.lower()).strip()
 
-    def match_keywords_in_sentence(self, content, keywords):
-        """Match keywords in a sentence, allowing for minor typos or missing spaces."""
+    def match_keywords(self, content, keywords, mentioned):
+        """Match keywords with some tolerance for errors."""
         matched_keywords = []
         normalized_content = self.normalize_string(content)
 
         for keyword, response in keywords.items():
             normalized_keyword = self.normalize_string(keyword)
 
-            # Check for exact match first
+            # Exact match
             if normalized_keyword in normalized_content:
                 matched_keywords.append((keyword, response))
-                continue
-
-            # Fuzzy matching if exact match fails
-            ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-            if ratio > 0.5:  # 50% similarity threshold
-                matched_keywords.append((keyword, response))
-
+            # Fuzzy match (only if mentioned)
+            elif mentioned:
+                similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
+                if similarity > 0.6:
+                    matched_keywords.append((keyword, response))
         return matched_keywords
 
     async def user_has_ignored_role(self, user):
-        """Check if the user has any ignored roles."""
+        """Check if user has an ignored role."""
         ignored_roles = await self.config.ignored_roles()
-        user_roles = [role.id for role in user.roles]
-        return any(role in ignored_roles for role in user_roles)
+        return any(role.id in ignored_roles for role in user.roles)
+
+    async def log_error(self, error):
+        """Log errors to a debug channel."""
+        debug_channel_id = await self.config.debug_channel_id()
+        if debug_channel_id:
+            channel = self.bot.get_channel(debug_channel_id)
+            if channel:
+                await channel.send(f"Error: {error}")
+        self.logger.error(error)
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        """Listen for messages and respond to keywords."""
-        if message.author.bot:
-            return  # Ignore bot messages
-
-        # Check if the message is in a monitored channel
-        channel_ids = await self.config.channel_ids()
-        if message.channel.id not in channel_ids:
+        """Listen for keywords and respond appropriately."""
+        if message.author.bot or message.channel.id not in await self.config.channel_ids():
             return
 
-        # If the bot is mentioned, skip timeout checks
-        mentioned = any(mention.id == self.bot.user.id for mention in message.mentions)
-
-        content = message.content.lower()
-        keywords = await self.config.keywords()  # Fetch keywords directly from config
-
-        # Check if the user has an ignored role
+        mentioned = self.bot.user in message.mentions
         if await self.user_has_ignored_role(message.author):
-            return  # Do not respond to users with ignored roles
+            return
 
-        # Use the match_keywords_in_sentence function for better keyword matching
-        matched_keywords = self.match_keywords_in_sentence(content, keywords)
+        keywords = await self.config.keywords()
+        matched_keywords = self.match_keywords(message.content, keywords, mentioned)
 
-        # If no valid keyword matched, do nothing
         if not matched_keywords:
             return
 
-        # Prepare to send a response if there are matched keywords
         response_message = f"<@{message.author.id}> I found the following keywords:\n"
+        timeout_minutes = await self.config.timeout_minutes()
+        valid_responses = []
+
         for keyword, response in matched_keywords:
-            timeout_minutes = await self.config.timeout_minutes()
-
-            # Check if the user can be helped or if the bot is mentioned
             if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
-                response_message += f"**{keyword.capitalize()}**: {response}\n"
-                await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
-            else:
-                # Skip adding this keyword to the response if it's on cooldown
-                continue
+                valid_responses.append(f"**{keyword.capitalize()}**: {response}")
+                await self.log_help(message.author.id, keyword)
 
-        # Check if the response message contains valid keywords (not just the initial message)
-        if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
-            # Send response only if valid keywords are found (and user is not on cooldown)
+        if valid_responses:
+            response_message += "\n".join(valid_responses)
             await message.channel.send(response_message)
-        else:
-            # If no valid keywords, do nothing (no response)
-            return
 
     @commands.group(name="kw")
     async def kw(self, ctx):
-        """Base command for managing keywords and monitored channels."""
+        """Manage keywords and settings."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
     @kw.command()
     async def addkeyword(self, ctx, keyword: str, response: str):
-        """Add a new keyword and response pair."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to add keywords.")
+        """Add a keyword-response pair."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to add keywords.")
             return
 
-        # Retrieve current keywords from the config
         keywords = await self.config.keywords()
         keywords[keyword] = response
         await self.config.keywords.set(keywords)
-        await ctx.send(f"Added new keyword: `{keyword}` with response: `{response}`")
+        await ctx.send(f"Added keyword: `{keyword}` with response: `{response}`")
 
     @kw.command()
     async def removekeyword(self, ctx, keyword: str):
-        """Remove a keyword from the configuration."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to remove keywords.")
+        """Remove a keyword."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to remove keywords.")
             return
 
-        # Retrieve current keywords from the config
         keywords = await self.config.keywords()
         if keyword in keywords:
             del keywords[keyword]
@@ -162,44 +137,76 @@ class KeywordHelp(commands.Cog):
             await ctx.send(f"Keyword `{keyword}` not found.")
 
     @kw.command()
-    async def settimeout(self, ctx, timeout_minutes: int):
-        """Set the timeout (in minutes) between user help responses."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to set the timeout.")
+    async def settimeout(self, ctx, minutes: int):
+        """Set the cooldown duration in minutes."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to set the timeout.")
             return
 
-        await self.config.timeout_minutes.set(timeout_minutes)
-        await ctx.send(f"Timeout set to {timeout_minutes} minutes.")
+        await self.config.timeout_minutes.set(minutes)
+        await ctx.send(f"Timeout set to {minutes} minutes.")
 
     @kw.command()
-    async def addchannel(self, ctx, channel_id: int):
+    async def addchannel(self, ctx, channel: discord.TextChannel):
         """Add a channel to the monitored list."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to add channels.")
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to manage monitored channels.")
             return
 
         channel_ids = await self.config.channel_ids()
-        if channel_id not in channel_ids:
-            channel_ids.append(channel_id)
+        if channel.id not in channel_ids:
+            channel_ids.append(channel.id)
             await self.config.channel_ids.set(channel_ids)
-            await ctx.send(f"Added channel <#{channel_id}> to the monitored channels.")
-        else:
-            await ctx.send(f"Channel <#{channel_id}> is already in the monitored list.")
+            await ctx.send(f"Added channel {channel.mention} to the monitored list.")
 
     @kw.command()
-    async def removechannel(self, ctx, channel_id: int):
+    async def removechannel(self, ctx, channel: discord.TextChannel):
         """Remove a channel from the monitored list."""
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("You do not have permission to remove channels.")
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to manage monitored channels.")
             return
 
         channel_ids = await self.config.channel_ids()
-        if channel_id in channel_ids:
-            channel_ids.remove(channel_id)
+        if channel.id in channel_ids:
+            channel_ids.remove(channel.id)
             await self.config.channel_ids.set(channel_ids)
-            await ctx.send(f"Removed channel <#{channel_id}> from the monitored list.")
-        else:
-            await ctx.send(f"Channel <#{channel_id}> not found in the monitored list.")
+            await ctx.send(f"Removed channel {channel.mention} from the monitored list.")
+
+    @kw.command()
+    async def setdebugchannel(self, ctx, channel: discord.TextChannel):
+        """Set the debug log channel."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to set the debug channel.")
+            return
+
+        await self.config.debug_channel_id.set(channel.id)
+        await ctx.send(f"Set debug channel to {channel.mention}.")
+
+    @kw.command()
+    async def addignoredrole(self, ctx, role: discord.Role):
+        """Add a role to the ignored list."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to manage ignored roles.")
+            return
+
+        ignored_roles = await self.config.ignored_roles()
+        if role.id not in ignored_roles:
+            ignored_roles.append(role.id)
+            await self.config.ignored_roles.set(ignored_roles)
+            await ctx.send(f"Added role {role.name} to ignored list.")
+
+    @kw.command()
+    async def removeignoredrole(self, ctx, role: discord.Role):
+        """Remove a role from the ignored list."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to manage ignored roles.")
+            return
+
+        ignored_roles = await self.config.ignored_roles()
+        if role.id in ignored_roles:
+            ignored_roles.remove(role.id)
+            await self.config.ignored_roles.set(ignored_roles)
+            await ctx.send(f"Removed role {role.name} from ignored list.")
 
 def setup(bot):
     bot.add_cog(KeywordHelp(bot))
