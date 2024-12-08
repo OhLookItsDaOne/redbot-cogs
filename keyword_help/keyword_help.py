@@ -103,6 +103,41 @@ class KeywordHelp(commands.Cog):
             response_message += "\n".join(valid_responses)
             await message.channel.send(response_message)
 
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread):
+        """Handles new thread creation and scans the first 3 messages for keywords."""
+        if not thread.first_message:
+            return
+        
+        # Get the creator of the thread
+        creator = thread.owner
+
+        # Get the first 3 messages
+        messages = [thread.first_message]
+        async for message in thread.history(limit=2):
+            messages.append(message)
+
+        # Check if we should skip the cooldown check for these first messages
+        timeout_minutes = await self.config.timeout_minutes()
+
+        keywords = await self.config.keywords()
+        for message in messages:
+            if message.author == creator:
+                mentioned = self.bot.user in message.mentions
+                matched_keywords = self.match_keywords(message.content, keywords, mentioned)
+
+                if matched_keywords:
+                    response_message = f"<@{message.author.id}> I found the following keywords in your thread:\n"
+                    valid_responses = []
+
+                    for keyword, response in matched_keywords:
+                        valid_responses.append(f"**{keyword.capitalize()}**: {response}")
+                        await self.log_help(message.author.id, keyword)
+
+                    if valid_responses:
+                        response_message += "\n".join(valid_responses)
+                        await message.channel.send(response_message)
+
     @commands.group(name="kw")
     async def kw(self, ctx):
         """Manage keywords and settings."""
