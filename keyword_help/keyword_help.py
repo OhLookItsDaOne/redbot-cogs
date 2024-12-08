@@ -126,11 +126,11 @@ class KeywordHelp(commands.Cog):
                 if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
                     response_message += f"**{keyword.capitalize()}**: {response}\n"
                     await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
-                # If the user is on cooldown and the bot is not mentioned, skip responding
+                # If the user is on cooldown and the bot is not mentioned, do nothing (no response)
                 else:
-                    continue  # Skip sending any message for this keyword if it's on cooldown
+                    continue  # Do not send any message for this keyword if it's on cooldown
 
-            # Only send response if there are matched keywords and it's not a cooldown or empty response
+            # Only send response if there are matched keywords and it's not empty
             if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
                 await message.channel.send(response_message)
         else:
