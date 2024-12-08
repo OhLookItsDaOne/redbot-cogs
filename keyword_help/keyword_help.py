@@ -56,8 +56,8 @@ class KeywordHelp(commands.Cog):
         self.logger.error(error)
 
     def normalize_string(self, string):
-        """Normalize strings by removing spaces and converting to lowercase."""
-        return re.sub(r'\s+', '', string.lower())
+        """Normalize strings by removing excessive spaces and converting to lowercase."""
+        return re.sub(r'\s+', ' ', string.lower()).strip()
 
     def match_keywords_in_sentence(self, content, keywords):
         """Match keywords in a sentence, allowing for minor typos or missing spaces."""
