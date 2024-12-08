@@ -2,6 +2,7 @@ import discord
 import time
 from redbot.core import commands, Config
 import logging
+import re
 
 class KeywordHelp(commands.Cog):
     def __init__(self, bot):
@@ -22,12 +23,12 @@ class KeywordHelp(commands.Cog):
         # Set up logging
         self.logger = logging.getLogger(__name__)
 
-    def can_help_user(self, user_id, keyword, timeout_minutes):
+    async def can_help_user(self, user_id, keyword, timeout_minutes):
         """Check if the user can be helped again based on the cooldown."""
         current_time = time.time()
 
         # Retrieve the user's last help time from the persistent config
-        user_help_times = self.config.user_help_times()  # Dictionary of user ID => keyword => timestamp
+        user_help_times = await self.config.user_help_times()  # Dictionary of user ID => keyword => timestamp
         last_help_time = user_help_times.get(str(user_id), {}).get(keyword, 0)
         time_diff = current_time - last_help_time
         timeout_seconds = timeout_minutes * 60
@@ -81,7 +82,9 @@ class KeywordHelp(commands.Cog):
         matched_keywords = []
         # Check for exact matches (multi-word should come first)
         for keyword, response in keywords.items():
-            if keyword in content:
+            # Match keywords with boundaries to avoid partial matches
+            keyword_pattern = r'\b' + re.escape(keyword.lower()) + r'\b'
+            if re.search(keyword_pattern, content):
                 matched_keywords.append((keyword, response))
 
         if matched_keywords:
