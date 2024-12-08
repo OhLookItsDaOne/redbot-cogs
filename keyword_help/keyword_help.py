@@ -64,14 +64,25 @@ class KeywordHelp(commands.Cog):
         matched_keywords = []
         normalized_content = self.normalize_string(content)
         
+        print(f"Normalized content: {normalized_content}")  # Debug: Check normalized content
+        
         for keyword, response in keywords.items():
-            # Normalize the keyword as well
             normalized_keyword = self.normalize_string(keyword)
             
-            # Check if the normalized content contains the normalized keyword (fuzzy matching)
+            # Debugging logs for keyword normalization
+            print(f"Checking keyword: '{keyword}' -> '{normalized_keyword}'")  # Debug: Checking normalized keyword
+
+            # Check for exact match first
+            if normalized_keyword in normalized_content:
+                matched_keywords.append((keyword, response))
+                continue
+
+            # Fuzzy matching for more tolerance (if exact match fails)
             ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
+            print(f"Fuzzy match ratio: {ratio}")  # Debug: Check fuzzy match ratio
             if ratio > 0.8:  # 80% similarity threshold
                 matched_keywords.append((keyword, response))
+
         return matched_keywords
 
     @commands.Cog.listener()
@@ -108,7 +119,7 @@ class KeywordHelp(commands.Cog):
                 await message.channel.send(f"<@{message.author.id}> {response_message}")
         else:
             # No valid keyword matched, do nothing
-            pass  # Nothing happens here unless a keyword is found.
+            print(f"No keywords matched for message: {message.content}")  # Debug: No matches case
 
     @commands.group(name="kw")
     async def kw(self, ctx):
