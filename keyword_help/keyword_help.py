@@ -57,16 +57,15 @@ class KeywordHelp(commands.Cog):
             # Exact match
             if normalized_keyword in normalized_content:
                 matched_keywords.append((keyword, response))
+            # Alternative: Handle patterns like "3. 16 GB RAM"
+            elif re.search(r'\d+\.\s?', content):
+                cleaned_content = re.sub(r'\d+\.\s?', '', content)
+                if keyword.lower() in cleaned_content.lower():
+                    matched_keywords.append((keyword, response))
             # Fuzzy match (only if mentioned)
             elif mentioned:
-                # Fuzzy matching with SequenceMatcher for slight variations
                 similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                if similarity > 0.4:  # Further lowered the threshold for fuzzy matching
-                    matched_keywords.append((keyword, response))
-            # Alternative: Fuzzy match even without mention but for highly relevant cases
-            else:
-                similarity = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-                if similarity > 0.4:  # Further lowered threshold for non-mentioned cases
+                if similarity > 0.4:
                     matched_keywords.append((keyword, response))
 
         return matched_keywords
