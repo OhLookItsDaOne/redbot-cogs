@@ -60,7 +60,7 @@ class KeywordHelp(commands.Cog):
         """Normalize strings by removing excessive spaces and converting to lowercase."""
         return re.sub(r'\s+', ' ', string.lower()).strip()
 
-    def match_keywords_in_sentence(self, content, keywords):
+    def match_keywords_in_sentence(self, content, keywords, mentioned):
         """Match keywords in a sentence, allowing for minor typos or missing spaces."""
         matched_keywords = []
         normalized_content = self.normalize_string(content)
@@ -78,11 +78,12 @@ class KeywordHelp(commands.Cog):
                 matched_keywords.append((keyword, response))
                 continue
 
-            # Fuzzy matching for more tolerance (if exact match fails)
-            ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
-            print(f"Fuzzy match ratio: {ratio}")  # Debug: Check fuzzy match ratio
-            if ratio > 0.8:  # 80% similarity threshold
-                matched_keywords.append((keyword, response))
+            # Fuzzy matching for more tolerance (if exact match fails) - only if mentioned
+            if mentioned:
+                ratio = difflib.SequenceMatcher(None, normalized_content, normalized_keyword).ratio()
+                print(f"Fuzzy match ratio: {ratio}")  # Debug: Check fuzzy match ratio
+                if ratio > 0.8:  # 80% similarity threshold
+                    matched_keywords.append((keyword, response))
 
         return matched_keywords
 
@@ -114,10 +115,9 @@ class KeywordHelp(commands.Cog):
             return  # Do not respond to users with ignored roles
 
         # Use the match_keywords_in_sentence function for better keyword matching
-        matched_keywords = self.match_keywords_in_sentence(content, keywords)
+        matched_keywords = self.match_keywords_in_sentence(content, keywords, mentioned)
 
         if matched_keywords:
-            # Prepare response with found keywords
             response_message = f"<@{message.author.id}> I found the following keywords:\n"
             for keyword, response in matched_keywords:
                 # Ensure that the user can only be helped after the timeout, unless the bot is mentioned
@@ -129,10 +129,15 @@ class KeywordHelp(commands.Cog):
                 else:
                     continue  # Skip sending any message for this keyword if it's on cooldown
 
-            if response_message:  # Send only if there is a valid response
+            # Only send response if there are matched keywords
+            if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
                 await message.channel.send(response_message)
         else:
-            # No valid keyword matched, do nothing
+            # No valid keyword matched, do nothing (only reply if timeout not exceeded and mentioned)
+            timeout_minutes = await self.config.timeout_minutes()
+            if mentioned:
+                await message.channel.send(f"<@{message.author.id}> No matching keywords found.")
+            # If no mention and no match, don't reply
             print(f"No keywords matched for message: {message.content}")  # Debug: No matches case
 
     @commands.group(name="kw")
