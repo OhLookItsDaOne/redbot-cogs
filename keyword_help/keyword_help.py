@@ -117,28 +117,30 @@ class KeywordHelp(commands.Cog):
         # Use the match_keywords_in_sentence function for better keyword matching
         matched_keywords = self.match_keywords_in_sentence(content, keywords, mentioned)
 
-        # Only send response if there are matched keywords
-        if matched_keywords:
-            response_message = f"<@{message.author.id}> I found the following keywords:\n"
-            for keyword, response in matched_keywords:
-                # Ensure that the user can only be helped after the timeout, unless the bot is mentioned
-                timeout_minutes = await self.config.timeout_minutes()
-                if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
-                    response_message += f"**{keyword.capitalize()}**: {response}\n"
-                    await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
-                # If the user is on cooldown and the bot is not mentioned, do nothing (no response)
-                else:
-                    continue  # Do not send any message for this keyword if it's on cooldown
+        # If no valid keyword matched and no mention, do nothing
+        if not matched_keywords:
+            # If no keywords matched and the user is not mentioned, do nothing
+            return
 
-            # Only send response if there are matched keywords and it's not empty
-            if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
-                await message.channel.send(response_message)
-        else:
-            # If no valid keyword matched and no mention, do nothing
+        # Prepare to send a response if there are matched keywords
+        response_message = f"<@{message.author.id}> I found the following keywords:\n"
+        for keyword, response in matched_keywords:
             timeout_minutes = await self.config.timeout_minutes()
-            if mentioned:
-                await message.channel.send(f"<@{message.author.id}> No matching keywords found.")
-            print(f"No keywords matched for message: {message.content}")  # Debug: No matches case
+
+            # Check if the user can be helped or if the bot is mentioned
+            if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
+                response_message += f"**{keyword.capitalize()}**: {response}\n"
+                await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
+            else:
+                # Skip adding this keyword to the response if it's on cooldown
+                continue
+
+        # If there are valid matched keywords (and user is not on cooldown), send the message
+        if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
+            await message.channel.send(response_message)
+        # If no response is built, don't send anything
+        else:
+            return
 
     @commands.group(name="kw")
     async def kw(self, ctx):
