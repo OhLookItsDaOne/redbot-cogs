@@ -42,6 +42,17 @@ class KeywordHelp(commands.Cog):
                 await channel.send(f"Error: {error}")
         self.logger.error(error)
 
+    def is_valid_keyword(self, keyword):
+        """Check if a keyword is valid (must be wrapped in quotes if it contains spaces)."""
+        if " " in keyword and not (keyword.startswith('"') and keyword.endswith('"')):
+            return False
+        return True
+
+    async def get_all_keywords(self):
+        """Get all keywords and responses."""
+        keywords = await self.config.keywords()
+        return keywords
+
     @commands.Cog.listener()
     async def on_message(self, message):
         """Listen for messages and respond to keywords."""
@@ -54,43 +65,27 @@ class KeywordHelp(commands.Cog):
             return
 
         content = message.content.lower()
-        keywords = await self.config.keywords()
+        keywords = await self.get_all_keywords()
 
+        matched_keywords = []
         for keyword, response in keywords.items():
-            if self.bot.user.mentioned_in(message) and keyword in content:
-                await message.channel.send(f"<@{message.author.id}> {response}")
-                break
+            # Check for exact matches (multi-word should come first)
+            if keyword in content:
+                matched_keywords.append((keyword, response))
 
-            if isinstance(message.channel, discord.TextChannel) and keyword in content:
+            elif isinstance(message.channel, discord.TextChannel):
+                # Check if the user is allowed to be helped again
                 user_id = message.author.id
                 timeout_minutes = await self.config.timeout_minutes()
                 if self.can_help_user(user_id, keyword, timeout_minutes):
-                    await message.channel.send(f"<@{message.author.id}> {response}")
+                    matched_keywords.append((keyword, response))
                     self.log_help(user_id, keyword)
-                break
 
-    @commands.Cog.listener()
-    async def on_thread_create(self, thread):
-        """Respond when a new thread is created in a monitored channel."""
-        try:
-            # Only respond if the thread is in a monitored channel
-            channel_ids = await self.config.channel_ids()
-            if thread.parent.id not in channel_ids:
-                return
-
-            # Fetch the first message of the thread
-            first_message = await thread.fetch_message(thread.id)
-            content = first_message.content.lower()
-            keywords = await self.config.keywords()
-
-            # Check for keywords in the thread's first message
-            for keyword, response in keywords.items():
-                if keyword in content:
-                    await thread.send(f"<@{first_message.author.id}> {response}")
-                    self.log_help(first_message.author.id, keyword)
-                    break
-        except Exception as e:
-            await self.log_error(f"Error in on_thread_create: {e}")
+        if matched_keywords:
+            for keyword, response in matched_keywords:
+                await message.channel.send(f"<@{message.author.id}> {response}")
+        else:
+            await message.channel.send("Sorry, I couldn't find any relevant responses.")
 
     @commands.group(name="kw")
     async def kw(self, ctx):
@@ -105,11 +100,23 @@ class KeywordHelp(commands.Cog):
             await ctx.send("You do not have permission to add keywords.")
             return
 
+        # Validate the keyword format (check if multi-word keywords are enclosed in quotes)
+        if " " in keyword and not (keyword.startswith('"') and keyword.endswith('"')):
+            await ctx.send(f"Invalid keyword format. Please wrap multi-word keywords in quotes like this: \"black square\".")
+            return
+
         # Retrieve current keywords from the config
         keywords = await self.config.keywords()
-        keywords[keyword] = response
-        await self.config.keywords.set(keywords)
-        await ctx.send(f"Added new keyword: `{keyword}` with response: `{response}`")
+        if keyword in keywords:
+            # Update the existing keyword
+            keywords[keyword] = response
+            await self.config.keywords.set(keywords)
+            await ctx.send(f"Updated keyword: `{keyword}` with new response: `{response}`")
+        else:
+            # Add new keyword
+            keywords[keyword] = response
+            await self.config.keywords.set(keywords)
+            await ctx.send(f"Added new keyword: `{keyword}` with response: `{response}`")
 
     @kw.command()
     async def removekeyword(self, ctx, keyword: str):
