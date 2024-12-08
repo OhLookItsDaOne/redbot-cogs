@@ -210,6 +210,16 @@ class KeywordHelp(commands.Cog):
         await ctx.send(response_message)
 
     @kw.command()
+    async def cleartimeouts(self, ctx):
+        """Reset all user timeouts."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("You need to be an admin to clear all timeouts.")
+            return
+
+        await self.config.user_help_times.set({})
+        await ctx.send("All user timeouts have been reset.")
+
+    @kw.command()
     async def addkeyword(self, ctx, keyword: str, response: str):
         """Add a keyword-response pair."""
         if not ctx.author.guild_permissions.administrator:
