@@ -131,16 +131,18 @@ class KeywordHelp(commands.Cog):
             if mentioned or await self.can_help_user(message.author.id, keyword, timeout_minutes):
                 response_message += f"**{keyword.capitalize()}**: {response}\n"
                 await self.log_help(message.author.id, keyword)  # Log the help time for this keyword
+            # If on cooldown, do not add the keyword to the response
             else:
-                # Skip adding this keyword to the response if it's on cooldown
                 continue
 
-        # If there are valid matched keywords (and user is not on cooldown), send the message
+        # Check if the response message contains valid keywords (not just the initial message)
         if response_message.strip() != f"<@{message.author.id}> I found the following keywords:\n":
+            # Send response only if valid keywords are found (and user is not on cooldown)
             await message.channel.send(response_message)
-        # If no response is built, don't send anything
+        # If no valid keywords, do nothing (no response)
         else:
             return
+
 
     @commands.group(name="kw")
     async def kw(self, ctx):
