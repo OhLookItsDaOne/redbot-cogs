@@ -1,5 +1,6 @@
 import logging
 import discord  # Import discord module
+import asyncio  # Import asyncio for delay
 from redbot.core import commands
 
 # Configure logging
@@ -10,21 +11,40 @@ class ForumPostNotifier(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.thread_id = None  # Store the thread ID for easy configuration
+
+    # Command to set the thread ID
+    @commands.command()
+    async def set_thread_id(self, ctx, thread_id: int):
+        """Sets the thread ID dynamically via command."""
+        self.thread_id = thread_id
+        await ctx.send(f"Thread ID has been set to: {self.thread_id}")
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread):
         """Listener for when a new thread is created in the forum."""
-        # Check if the thread is part of the specific forum
-        if thread.parent_id == 1172448935772704788:  # Forum ID
+        # Ensure a thread ID has been set
+        if self.thread_id is None:
+            logging.error("No thread ID set. Please set the thread ID using the command.")
+            return
+        
+        # Check if the thread matches the configured ID
+        if thread.parent_id == self.thread_id:
             logging.info(f"New thread created: {thread.name} (ID: {thread.id})")
-            await thread.send(self.create_troubleshooting_message())
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        """Listener for when a new message is posted in the thread."""
-        # This is commented out to reduce log output
-        # if isinstance(message.channel, discord.Thread) and message.channel.parent_id == 1172448935772704788:
-        #     logging.info(f"Message detected in thread: {message.content} from {message.author}")
+            
+            # Wait a bit to ensure thread and any attachments (like images) are fully loaded
+            await asyncio.sleep(2)  # Increased to 2 seconds to handle images
+            
+            # Fetch the thread again to ensure it's fully initialized
+            thread = await self.bot.get_channel(thread.id)
+            
+            # Check if the thread is valid
+            if isinstance(thread, discord.Thread):
+                logging.info(f"Thread {thread.name} is valid and ready for interaction.")
+                await thread.send(self.create_troubleshooting_message())
+            else:
+                logging.error(f"Thread {thread.id} is not valid or accessible.")
+                return
 
     def create_troubleshooting_message(self):
         """Creates the troubleshooting message."""
