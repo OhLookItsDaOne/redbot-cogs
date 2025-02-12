@@ -270,7 +270,7 @@ class AIHelp(commands.Cog):
         )
         await progress_message.edit(content=info_message + response)
 
-    # ─── CONFIGURATION COMMANDS (Owner-only / Admin) ─────────────────────────────
+    # ─── CONFIGURATION COMMANDS (Owner/Admin) ─────────────────────────────────────
     @commands.group()
     async def aihelpconfig(self, ctx):
         """
@@ -296,7 +296,7 @@ class AIHelp(commands.Cog):
         """
         Downloads a source file from a URL or uses an attached file from your message and saves it in the specified category.
         If no category is provided, it defaults to "general". Optionally, add comma‑separated tags.
-        
+
         **Examples:**
           • URL source:
              `!aihelpconfig addsource https://github.com/user/repo/blob/branch/file.txt Performance performance,guide`
@@ -338,6 +338,54 @@ class AIHelp(commands.Cog):
         self.save_metadata()
         self.load_all_sources()
         await ctx.send(f"Source added in category '{category}' as file '{filename}' with tags: {tags_list}")
+
+    async def download_source(self, url: str) -> str:
+        """
+        Downloads a file from the given URL and extracts its text content.
+        Supported file types: PDF, TXT, JSON, MD, and GitHub links.
+        """
+        if "github.com" in url and not url.startswith("https://raw.githubusercontent.com/"):
+            raw_url = await self.convert_github_url(url)
+            if raw_url:
+                url = raw_url
+            else:
+                raise Exception("Unknown GitHub URL format.")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise Exception(f"Error downloading file (Status: {response.status})")
+                data = await response.read()
+        if url.lower().endswith(".pdf"):
+            try:
+                reader = PdfReader(io.BytesIO(data))
+                text = ""
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                return text
+            except Exception as e:
+                raise Exception(f"Error processing PDF: {e}")
+        elif url.lower().endswith(".txt") or url.lower().endswith(".json") or url.lower().endswith(".md"):
+            try:
+                return data.decode("utf-8")
+            except Exception as e:
+                raise Exception(f"Error decoding text file: {e}")
+        else:
+            raise Exception("Unsupported file type. Only GitHub links, PDF, TXT, JSON and MD are supported.")
+
+    async def convert_github_url(self, url: str) -> str:
+        """
+        Converts a typical GitHub file URL to its corresponding raw URL.
+        """
+        pattern = r"https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)"
+        match = re.match(pattern, url)
+        if match:
+            user, repo, branch, path = match.groups()
+            raw_url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
+            return raw_url
+        else:
+            return None
 
     @aihelpconfig.command(name="listsources")
     async def aihelpconfig_listsources(self, ctx, category: str = None):
