@@ -1,4 +1,5 @@
-from .ai_autosup import AIHelp
+from .aihelp import AIHelp
 
 async def setup(bot):
     await bot.add_cog(AIHelp(bot))
+
