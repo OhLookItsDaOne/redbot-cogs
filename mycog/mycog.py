@@ -21,12 +21,20 @@ class ForumPostNotifier(commands.Cog):
         self.parent_channel_id = channel.id
         await ctx.send(f"Parent channel ID has been set to: {channel.mention}")
 
-    # Command to display the currently tracked thread ID
+    # Command to display the currently tracked parent channel
     @commands.command()
     async def getthreadid(self, ctx):
         """Displays the currently tracked parent channel ID."""
         if self.parent_channel_id is not None:
-            channel = self.bot.get_channel(self.parent_channel_id)
+            # Versuche zuerst, den Kanal über den Guild-Cache zu finden
+            channel = ctx.guild.get_channel(self.parent_channel_id)
+            # Falls nicht gefunden, hole den Kanal direkt von Discord
+            if channel is None:
+                try:
+                    channel = await ctx.guild.fetch_channel(self.parent_channel_id)
+                except Exception as e:
+                    logging.error(f"Error fetching channel: {e}")
+                    channel = None
             if channel:
                 await ctx.send(f"Currently tracked parent channel: {channel.mention}")
             else:
