@@ -14,22 +14,32 @@ class ForumPostNotifier(commands.Cog):
         self.parent_channel_id = None  # Store the parent channel ID
         self.message_content = "Default troubleshooting message."  # Default message
 
-    # Command to set the parent channel ID
+    # Command to set the parent channel ID (using an integer)
     @commands.command()
-    async def setthreadid(self, ctx, channel: discord.TextChannel):
+    async def setthreadid(self, ctx, channel_id: int):
         """Sets the parent channel ID dynamically via command."""
-        self.parent_channel_id = channel.id
-        await ctx.send(f"Parent channel ID has been set to: {channel.mention}")
+        self.parent_channel_id = channel_id
+        # Versuch, den Kanal über den Cache zu holen
+        channel = ctx.guild.get_channel(channel_id)
+        # Falls nicht im Cache, versuche den Kanal direkt abzurufen
+        if not channel:
+            try:
+                channel = await ctx.guild.fetch_channel(channel_id)
+            except Exception as e:
+                logging.error(f"Error fetching channel: {e}")
+                channel = None
+        if channel:
+            await ctx.send(f"Parent channel ID has been set to: {channel.mention}")
+        else:
+            await ctx.send(f"Parent channel ID has been set to: {channel_id} (channel not found)")
 
     # Command to display the currently tracked parent channel
     @commands.command()
     async def getthreadid(self, ctx):
         """Displays the currently tracked parent channel ID."""
         if self.parent_channel_id is not None:
-            # Versuche zuerst, den Kanal über den Guild-Cache zu finden
             channel = ctx.guild.get_channel(self.parent_channel_id)
-            # Falls nicht gefunden, hole den Kanal direkt von Discord
-            if channel is None:
+            if not channel:
                 try:
                     channel = await ctx.guild.fetch_channel(self.parent_channel_id)
                 except Exception as e:
@@ -42,7 +52,7 @@ class ForumPostNotifier(commands.Cog):
         else:
             await ctx.send("No parent channel ID has been set.")
 
-    # Command to set the message content
+    # Command to set the troubleshooting message (Admin only)
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmessage(self, ctx, *, message: str):
@@ -50,7 +60,7 @@ class ForumPostNotifier(commands.Cog):
         self.message_content = message
         await ctx.send("Troubleshooting message has been updated.")
 
-    # Command to get the current message
+    # Command to get the current troubleshooting message
     @commands.command()
     async def getmessage(self, ctx):
         """Displays the currently set troubleshooting message."""
@@ -66,10 +76,8 @@ class ForumPostNotifier(commands.Cog):
         # Check if the thread belongs to the configured parent channel
         if thread.parent_id == self.parent_channel_id:
             logging.info(f"New thread created: {thread.name} (ID: {thread.id})")
-
             # Wait a bit to ensure the thread is fully initialized
-            await asyncio.sleep(3)  # Slightly longer delay to account for potential network lag
-
+            await asyncio.sleep(3)
             # Send the troubleshooting message
             try:
                 await thread.send(self.message_content)
