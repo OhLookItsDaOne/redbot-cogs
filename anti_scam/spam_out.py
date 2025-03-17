@@ -92,6 +92,18 @@ class ChannelGuard(commands.Cog):
                 except Exception as e:
                     logging.error(f"Error iterating messages in channel #{channel.name}: {e}")
 
+            # Log the timeout in the kick channel
+            try:
+                kick_channel_id = await self.config.kick_channel_id()
+                if kick_channel_id:
+                    kick_channel = self.bot.get_channel(kick_channel_id)
+                    if kick_channel:
+                        await kick_channel.send(
+                            f"{member.mention} has been timed out for 10 minutes due to their first offense in the guard channel."
+                        )
+            except Exception as e:
+                logging.error(f"Error sending timeout notification: {e}")
+
         else:
             # Second offense: kick the user and send a message to the kick channel.
             try:
