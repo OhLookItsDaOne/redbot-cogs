@@ -17,24 +17,19 @@ class ForumPostNotifier(commands.Cog):
     # Command to set the parent forum channel
     @commands.command()
     @commands.admin_or_permissions(administrator=True)
-    async def setthreadid(self, ctx, channel: discord.ForumChannel = None, channel_id: int = None):
+    async def setthreadid(self, ctx, channel: discord.TextChannel = None):
         """Sets the parent forum channel dynamically via command. (Admin only)"""
-        if channel:
-            parent_forum_id = channel.id
-        elif channel_id:
-            resolved_channel = ctx.guild.get_channel(channel_id)
-            if isinstance(resolved_channel, discord.ForumChannel):
-                parent_forum_id = channel_id
-            else:
-                await ctx.send("❌ The provided channel ID is not a valid forum channel.")
-                return
-        else:
-            await ctx.send("❌ Please mention a valid forum channel or provide a valid channel ID.")
+        if channel is None:
+            await ctx.send("❌ Please mention a valid forum channel.")
+            return
+
+        if not isinstance(channel, discord.ForumChannel):
+            await ctx.send("❌ The provided channel is not a forum channel.")
             return
 
         try:
-            await self.config.parent_forum_id.set(parent_forum_id)
-            await ctx.send(f"✅ Parent forum channel has been set to: <#{parent_forum_id}>")
+            await self.config.parent_forum_id.set(channel.id)
+            await ctx.send(f"✅ Parent forum channel has been set to: {channel.mention}")
         except Exception as e:
             logging.error(f"Error setting parent forum channel: {e}")
             await ctx.send("❌ Failed to set parent forum channel.")
