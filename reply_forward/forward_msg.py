@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 class UnsupportedMessageForwarder(commands.Cog):
-    """A cog to forward messages using Discord's reply function with !unsupported command.
+    """A cog to forward messages using Discord's reply function with the !unsupported command.
     
     Only users with allowed roles (set via command) can use the command.
     The command must be used in reply to a message; the replied-to message is then forwarded
@@ -40,9 +40,9 @@ class UnsupportedMessageForwarder(commands.Cog):
         else:
             await ctx.send(f"Role **{role.name}** is already allowed.")
     
-    @commands.command()
+    @commands.command(name="removeunsupportedrole")
     @commands.has_permissions(administrator=True)
-    async def removerole(self, ctx, role: discord.Role):
+    async def _removeunsupportedrole(self, ctx, role: discord.Role):
         """Removes a role from the allowed roles. (Admin only)"""
         roles = await self.config.allowed_role_ids()
         if role.id in roles:
@@ -107,7 +107,7 @@ class UnsupportedMessageForwarder(commands.Cog):
                 await ctx.send("❌ The target channel is invalid or not accessible.")
                 return
         
-        # Erstelle ein Embed mit den wesentlichen Informationen der Originalnachricht
+        # Create an embed with the original message details
         embed = discord.Embed(
             title="Forwarded Message",
             description=replied_message.content or "[No text content]",
@@ -122,7 +122,6 @@ class UnsupportedMessageForwarder(commands.Cog):
             attachments = "\n".join([attachment.url for attachment in replied_message.attachments])
             embed.add_field(name="Attachments", value=attachments, inline=False)
         
-        # Sende das Embed in den Zielkanal
         try:
             await target_channel.send(embed=embed)
             await ctx.send(f"✅ Message has been forwarded to {target_channel.mention}.")
@@ -132,6 +131,3 @@ class UnsupportedMessageForwarder(commands.Cog):
         except Exception as e:
             logging.error(f"Error sending forwarded message: {e}")
             await ctx.send("❌ Failed to forward the message.")
-
-def setup(bot):
-    bot.add_cog(UnsupportedMessageForwarder(bot))
