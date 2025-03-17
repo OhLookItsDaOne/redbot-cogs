@@ -67,10 +67,12 @@ class ChannelGuard(commands.Cog):
             self.offenses[user_id] = 1
             until = discord.utils.utcnow() + time_delta
             try:
-                await member.edit(timeout=until, reason="Guard channel first offense timeout.")
+                # Timeout for 10 minutes (properly using the timeout method)
+                await member.timeout(until, reason="Guard channel first offense timeout.")
             except Exception as e:
                 logging.error(f"Error timing out {member}: {e}")
-            # Iterate over all text channels in the guild.
+            
+            # Iterate over all text channels in the guild and delete the last 10 minutes of messages.
             for channel in message.guild.text_channels:
                 try:
                     async for msg in channel.history(after=time_threshold, limit=None):
@@ -81,12 +83,6 @@ class ChannelGuard(commands.Cog):
                                 logging.error(f"Error deleting message {msg.id} in #{channel.name} from {member}: {e}")
                 except Exception as e:
                     logging.error(f"Error iterating messages in channel #{channel.name}: {e}")
-            try:
-                await message.channel.send(
-                    f"{member.mention} has been timed out for 10 minutes and all your messages from the last 10 minutes have been deleted."
-                )
-            except Exception as e:
-                logging.error(f"Error sending timeout message: {e}")
 
         else:
             # Second offense: kick the user.
