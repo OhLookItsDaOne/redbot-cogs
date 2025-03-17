@@ -12,41 +12,46 @@ class ForumPostNotifier(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1234567890)
-        self.config.register_global(parent_channel_id=None, troubleshooting_message="Default troubleshooting message")
+        self.config.register_global(parent_forum_id=None, troubleshooting_message="Default troubleshooting message")
 
-    # Command to set the parent channel
+    # Command to set the parent forum channel
     @commands.command()
     @commands.admin_or_permissions(administrator=True)
-    async def setthreadid(self, ctx, channel: discord.TextChannel = None, channel_id: int = None):
-        """Sets the parent channel dynamically via command. (Admin only)"""
+    async def setthreadid(self, ctx, channel: discord.ForumChannel = None, channel_id: int = None):
+        """Sets the parent forum channel dynamically via command. (Admin only)"""
         if channel:
-            parent_channel_id = channel.id
+            parent_forum_id = channel.id
         elif channel_id:
-            parent_channel_id = channel_id
+            resolved_channel = ctx.guild.get_channel(channel_id)
+            if isinstance(resolved_channel, discord.ForumChannel):
+                parent_forum_id = channel_id
+            else:
+                await ctx.send("❌ The provided channel ID is not a valid forum channel.")
+                return
         else:
-            await ctx.send("❌ Please mention a valid channel or provide a valid channel ID.")
+            await ctx.send("❌ Please mention a valid forum channel or provide a valid channel ID.")
             return
-        
-        try:
-            await self.config.parent_channel_id.set(parent_channel_id)
-            await ctx.send(f"✅ Parent channel has been set to: <#{parent_channel_id}>")
-        except Exception as e:
-            logging.error(f"Error setting parent channel: {e}")
-            await ctx.send("❌ Failed to set parent channel.")
 
-    # Command to display the currently tracked thread channel
+        try:
+            await self.config.parent_forum_id.set(parent_forum_id)
+            await ctx.send(f"✅ Parent forum channel has been set to: <#{parent_forum_id}>")
+        except Exception as e:
+            logging.error(f"Error setting parent forum channel: {e}")
+            await ctx.send("❌ Failed to set parent forum channel.")
+
+    # Command to display the currently tracked forum channel
     @commands.command()
     async def getthreadid(self, ctx):
-        """Displays the currently tracked parent channel."""
-        channel_id = await self.config.parent_channel_id()
-        if channel_id is not None:
-            channel = ctx.guild.get_channel(channel_id)
-            if channel:
-                await ctx.send(f"📌 Currently tracked parent channel: {channel.mention}")
+        """Displays the currently tracked parent forum channel."""
+        forum_id = await self.config.parent_forum_id()
+        if forum_id is not None:
+            forum_channel = ctx.guild.get_channel(forum_id)
+            if forum_channel:
+                await ctx.send(f"📌 Currently tracked parent forum channel: {forum_channel.mention}")
             else:
-                await ctx.send(f"⚠️ The configured channel (ID: {channel_id}) could not be found.")
+                await ctx.send(f"⚠️ The configured forum channel (ID: {forum_id}) could not be found.")
         else:
-            await ctx.send("⚠️ No parent channel has been set.")
+            await ctx.send("⚠️ No parent forum channel has been set.")
 
     # Command to set the troubleshooting message (Admin only)
     @commands.command()
@@ -76,13 +81,13 @@ class ForumPostNotifier(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
         """Listener for when a new thread is created in a forum channel."""
-        parent_channel_id = await self.config.parent_channel_id()
-        if parent_channel_id is None:
-            logging.error("No parent channel ID set. Please set it using the command.")
+        parent_forum_id = await self.config.parent_forum_id()
+        if parent_forum_id is None:
+            logging.error("No parent forum channel ID set. Please set it using the command.")
             return
 
-        # Check if the thread belongs to the configured parent channel
-        if thread.parent_id == parent_channel_id:
+        # Check if the thread belongs to the configured parent forum channel
+        if thread.parent_id == parent_forum_id:
             logging.info(f"New thread created: {thread.name} (ID: {thread.id})")
             await asyncio.sleep(3)  # Slightly longer delay to account for potential network lag
 
