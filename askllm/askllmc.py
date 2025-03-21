@@ -1,6 +1,6 @@
 import discord
 from redbot.core import commands, Config
-import ollama
+import requests
 import json
 
 class LLMManager(commands.Cog):
@@ -24,7 +24,9 @@ class LLMManager(commands.Cog):
         """Lists available models in Ollama."""
         api_url = await self.config.api_url()
         try:
-            models = ollama.list(base_url=api_url)
+            response = requests.get(f"{api_url}/api/tags")
+            response.raise_for_status()
+            models = response.json()
             if not models or "models" not in models:
                 raise ValueError("No models found.")
             
@@ -44,8 +46,9 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setapi(self, ctx, url: str):
         """Sets the API URL for Ollama."""
-        await self.config.api_url.set(url.rstrip("/"))  # Remove trailing slash if present
-        await ctx.send(f"Ollama API URL set to `{url.rstrip('/')}`. Example format: `http://localhost:11434`")
+        cleaned_url = url.rstrip("/")  # Remove trailing slash if present
+        await self.config.api_url.set(cleaned_url)
+        await ctx.send(f"Ollama API URL set to `{cleaned_url}`. Example format: `http://localhost:11434`")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -70,13 +73,15 @@ class LLMManager(commands.Cog):
                   f"Question: {question}")
         
         try:
-            response = ollama.chat(
-                model=model, 
-                messages=[{"role": "user", "content": prompt}], 
-                options={"context": context_length}, 
-                base_url=api_url
-            )
-            answer = response["message"]["content"]
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "context": context_length
+            }
+            response = requests.post(f"{api_url}/api/chat", json=payload)
+            response.raise_for_status()
+            answer = response.json().get("response", "Error: No response from model.")
             await ctx.send(answer)
         except Exception as e:
             await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}\nError: {str(e)}")
