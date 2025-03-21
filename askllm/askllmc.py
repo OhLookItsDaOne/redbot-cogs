@@ -75,11 +75,10 @@ class LLMManager(commands.Cog):
         try:
             payload = {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "context": context_length
+                "prompt": prompt,
+                "stream": False
             }
-            response = requests.post(f"{api_url}/api/chat", json=payload)
+            response = requests.post(f"{api_url}/api/generate", json=payload)
             response.raise_for_status()
             answer = response.json().get("response", "Error: No response from model.")
             await ctx.send(answer)
