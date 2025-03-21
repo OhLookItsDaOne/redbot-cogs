@@ -3,6 +3,7 @@ from redbot.core import commands, Config
 import requests
 import json
 import time
+import os
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
@@ -11,7 +12,21 @@ class LLMManager(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210)
         self.config.register_global(model="llama3.2", api_url="http://localhost:11434")
-        self.config.register_global(knowledge={})
+        self.knowledge_file = "llm_knowledge.json"
+        self.ensure_knowledge_file()
+
+    def ensure_knowledge_file(self):
+        if not os.path.exists(self.knowledge_file):
+            with open(self.knowledge_file, 'w') as file:
+                json.dump({}, file)
+
+    def load_knowledge(self):
+        with open(self.knowledge_file, 'r') as file:
+            return json.load(file)
+
+    def save_knowledge(self, knowledge):
+        with open(self.knowledge_file, 'w') as file:
+            json.dump(knowledge, file, indent=4)
 
     async def _get_api_url(self):
         return await self.config.api_url()
@@ -46,11 +61,19 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def addinfo(self, ctx, key: str, *, value: str):
-        """Adds information to the knowledge database."""
-        async with self.config.knowledge() as knowledge:
-            knowledge[key] = value
-        await ctx.send(f"Information stored under `{key}`.")
+    async def llmknow(self, ctx, key: str, *, value: str):
+        """Adds information to the LLM's knowledge base."""
+        knowledge = self.load_knowledge()
+        knowledge[key] = value
+        self.save_knowledge(knowledge)
+        await ctx.send(f"Information stored under `{key}` in LLM knowledge base.")
+
+    @commands.command()
+    async def llmknowshow(self, ctx):
+        """Displays the current knowledge stored in the LLM's knowledge base."""
+        knowledge = self.load_knowledge()
+        formatted_knowledge = json.dumps(knowledge, indent=4)
+        await ctx.send(f"LLM Knowledge Base:\n```json\n{formatted_knowledge}\n```")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -76,8 +99,8 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """Sends a message to the LLM and returns its response."""
-        knowledge = await self.config.knowledge()
+        """Sends a message to the LLM and returns its response using stored knowledge."""
+        knowledge = self.load_knowledge()
         model = await self.config.model()
         api_url = await self._get_api_url()
 
