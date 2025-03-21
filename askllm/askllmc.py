@@ -179,7 +179,7 @@ class LLMManager(commands.Cog):
             await ctx.send("Tag not found.")
 
     # -----------------------------------------------------------------------------------
-    #                    "Learn" Command (Admin Confirmation + parse JSON)
+    #                    "Learn" Command (Admin Confirmation)
     # -----------------------------------------------------------------------------------
 
     @commands.command()
@@ -189,81 +189,71 @@ class LLMManager(commands.Cog):
         Learns from recent messages and updates knowledge base upon confirmation.
         Pulls the last [amount] messages from the channel (excluding bot messages),
         asks the LLM to extract relevant info, then asks for admin confirmation.
-        If the LLM suggests valid JSON, each top-level key is stored as a tag.
-        Otherwise, the full suggestion is stored under the 'General' tag.
+        If 'no' is typed, you can optionally add instructions or clarifications.
         """
-        # Gather recent messages
-        messages = [msg async for msg in ctx.channel.history(limit=amount+1) if msg.author != self.bot.user]
+        messages = [
+            msg async for msg in ctx.channel.history(limit=amount+1)
+            if msg.author != self.bot.user
+        ]
         messages.reverse()
         content = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
-        # Prompt for LLM to suggest knowledge
         prompt = (
             "Extract useful and relevant information from the conversation "
             "for storing as knowledge.\n\n"
-            "Format your response as valid JSON if possible, where each top-level key\n"
-            "represents a suitable tag, and the value is the info or data.\n\n"
+            "If user types 'no' + extra clarifications, consider them to refine your summary.\n\n"
             f"{content}"
         )
 
         async with ctx.typing():
-            suggestion = await self.get_llm_response(prompt)
+            suggested_info = await self.get_llm_response(prompt)
 
-        # Present suggestion to admin
         await ctx.send(
-            f"Suggested info to add:\n```\n{suggestion}\n```\n"
-            "Type `yes` to confirm, `no` to retry, or `stop` to cancel."
+            f"Suggested info to add:\n```\n{suggested_info}\n```\n"
+            "Type:\n"
+            "`yes` to confirm,\n"
+            "`no [some clarifications]` to refine,\n"
+            "`stop` to cancel."
         )
 
         def check(m: discord.Message):
-            return (
-                m.author == ctx.author
-                and m.channel == ctx.channel
-                and m.content.lower() in {"yes", "no", "stop"}
-            )
+            return m.author == ctx.author and m.channel == ctx.channel
 
         while True:
             try:
                 response = await self.bot.wait_for("message", check=check, timeout=120)
-                choice = response.content.lower()
+                text = response.content.strip()
 
-                if choice == "yes":
-                    # Attempt to parse the suggestion as JSON
+                if text.lower() == "yes":
+                    # store in "General"
                     knowledge = self.load_knowledge()
-
-                    try:
-                        parsed = json.loads(suggestion)
-                        if isinstance(parsed, dict):
-                            # Store each key in the knowledge base
-                            for tag, info in parsed.items():
-                                # Falls 'info' nur ein String, direkt hinzufügen.
-                                # Falls 'info' eine Liste, etc., kann man hier anpassen.
-                                knowledge.setdefault(tag, []).append(info)
-                            await ctx.send("Information parsed as JSON and stored per top-level key.")
-                        else:
-                            # If it's not a dict, store as 'General'
-                            knowledge.setdefault("General", []).append(suggestion)
-                            await ctx.send("Parsed JSON was not an object; stored in 'General' tag.")
-                    except (json.JSONDecodeError, TypeError):
-                        # Not valid JSON, store entire suggestion under 'General'
-                        knowledge.setdefault("General", []).append(suggestion)
-                        await ctx.send("Suggestion was not valid JSON. Stored in 'General' tag.")
-
+                    knowledge.setdefault("General", []).append(suggested_info)
                     self.save_knowledge(knowledge)
+                    await ctx.send("Information successfully saved under 'General'.")
                     break
 
-                elif choice == "no":
-                    async with ctx.typing():
-                        suggestion = await self.get_llm_response(prompt)
-                    await ctx.send(
-                        f"Updated suggestion:\n```\n{suggestion}\n```\n"
-                        "Type `yes` to confirm, `no` to retry, or `stop` to cancel."
-                    )
-
-                else:  # "stop"
+                elif text.lower() == "stop":
                     await ctx.send("Learning process cancelled.")
                     break
 
+                elif text.lower().startswith("no"):
+                    # user typed "no" or "no <something>"
+                    extra_instructions = text[2:].strip()
+                    refined_prompt = (
+                        f"{prompt}\n\n"
+                        "User clarifications/instructions:\n"
+                        f"{extra_instructions}"
+                    )
+
+                    async with ctx.typing():
+                        suggested_info = await self.get_llm_response(refined_prompt)
+
+                    await ctx.send(
+                        f"Updated suggestion:\n```\n{suggested_info}\n```\n"
+                        "Type `yes` to confirm, `no [something else]` to refine again, or `stop` to cancel."
+                    )
+                else:
+                    await ctx.send("Please type `yes`, `no [instructions]`, or `stop`.")
             except Exception as e:
                 await ctx.send(f"Error or timeout: {e}")
                 break
