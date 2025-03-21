@@ -84,3 +84,16 @@ class LLMManager(commands.Cog):
             await ctx.send(answer)
         except Exception as e:
             await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}\nError: {str(e)}")
+    
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def loadmodel(self, ctx, model: str):
+        """Loads a specific model in Ollama."""
+        api_url = await self.config.api_url()
+        try:
+            payload = {"name": model}
+            response = requests.post(f"{api_url}/api/pull", json=payload)
+            response.raise_for_status()
+            await ctx.send(f"Model `{model}` loaded successfully.")
+        except Exception as e:
+            await ctx.send(f"Error loading model `{model}`. Ensure the model exists and API URL is correct: {api_url}\nError: {str(e)}")
