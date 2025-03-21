@@ -16,7 +16,6 @@ def chunkify(text, max_size=1900):
     chunks = []
 
     for line in lines:
-        # If adding this line would exceed the max_size, we start a new chunk
         if len(current_chunk) + len(line) + 1 > max_size:
             chunks.append(current_chunk)
             current_chunk = line
@@ -26,7 +25,6 @@ def chunkify(text, max_size=1900):
             else:
                 current_chunk = line
 
-    # If there's leftover content in current_chunk, push it into the list
     if current_chunk:
         chunks.append(current_chunk)
 
@@ -69,7 +67,7 @@ class LLMManager(commands.Cog):
         api_url = await self._get_api_url()
 
         if knowledge_enabled:
-            # Use existing knowledge from JSON
+            # Use existing knowledge
             knowledge = self.load_knowledge()
             context = (
                 "Use the provided knowledge to answer accurately. Do not guess.\n\n"
@@ -78,8 +76,9 @@ class LLMManager(commands.Cog):
         else:
             # No existing knowledge
             context = (
-                "Extract or summarize the conversation below as valid JSON if possible.\n"
-                "Each top-level key in the JSON should represent a tag in the knowledge.\n\n"
+                "Extract or summarize the conversation below as valid JSON with a single TAG as a key and the info as the value.\n"
+                "Do not include sources, user mentions, or irrelevant details.\n"
+                "Focus only on the important info from messages.\n\n"
             )
 
         prompt = context + f"Question: {question}"
@@ -99,8 +98,7 @@ class LLMManager(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
-        If the bot is mentioned, respond with an LLM-generated answer
-        that includes old knowledge.
+        If the bot is mentioned in a message, respond with old knowledge.
         """
         if message.author.bot or not message.guild:
             return
@@ -116,19 +114,19 @@ class LLMManager(commands.Cog):
                     await message.channel.send(f"Error: {e}")
 
     # ----------------------------------------------------------------
-    #             Basic LLM / Model management commands
+    #    Basic LLM / Model mgmt
     # ----------------------------------------------------------------
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
-        """Sets the default LLM model to be used."""
+        """Sets the default LLM model."""
         await self.config.model.set(model)
         await ctx.send(f"Default LLM model set to `{model}`.")
 
     @commands.command()
     async def modellist(self, ctx):
-        """Lists available models in Ollama."""
+        """Lists available models."""
         api_url = await self._get_api_url()
         response = requests.get(f"{api_url}/api/tags")
         response.raise_for_status()
@@ -147,21 +145,20 @@ class LLMManager(commands.Cog):
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """
-        Sends a message to the LLM and returns its response,
-        including existing knowledge as context.
+        Sends a message to the LLM (with old knowledge).
         """
         async with ctx.typing():
             answer = await self.get_llm_response(question, knowledge_enabled=True)
         await ctx.send(answer)
 
     # ----------------------------------------------------------------
-    #                    Knowledge Base Commands
+    #      Knowledge Base Commands
     # ----------------------------------------------------------------
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
-        """Adds information under a tag to the LLM's knowledge base."""
+        """Adds info under a tag."""
         knowledge = self.load_knowledge()
         knowledge.setdefault(tag, []).append(info)
         self.save_knowledge(knowledge)
@@ -169,10 +166,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """
-        Displays the current knowledge stored in the LLM's knowledge base,
-        sorted by tag with indices. Uses chunkify to avoid 2k char limit.
-        """
+        """Shows the knowledge base, chunked by 1900 chars."""
         knowledge = self.load_knowledge()
         formatted_knowledge = "\n".join(
             f"{tag}:\n" + "\n".join(f"  [{i}] {info}" for i, info in enumerate(infos))
@@ -186,7 +180,7 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, tag: str, index: int):
-        """Deletes information under a tag by index."""
+        """Deletes info by index."""
         knowledge = self.load_knowledge()
         if tag in knowledge and 0 <= index < len(knowledge[tag]):
             deleted = knowledge[tag].pop(index)
@@ -200,7 +194,7 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
-        """Deletes an entire tag and its associated information."""
+        """Deletes an entire tag."""
         knowledge = self.load_knowledge()
         if tag in knowledge:
             del knowledge[tag]
@@ -217,10 +211,8 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, amount: int = 20):
         """
-        Reads last [amount] messages (excluding bot messages & this command),
-        calls get_llm_response with knowledge_enabled=False,
-        presents the suggestion, and if admin says 'yes', tries to parse JSON
-        or else saves in 'General'.
+        Reads last [amount] msgs, ignoring bot msgs & this command.
+        Asks LLM (no old knowledge) to provide a single Tag: <tag> & value.
         """
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
@@ -229,7 +221,6 @@ class LLMManager(commands.Cog):
                 return False
             return True
 
-        # Collect messages
         messages = []
         async for msg in ctx.channel.history(limit=amount+5):
             if not_command_or_bot(msg):
@@ -240,7 +231,7 @@ class LLMManager(commands.Cog):
         messages.reverse()
         conversation = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
-        # We do a special LLM call with knowledge_enabled=False
+        # No old knowledge, custom instructions
         async with ctx.typing():
             suggestion = await self.get_llm_response(conversation, knowledge_enabled=False)
 
@@ -262,32 +253,33 @@ class LLMManager(commands.Cog):
                     result = self.store_learned_suggestion(suggestion)
                     await ctx.send(result)
                     break
-
                 elif lower == "stop":
                     await ctx.send("Learning process cancelled.")
                     break
-
                 elif lower.startswith("no"):
                     instructions = text[2:].strip()
-                    refined_prompt = f"{conversation}\n\nUser clarifications:\n{instructions}"
+                    refined_prompt = (
+                        "Please create one single tag with the main info. No user mentions, no source links.\n"
+                        f"{conversation}\n\nUser clarifications:\n" + instructions
+                    )
+
                     async with ctx.typing():
                         suggestion = await self.get_llm_response(refined_prompt, knowledge_enabled=False)
+
                     await ctx.send(
                         f"Updated suggestion:\n```\n{suggestion}\n```\n"
                         "Type `yes` to confirm, `no [something else]` to refine again, or `stop` to cancel."
                     )
-
                 else:
                     await ctx.send("Please type `yes`, `no [instructions]`, or `stop`.")
-
             except Exception as e:
                 await ctx.send(f"Error or timeout: {e}")
                 break
 
     def store_learned_suggestion(self, suggestion: str) -> str:
         """
-        Attempt to parse a code block with triple-backticks first.
-        If parse fails, parse entire string as JSON. If that fails, store in 'General'.
+        Attempt to parse triple-backtick code block. If parse fails, parse entire string.
+        Must have a single tag & single piece of info if possible.
         """
         pattern = r"(?s)```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, suggestion)
@@ -299,7 +291,7 @@ class LLMManager(commands.Cog):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # if no code block or parse failed, try entire string
+        # fallback: try entire
         try:
             parsed_entire = json.loads(suggestion)
             if isinstance(parsed_entire, dict):
@@ -319,10 +311,11 @@ class LLMManager(commands.Cog):
         """
         knowledge = self.load_knowledge()
         for tag, data in parsed_dict.items():
+            # ensure it's a single string or minimal info
             if isinstance(data, list):
                 for item in data:
                     knowledge.setdefault(tag, []).append(item)
             else:
                 knowledge.setdefault(tag, []).append(data)
         self.save_knowledge(knowledge)
-        return "Valid JSON found; top-level keys stored as tags!"
+        return "Stored as tags from JSON!"
