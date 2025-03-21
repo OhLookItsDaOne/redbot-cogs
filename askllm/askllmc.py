@@ -76,8 +76,7 @@ class LLMManager(commands.Cog):
 
         try:
             headers = {"Content-Type": "application/json"}
-            show_payload = {"name": model}
-            show_response = requests.post(f"{api_url}/api/show", json=show_payload, headers=headers)
+            show_response = requests.get(f"{api_url}/api/show", params={"name": model}, headers=headers)
             show_response.raise_for_status()
             model_info = show_response.json()
             model_format = model_info.get("details", {}).get("format", "prompt")
@@ -118,10 +117,8 @@ class LLMManager(commands.Cog):
             response = requests.post(f"{api_url}/api/pull", json=payload, headers=headers)
             response.raise_for_status()
 
-            # Wait for the model to become available via /api/show
             for _ in range(15):
-                show_payload = {"name": model}
-                show_response = requests.post(f"{api_url}/api/show", json=show_payload, headers=headers)
+                show_response = requests.get(f"{api_url}/api/show", params={"name": model}, headers=headers)
                 if show_response.status_code == 200:
                     await ctx.send(f"Model `{model}` loaded and ready to use.")
                     return
