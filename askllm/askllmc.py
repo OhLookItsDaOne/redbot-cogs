@@ -61,7 +61,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """Asks the LLM a question using stored knowledge as reference (POST /api/generate)."""
+        """Asks the LLM a question using stored knowledge as reference."""
         knowledge = await self.config.knowledge()
         model = await self.config.model()
         api_url = await self.config.api_url()
@@ -75,17 +75,34 @@ class LLMManager(commands.Cog):
         )
 
         try:
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "stream": False
-            }
             headers = {"Content-Type": "application/json"}
-            response = requests.post(f"{api_url}/api/generate", json=payload, headers=headers)
+            show_payload = {"name": model}
+            show_response = requests.post(f"{api_url}/api/show", json=show_payload, headers=headers)
+            show_response.raise_for_status()
+            model_info = show_response.json()
+            model_format = model_info.get("details", {}).get("format", "prompt")
+
+            if model_format == "chat":
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False
+                }
+                endpoint = "/api/chat"
+            else:
+                payload = {
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False
+                }
+                endpoint = "/api/generate"
+
+            response = requests.post(f"{api_url}{endpoint}", json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
             answer = data.get("response", "Error: No response from model.")
             await ctx.send(answer)
+
         except Exception as e:
             await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}\nError: {str(e)}")
 
