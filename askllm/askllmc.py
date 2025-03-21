@@ -95,6 +95,13 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Ollama API URL set to `{url}`")
 
     @commands.command()
+    async def askllm(self, ctx, *, question: str):
+        """Sends a message to the LLM and returns its response using stored knowledge."""
+        async with ctx.typing():
+            answer = await self.get_llm_response(question)
+        await ctx.send(answer)
+
+    @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
         """Adds information under a tag to the LLM's knowledge base."""
@@ -105,9 +112,12 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays the current knowledge stored in the LLM's knowledge base sorted by tag."""
+        """Displays the current knowledge stored in the LLM's knowledge base sorted by tag with indices."""
         knowledge = self.load_knowledge()
-        formatted_knowledge = "\n".join(f"{tag}: {infos}" for tag, infos in sorted(knowledge.items()))
+        formatted_knowledge = "\n".join(
+            f"{tag}:\n" + "\n".join(f"  [{i}] {info}" for i, info in enumerate(infos))
+            for tag, infos in sorted(knowledge.items())
+        )
         await ctx.send(f"LLM Knowledge Base:\n```\n{formatted_knowledge}\n```")
 
     @commands.command()
@@ -135,10 +145,3 @@ class LLMManager(commands.Cog):
             await ctx.send(f"Deleted entire tag `{tag}`.")
         else:
             await ctx.send("Tag not found.")
-
-    @commands.command()
-    async def askllm(self, ctx, *, question: str):
-        """Sends a message to the LLM and returns its response using stored knowledge."""
-        async with ctx.typing():
-            answer = await self.get_llm_response(question)
-        await ctx.send(answer)
