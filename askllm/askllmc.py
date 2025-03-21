@@ -2,6 +2,7 @@ import discord
 from redbot.core import commands, Config
 import requests
 import json
+import time
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
@@ -11,7 +12,7 @@ class LLMManager(commands.Cog):
         self.config = Config.get_conf(self, identifier=9876543210)
         self.config.register_global(model="default-llm", context_length=32000, api_url="http://localhost:11434")
         self.config.register_global(knowledge={})
-    
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
@@ -21,7 +22,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def modellist(self, ctx):
-        """Lists available models in Ollama."""
+        """Lists available models in Ollama (GET /api/tags)."""
         api_url = await self.config.api_url()
         try:
             response = requests.get(f"{api_url}/api/tags")
@@ -29,16 +30,16 @@ class LLMManager(commands.Cog):
             models = response.json()
             if not models or "models" not in models:
                 raise ValueError("No models found.")
-            
+
             model_names = [m["name"] for m in models["models"]]
             await ctx.send("Available models: " + ", ".join(model_names))
         except Exception as e:
             await ctx.send(f"Error fetching models. Ensure Ollama API URL is correct. Current URL: {api_url}\nError: {str(e)}")
-    
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setcontext(self, ctx, length: int):
-        """Sets the context length for the LLM."""
+        """Sets the context length for the LLM (informational only)."""
         await self.config.context_length.set(length)
         await ctx.send(f"LLM context length set to `{length}`.")
 
@@ -46,7 +47,7 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setapi(self, ctx, url: str):
         """Sets the API URL for Ollama."""
-        cleaned_url = url.rstrip("/")  # Remove trailing slash if present
+        cleaned_url = url.rstrip("/")
         await self.config.api_url.set(cleaned_url)
         await ctx.send(f"Ollama API URL set to `{cleaned_url}`. Example format: `http://localhost:11434`")
 
@@ -60,7 +61,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """Asks the LLM a question using stored knowledge as reference."""
+        """Asks the LLM a question using stored knowledge as reference (POST /api/generate)."""
         knowledge = await self.config.knowledge()
         model = await self.config.model()
         api_url = await self.config.api_url()
@@ -79,9 +80,11 @@ class LLMManager(commands.Cog):
                 "prompt": prompt,
                 "stream": False
             }
-            response = requests.post(f"{api_url}/api/generate", json=payload)
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(f"{api_url}/api/generate", json=payload, headers=headers)
             response.raise_for_status()
-            answer = response.json().get("response", "Error: No response from model.")
+            data = response.json()
+            answer = data.get("response", "Error: No response from model.")
             await ctx.send(answer)
         except Exception as e:
             await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}\nError: {str(e)}")
@@ -89,12 +92,24 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def loadmodel(self, ctx, model: str):
-        """Loads a specific model in Ollama."""
+        """Loads a model in Ollama (POST /api/pull) and waits until it's ready (by checking /api/show)."""
         api_url = await self.config.api_url()
         try:
+            await ctx.send(f"Pulling model `{model}` from Ollama registry...")
             payload = {"name": model}
-            response = requests.post(f"{api_url}/api/pull", json=payload)
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(f"{api_url}/api/pull", json=payload, headers=headers)
             response.raise_for_status()
-            await ctx.send(f"Model `{model}` loaded successfully.")
+
+            # Wait for the model to become available via /api/show
+            for _ in range(15):
+                show_payload = {"name": model}
+                show_response = requests.post(f"{api_url}/api/show", json=show_payload, headers=headers)
+                if show_response.status_code == 200:
+                    await ctx.send(f"Model `{model}` loaded and ready to use.")
+                    return
+                time.sleep(2)
+
+            await ctx.send(f"Model `{model}` pull initiated but may not be fully ready yet. Try again shortly.")
         except Exception as e:
             await ctx.send(f"Error loading model `{model}`. Ensure the model exists and API URL is correct: {api_url}\nError: {str(e)}")
