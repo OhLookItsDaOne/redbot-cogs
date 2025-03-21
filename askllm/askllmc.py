@@ -30,6 +30,7 @@ def chunkify(text, max_size=1900):
 
     return chunks
 
+
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
 
@@ -74,14 +75,12 @@ class LLMManager(commands.Cog):
                 f"Knowledge:\n{json.dumps(knowledge)}\n\n"
             )
         else:
-            # Force the LLM to produce exactly one tag and one info object
-            # No user mentions, no source links, no extra keys
+            # No existing knowledge
+            # ALLOW multiple top-level tags
             context = (
-                "You must ONLY output valid JSON with exactly one top-level key, "
-                "which is the desired tag, and a single value for that key. "
-                "No user mentions, no source links, no extraneous data. "
-                "Focus only on the core, essential info. "
-                "Do NOT use 'TAG' as the key; pick a relevant short name.\n\n"
+                "Extract or summarize the conversation below as valid JSON with multiple top-level keys.\n"
+                "Each key is a relevant tag. Each value is the relevant info.\n"
+                "Focus only on important info, no user mentions, no source links.\n\n"
             )
 
         prompt = context + f"Question: {question}"
@@ -148,7 +147,9 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """Sends a message to the LLM (with old knowledge)."""
+        """
+        Sends a message to the LLM (with old knowledge).
+        """
         async with ctx.typing():
             answer = await self.get_llm_response(question, knowledge_enabled=True)
         await ctx.send(answer)
@@ -214,8 +215,8 @@ class LLMManager(commands.Cog):
     async def learn(self, ctx, amount: int = 20):
         """
         Reads last [amount] msgs, ignoring bot msgs & this command.
-        Asks LLM (no old knowledge) to produce EXACTLY one top-level key
-        (the tag) and a single value. If invalid JSON -> store in 'General'.
+        Asks LLM (no old knowledge) to produce multiple top-level keys if relevant,
+        each being a tag. Then merges them into the knowledge base.
         """
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
@@ -234,7 +235,6 @@ class LLMManager(commands.Cog):
         messages.reverse()
         conversation = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
-        # We do a special LLM call with knowledge_enabled=False
         async with ctx.typing():
             suggestion = await self.get_llm_response(conversation, knowledge_enabled=False)
 
@@ -262,8 +262,8 @@ class LLMManager(commands.Cog):
                 elif lower.startswith("no"):
                     instructions = text[2:].strip()
                     refined_prompt = (
-                        "Please ONLY output valid JSON with ONE top-level key (the tag) and a single value. "
-                        "No user mentions, no source links. Summarize only important info.\n\n"
+                        "Please output valid JSON with multiple top-level keys if needed, each key is a tag.\n"
+                        "No user mentions, no source links, only important info.\n\n"
                         f"{conversation}\n\nUser clarifications:\n{instructions}"
                     )
 
@@ -283,7 +283,7 @@ class LLMManager(commands.Cog):
     def store_learned_suggestion(self, suggestion: str) -> str:
         """
         Attempt to parse triple-backtick code block. If parse fails, parse entire string.
-        Must have a single tag & single piece of info if possible.
+        If valid JSON => each top-level key = tag, value appended. Otherwise => 'General'.
         """
         pattern = r"(?s)```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, suggestion)
@@ -295,7 +295,7 @@ class LLMManager(commands.Cog):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # fallback: try entire
+        # fallback: parse entire text
         try:
             parsed_entire = json.loads(suggestion)
             if isinstance(parsed_entire, dict):
@@ -312,11 +312,9 @@ class LLMManager(commands.Cog):
     def apply_learned_json(self, parsed_dict: dict) -> str:
         """
         If the JSON is a dictionary: each top-level key is a tag, value appended as item(s).
-        Must be exactly one top-level key ideally, but if more, we store them anyway.
         """
         knowledge = self.load_knowledge()
         for tag, data in parsed_dict.items():
-            # ensure it's a single string or minimal info
             if isinstance(data, list):
                 for item in data:
                     knowledge.setdefault(tag, []).append(item)
