@@ -12,20 +12,20 @@ class LLMManager(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210)
         self.config.register_global(model="llama3.2", api_url="http://localhost:11434")
-        self.knowledge_file = "llm_knowledge.json"
+        self.knowledge_file = bot.get_cog_data_path(self) / "llm_knowledge.json"
         self.ensure_knowledge_file()
 
     def ensure_knowledge_file(self):
-        if not os.path.exists(self.knowledge_file):
-            with open(self.knowledge_file, 'w') as file:
+        if not self.knowledge_file.exists():
+            with self.knowledge_file.open('w') as file:
                 json.dump({}, file)
 
     def load_knowledge(self):
-        with open(self.knowledge_file, 'r') as file:
+        with self.knowledge_file.open('r') as file:
             return json.load(file)
 
     def save_knowledge(self, knowledge):
-        with open(self.knowledge_file, 'w') as file:
+        with self.knowledge_file.open('w') as file:
             json.dump(knowledge, file, indent=4)
 
     async def _get_api_url(self):
@@ -61,12 +61,14 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def llmknow(self, ctx, key: str, *, value: str):
-        """Adds information to the LLM's knowledge base."""
+    async def llmknow(self, ctx, tag: str, *, info: str):
+        """Adds information under a tag to the LLM's knowledge base."""
         knowledge = self.load_knowledge()
-        knowledge[key] = value
+        if tag not in knowledge:
+            knowledge[tag] = []
+        knowledge[tag].append(info)
         self.save_knowledge(knowledge)
-        await ctx.send(f"Information stored under `{key}` in LLM knowledge base.")
+        await ctx.send(f"Information stored under tag `{tag}` in LLM knowledge base.")
 
     @commands.command()
     async def llmknowshow(self, ctx):
