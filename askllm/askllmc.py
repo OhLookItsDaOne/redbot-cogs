@@ -103,45 +103,36 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def llmknow(self, ctx, tag: str, *, info: str):
-        """Adds information under a tag to the LLM's knowledge base."""
-        knowledge = self.load_knowledge()
-        knowledge.setdefault(tag, []).append(info)
-        self.save_knowledge(knowledge)
-        await ctx.send(f"Information stored under tag `{tag}`.")
+    async def learn(self, ctx, amount: int = 20):
+        """Learns from recent messages and updates knowledge base upon confirmation."""
+        messages = [message async for message in ctx.channel.history(limit=amount+1) if message.author != self.bot.user]
+        messages.reverse()
+        content = "\n".join(f"{msg.author.name}: {msg.content}" for msg in messages)
 
-    @commands.command()
-    async def llmknowshow(self, ctx):
-        """Displays the current knowledge stored in the LLM's knowledge base sorted by tag with indices."""
-        knowledge = self.load_knowledge()
-        formatted_knowledge = "\n".join(
-            f"{tag}:\n" + "\n".join(f"  [{i}] {info}" for i, info in enumerate(infos))
-            for tag, infos in sorted(knowledge.items())
-        )
-        await ctx.send(f"LLM Knowledge Base:\n```\n{formatted_knowledge}\n```")
+        prompt = f"Extract useful and relevant information from the conversation for storing as knowledge:\n\n{content}"        
+        async with ctx.typing():
+            suggested_info = await self.get_llm_response(prompt)
 
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def llmknowdelete(self, ctx, tag: str, index: int):
-        """Deletes information under a tag by index."""
-        knowledge = self.load_knowledge()
-        if tag in knowledge and 0 <= index < len(knowledge[tag]):
-            deleted = knowledge[tag].pop(index)
-            if not knowledge[tag]:
-                del knowledge[tag]
-            self.save_knowledge(knowledge)
-            await ctx.send(f"Deleted info `{deleted}` from tag `{tag}`.")
-        else:
-            await ctx.send("Tag or index invalid.")
+        await ctx.send(f"Suggested info to add:\n```\n{suggested_info}\n```\nType `yes` to confirm, `no` to retry, or `stop` to cancel.")
 
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def llmknowdeletetag(self, ctx, tag: str):
-        """Deletes an entire tag and its associated information."""
-        knowledge = self.load_knowledge()
-        if tag in knowledge:
-            del knowledge[tag]
-            self.save_knowledge(knowledge)
-            await ctx.send(f"Deleted entire tag `{tag}`.")
-        else:
-            await ctx.send("Tag not found.")
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() in {"yes", "no", "stop"}
+
+        while True:
+            try:
+                response = await self.bot.wait_for("message", check=check, timeout=120)
+                if response.content.lower() == "yes":
+                    knowledge = self.load_knowledge()
+                    knowledge.setdefault("General", []).append(suggested_info)
+                    self.save_knowledge(knowledge)
+                    await ctx.send("Information successfully saved.")
+                    break
+                elif response.content.lower() == "no":
+                    suggested_info = await self.get_llm_response(prompt)
+                    await ctx.send(f"Updated suggestion:\n```\n{suggested_info}\n```\nType `yes` to confirm, `no` to retry, or `stop` to cancel.")
+                else:
+                    await ctx.send("Learning process cancelled.")
+                    break
+            except Exception as e:
+                await ctx.send(f"Error or timeout: {e}")
+                break
