@@ -179,7 +179,7 @@ class LLMManager(commands.Cog):
             await ctx.send("Tag not found.")
 
     # -----------------------------------------------------------------------------------
-    #                    "Learn" Command (Admin Confirmation)
+    #                    "Learn" Command (Admin Confirmation + extra no-argument)
     # -----------------------------------------------------------------------------------
 
     @commands.command()
@@ -189,6 +189,7 @@ class LLMManager(commands.Cog):
         Learns from recent messages and updates knowledge base upon confirmation.
         Pulls the last [amount] messages from the channel (excluding bot messages),
         asks the LLM to extract relevant info, then asks for admin confirmation.
+        If 'no' is used, you can specify new instructions (or 'ignore' hints) to the LLM.
         """
         # Gather recent messages
         messages = [msg async for msg in ctx.channel.history(limit=amount+1) if msg.author != self.bot.user]
@@ -196,34 +197,37 @@ class LLMManager(commands.Cog):
         content = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
         # Prompt for LLM to suggest knowledge
-        prompt = (
+        base_prompt = (
             "Extract useful and relevant information from the conversation "
             "for storing as knowledge:\n\n"
             f"{content}"
         )
 
-        # Get the suggestion from LLM
         async with ctx.typing():
-            suggested_info = await self.get_llm_response(prompt)
+            suggested_info = await self.get_llm_response(base_prompt)
 
         # Present suggestion to admin
         await ctx.send(
             f"Suggested info to add:\n```\n{suggested_info}\n```\n"
-            "Type `yes` to confirm, `no` to retry, or `stop` to cancel."
+            "Type `yes` to confirm, `no` + <extra instructions>, or `stop` to cancel."
         )
 
-        def check(m):
-            return (
-                m.author == ctx.author
-                and m.channel == ctx.channel
-                and m.content.lower() in {"yes", "no", "stop"}
-            )
+        def confirm_check(m: discord.Message):
+            """
+            We'll accept:
+            - yes
+            - no ...
+            - stop
+            """
+            if m.author != ctx.author or m.channel != ctx.channel:
+                return False
+            lower = m.content.lower().strip()
+            return lower.startswith("yes") or lower.startswith("no") or lower == "stop"
 
         while True:
             try:
-                # Wait for admin decision
-                response = await self.bot.wait_for("message", check=check, timeout=120)
-                choice = response.content.lower()
+                response: discord.Message = await self.bot.wait_for("message", check=confirm_check, timeout=120)
+                choice = response.content.lower().strip()
 
                 if choice == "yes":
                     # Save info to "General" tag (or any tag you prefer)
@@ -233,16 +237,28 @@ class LLMManager(commands.Cog):
                     await ctx.send("Information successfully saved.")
                     break
 
-                elif choice == "no":
-                    # Retry extracting new suggestion
+                elif choice.startswith("no"):
+                    # Possibly extract extra instructions after 'no'
+                    # e.g.: user types "no ignore user name 'bla' lines"
+                    extra_instructions = response.content[2:].strip()
+                    if extra_instructions:
+                        new_prompt = (
+                            f"{base_prompt}\n\n"
+                            "User says to consider these additional instructions or ignore hints:\n"
+                            f"{extra_instructions}"
+                        )
+                    else:
+                        new_prompt = base_prompt
+
                     async with ctx.typing():
-                        suggested_info = await self.get_llm_response(prompt)
+                        suggested_info = await self.get_llm_response(new_prompt)
+
                     await ctx.send(
                         f"Updated suggestion:\n```\n{suggested_info}\n```\n"
-                        "Type `yes` to confirm, `no` to retry, or `stop` to cancel."
+                        "Type `yes` to confirm, `no <further instructions>` to retry, or `stop` to cancel."
                     )
 
-                else:  # stop
+                else:  # "stop"
                     await ctx.send("Learning process cancelled.")
                     break
 
