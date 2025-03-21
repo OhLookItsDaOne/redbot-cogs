@@ -70,10 +70,6 @@ class LLMManager(commands.Cog):
             headers = {"Content-Type": "application/json"}
 
             response = requests.post(f"{api_url}/api/generate", json=payload, headers=headers)
-            if response.status_code == 404:
-                payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False}
-                response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-
             response.raise_for_status()
             data = response.json()
             answer = data.get("response", "No valid response received.")
