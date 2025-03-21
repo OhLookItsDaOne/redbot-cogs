@@ -99,17 +99,15 @@ class LLMManager(commands.Cog):
     async def llmknow(self, ctx, tag: str, *, info: str):
         """Adds information under a tag to the LLM's knowledge base."""
         knowledge = self.load_knowledge()
-        if tag not in knowledge:
-            knowledge[tag] = []
-        knowledge[tag].append(info)
+        knowledge.setdefault(tag, []).append(info)
         self.save_knowledge(knowledge)
-        await ctx.send(f"Information stored under tag `{tag}` at index `{len(knowledge[tag])-1}`.")
+        await ctx.send(f"Information stored under tag `{tag}`.")
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays the current knowledge stored in the LLM's knowledge base."""
+        """Displays the current knowledge stored in the LLM's knowledge base sorted by tag."""
         knowledge = self.load_knowledge()
-        formatted_knowledge = "\n".join(f"{tag}: {infos}" for tag, infos in knowledge.items())
+        formatted_knowledge = "\n".join(f"{tag}: {infos}" for tag, infos in sorted(knowledge.items()))
         await ctx.send(f"LLM Knowledge Base:\n```\n{formatted_knowledge}\n```")
 
     @commands.command()
@@ -125,6 +123,18 @@ class LLMManager(commands.Cog):
             await ctx.send(f"Deleted info `{deleted}` from tag `{tag}`.")
         else:
             await ctx.send("Tag or index invalid.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowdeletetag(self, ctx, tag: str):
+        """Deletes an entire tag and its associated information."""
+        knowledge = self.load_knowledge()
+        if tag in knowledge:
+            del knowledge[tag]
+            self.save_knowledge(knowledge)
+            await ctx.send(f"Deleted entire tag `{tag}`.")
+        else:
+            await ctx.send("Tag not found.")
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
