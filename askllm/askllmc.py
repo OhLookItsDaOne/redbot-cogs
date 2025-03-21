@@ -2,7 +2,6 @@ import discord
 from redbot.core import commands, Config
 import requests
 import json
-import time
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
@@ -16,14 +15,6 @@ class LLMManager(commands.Cog):
     async def _get_api_url(self):
         return await self.config.api_url()
 
-    async def _check_api_connection(self, api_url):
-        try:
-            response = requests.get(f"{api_url}/api/tags")
-            response.raise_for_status()
-            return True
-        except:
-            return False
-
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
@@ -35,14 +26,6 @@ class LLMManager(commands.Cog):
     async def modellist(self, ctx):
         """Lists available models in Ollama."""
         api_url = await self._get_api_url()
-        if not api_url:
-            await ctx.send("API URL not set. Please set it using `!setapi`.")
-            return
-
-        if not await self._check_api_connection(api_url):
-            await ctx.send(f"Cannot connect to API at `{api_url}`. Check the URL.")
-            return
-
         try:
             response = requests.get(f"{api_url}/api/tags")
             response.raise_for_status()
@@ -75,14 +58,6 @@ class LLMManager(commands.Cog):
         model = await self.config.model()
         api_url = await self._get_api_url()
 
-        if not api_url:
-            await ctx.send("API URL not set. Please set it using `!setapi`.")
-            return
-
-        if not await self._check_api_connection(api_url):
-            await ctx.send(f"Cannot connect to API at `{api_url}`. Check the URL.")
-            return
-
         knowledge_str = json.dumps(knowledge)
         prompt = (
             "Use the provided knowledge to answer accurately. Do not guess.\n\n"
@@ -106,34 +81,3 @@ class LLMManager(commands.Cog):
 
         except Exception as e:
             await ctx.send(f"Error communicating with Ollama: {e}")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def loadmodel(self, ctx, model: str):
-        """Pulls a model and confirms it is loaded."""
-        api_url = await self._get_api_url()
-
-        if not api_url:
-            await ctx.send("API URL not set. Please set it using `!setapi`.")
-            return
-
-        if not await self._check_api_connection(api_url):
-            await ctx.send(f"Cannot connect to API at `{api_url}`. Check the URL.")
-            return
-
-        try:
-            await ctx.send(f"Pulling model `{model}`...")
-            requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
-
-            for _ in range(15):
-                response = requests.get(f"{api_url}/api/tags")
-                response.raise_for_status()
-                models = [m["name"] for m in response.json().get("models", [])]
-                if model in models:
-                    await ctx.send(f"Model `{model}` is now available.")
-                    return
-                time.sleep(2)
-
-            await ctx.send(f"Model `{model}` not available yet. Please retry shortly.")
-        except Exception as e:
-            await ctx.send(f"Error loading model `{model}`: {e}")
