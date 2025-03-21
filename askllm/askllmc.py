@@ -1,13 +1,5 @@
 import discord
 from redbot.core import commands, Config
-import sys
-import subprocess
-
-# Prüfen, ob ollama installiert ist, falls nicht -> installieren
-try:
-    import ollama
-except ModuleNotFoundError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "ollama"], check=True)
 import ollama
 import json
 
@@ -33,10 +25,13 @@ class LLMManager(commands.Cog):
         api_url = await self.config.api_url()
         try:
             models = ollama.list(base_url=api_url)
+            if not models or "models" not in models:
+                raise ValueError("No models found.")
+            
             model_names = [m["name"] for m in models["models"]]
             await ctx.send("Available models: " + ", ".join(model_names))
         except Exception as e:
-            await ctx.send(f"Error fetching models. Ensure Ollama API URL is correct. Current URL: {api_url}")
+            await ctx.send(f"Error fetching models. Ensure Ollama API URL is correct. Current URL: {api_url}\nError: {str(e)}")
     
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -49,8 +44,8 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def setapi(self, ctx, url: str):
         """Sets the API URL for Ollama."""
-        await self.config.api_url.set(url)
-        await ctx.send(f"Ollama API URL set to `{url}`. Example format: `http://localhost:11434`")
+        await self.config.api_url.set(url.rstrip("/"))  # Remove trailing slash if present
+        await ctx.send(f"Ollama API URL set to `{url.rstrip('/')}`. Example format: `http://localhost:11434`")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -75,8 +70,13 @@ class LLMManager(commands.Cog):
                   f"Question: {question}")
         
         try:
-            response = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}], options={"context": context_length}, base_url=api_url)
+            response = ollama.chat(
+                model=model, 
+                messages=[{"role": "user", "content": prompt}], 
+                options={"context": context_length}, 
+                base_url=api_url
+            )
             answer = response["message"]["content"]
             await ctx.send(answer)
         except Exception as e:
-            await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}")
+            await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}\nError: {str(e)}")
