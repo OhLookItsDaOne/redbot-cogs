@@ -10,11 +10,19 @@ class LLMManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210)
-        self.config.register_global(model="default-llm", api_url="http://localhost:11434")
+        self.config.register_global(model="default-llm", api_url=None)
         self.config.register_global(knowledge={})
 
     async def _get_api_url(self):
         return await self.config.api_url()
+
+    async def _check_api_connection(self, api_url):
+        try:
+            response = requests.get(f"{api_url}/")
+            response.raise_for_status()
+            return True
+        except:
+            return False
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -27,6 +35,13 @@ class LLMManager(commands.Cog):
     async def modellist(self, ctx):
         """Lists available models in Ollama."""
         api_url = await self._get_api_url()
+        if not api_url:
+            await ctx.send("API URL not set. Please set it using `!setapi`.")
+            return
+        if not await self._check_api_connection(api_url):
+            await ctx.send(f"Cannot connect to API at `{api_url}`. Please check the URL and try again.")
+            return
+
         try:
             response = requests.get(f"{api_url}/api/tags")
             response.raise_for_status()
@@ -59,6 +74,13 @@ class LLMManager(commands.Cog):
         model = await self.config.model()
         api_url = await self._get_api_url()
 
+        if not api_url:
+            await ctx.send("API URL not set. Please set it using `!setapi`.")
+            return
+        if not await self._check_api_connection(api_url):
+            await ctx.send(f"Cannot connect to API at `{api_url}`. Please check the URL and try again.")
+            return
+
         prompt = (
             "Use the provided knowledge to answer accurately. Do not guess.\n\n"
             f"Knowledge:\n{json.dumps(knowledge)}\n\n"
@@ -83,6 +105,14 @@ class LLMManager(commands.Cog):
     async def loadmodel(self, ctx, model: str):
         """Pulls a model and confirms it is loaded."""
         api_url = await self._get_api_url()
+
+        if not api_url:
+            await ctx.send("API URL not set. Please set it using `!setapi`.")
+            return
+        if not await self._check_api_connection(api_url):
+            await ctx.send(f"Cannot connect to API at `{api_url}`. Please check the URL and try again.")
+            return
+
         try:
             await ctx.send(f"Pulling model `{model}`...")
             requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
