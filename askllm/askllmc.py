@@ -74,11 +74,14 @@ class LLMManager(commands.Cog):
                 f"Knowledge:\n{json.dumps(knowledge)}\n\n"
             )
         else:
-            # No existing knowledge
+            # Force the LLM to produce exactly one tag and one info object
+            # No user mentions, no source links, no extra keys
             context = (
-                "Extract or summarize the conversation below as valid JSON with a single TAG as a key and the info as the value.\n"
-                "Do not include sources, user mentions, or irrelevant details.\n"
-                "Focus only on the important info from messages.\n\n"
+                "You must ONLY output valid JSON with exactly one top-level key, "
+                "which is the desired tag, and a single value for that key. "
+                "No user mentions, no source links, no extraneous data. "
+                "Focus only on the core, essential info. "
+                "Do NOT use 'TAG' as the key; pick a relevant short name.\n\n"
             )
 
         prompt = context + f"Question: {question}"
@@ -98,7 +101,8 @@ class LLMManager(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
-        If the bot is mentioned in a message, respond with old knowledge.
+        If the bot is mentioned, respond with an LLM-generated answer
+        that includes old knowledge.
         """
         if message.author.bot or not message.guild:
             return
@@ -144,9 +148,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """
-        Sends a message to the LLM (with old knowledge).
-        """
+        """Sends a message to the LLM (with old knowledge)."""
         async with ctx.typing():
             answer = await self.get_llm_response(question, knowledge_enabled=True)
         await ctx.send(answer)
@@ -212,7 +214,8 @@ class LLMManager(commands.Cog):
     async def learn(self, ctx, amount: int = 20):
         """
         Reads last [amount] msgs, ignoring bot msgs & this command.
-        Asks LLM (no old knowledge) to provide a single Tag: <tag> & value.
+        Asks LLM (no old knowledge) to produce EXACTLY one top-level key
+        (the tag) and a single value. If invalid JSON -> store in 'General'.
         """
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
@@ -231,7 +234,7 @@ class LLMManager(commands.Cog):
         messages.reverse()
         conversation = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
-        # No old knowledge, custom instructions
+        # We do a special LLM call with knowledge_enabled=False
         async with ctx.typing():
             suggestion = await self.get_llm_response(conversation, knowledge_enabled=False)
 
@@ -259,8 +262,9 @@ class LLMManager(commands.Cog):
                 elif lower.startswith("no"):
                     instructions = text[2:].strip()
                     refined_prompt = (
-                        "Please create one single tag with the main info. No user mentions, no source links.\n"
-                        f"{conversation}\n\nUser clarifications:\n" + instructions
+                        "Please ONLY output valid JSON with ONE top-level key (the tag) and a single value. "
+                        "No user mentions, no source links. Summarize only important info.\n\n"
+                        f"{conversation}\n\nUser clarifications:\n{instructions}"
                     )
 
                     async with ctx.typing():
@@ -308,6 +312,7 @@ class LLMManager(commands.Cog):
     def apply_learned_json(self, parsed_dict: dict) -> str:
         """
         If the JSON is a dictionary: each top-level key is a tag, value appended as item(s).
+        Must be exactly one top-level key ideally, but if more, we store them anyway.
         """
         knowledge = self.load_knowledge()
         for tag, data in parsed_dict.items():
