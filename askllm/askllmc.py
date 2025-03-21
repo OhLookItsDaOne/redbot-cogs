@@ -63,7 +63,8 @@ class LLMManager(commands.Cog):
             question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
             if question:
                 try:
-                    answer = await self.get_llm_response(question)
+                    async with message.channel.typing():
+                        answer = await self.get_llm_response(question)
                     await message.channel.send(answer)
                 except Exception as e:
                     await message.channel.send(f"Error: {e}")
@@ -102,36 +103,32 @@ class LLMManager(commands.Cog):
             knowledge[tag] = []
         knowledge[tag].append(info)
         self.save_knowledge(knowledge)
-        await ctx.send(f"Information stored under tag `{tag}` in LLM knowledge base.")
+        await ctx.send(f"Information stored under tag `{tag}` at index `{len(knowledge[tag])-1}`.")
 
     @commands.command()
     async def llmknowshow(self, ctx):
         """Displays the current knowledge stored in the LLM's knowledge base."""
         knowledge = self.load_knowledge()
-        formatted_knowledge = json.dumps(knowledge, indent=4)
-        await ctx.send(f"LLM Knowledge Base:\n```json\n{formatted_knowledge}\n```")
+        formatted_knowledge = "\n".join(f"{tag}: {infos}" for tag, infos in knowledge.items())
+        await ctx.send(f"LLM Knowledge Base:\n```\n{formatted_knowledge}\n```")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def loadmodel(self, ctx, model: str):
-        """Pulls a model and ensures it's ready to use."""
-        api_url = await self._get_api_url()
-        await ctx.send(f"Pulling model `{model}`...")
-        requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
-
-        for _ in range(30):
-            response = requests.get(f"{api_url}/api/tags")
-            response.raise_for_status()
-            models = [m["name"] for m in response.json().get("models", [])]
-            if model in models:
-                await ctx.send(f"Model `{model}` is now available.")
-                return
-            time.sleep(2)
-
-        await ctx.send(f"Model `{model}` is not yet available. Try again later.")
+    async def llmknowdelete(self, ctx, tag: str, index: int):
+        """Deletes information under a tag by index."""
+        knowledge = self.load_knowledge()
+        if tag in knowledge and 0 <= index < len(knowledge[tag]):
+            deleted = knowledge[tag].pop(index)
+            if not knowledge[tag]:
+                del knowledge[tag]
+            self.save_knowledge(knowledge)
+            await ctx.send(f"Deleted info `{deleted}` from tag `{tag}`.")
+        else:
+            await ctx.send("Tag or index invalid.")
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """Sends a message to the LLM and returns its response using stored knowledge."""
-        answer = await self.get_llm_response(question)
+        async with ctx.typing():
+            answer = await self.get_llm_response(question)
         await ctx.send(answer)
