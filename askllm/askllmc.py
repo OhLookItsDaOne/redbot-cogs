@@ -10,7 +10,7 @@ from redbot.core.data_manager import cog_data_path
 # HELPER: Chunkify for large outputs
 ####################################
 def chunkify(text, max_size=1900):
-    """Splits a string into a list of chunks that fit under max_size characters."""
+    """Splits a string into chunks that each fit under max_size characters."""
     lines = text.split("\n")
     current_chunk = ""
     chunks = []
@@ -29,7 +29,6 @@ def chunkify(text, max_size=1900):
         chunks.append(current_chunk)
 
     return chunks
-
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
@@ -68,19 +67,19 @@ class LLMManager(commands.Cog):
         api_url = await self._get_api_url()
 
         if knowledge_enabled:
-            # Use existing knowledge
+            # Mit existierendem Wissen
             knowledge = self.load_knowledge()
             context = (
                 "Use the provided knowledge to answer accurately. Do not guess.\n\n"
                 f"Knowledge:\n{json.dumps(knowledge)}\n\n"
             )
         else:
-            # No existing knowledge
-            # ALLOW multiple top-level tags
+            # Ohne vorhandenes Wissen, nur Lösungen extrahieren
             context = (
-                "Extract or summarize the conversation below as valid JSON with multiple top-level keys.\n"
-                "Each key is a relevant tag. Each value is the relevant info.\n"
-                "Focus only on important info, no user mentions, no source links.\n\n"
+                "You must extract only the SOLUTIONS (fixes, steps, or final answers) "
+                "from the conversation below. No user mentions, no logs, no problem statements. "
+                "Output them as valid JSON with multiple top-level keys if needed. Each key is a relevant tag, "
+                "the value is the 'solution' or 'fix'. Keep it short and direct.\n\n"
             )
 
         prompt = context + f"Question: {question}"
@@ -117,7 +116,7 @@ class LLMManager(commands.Cog):
                     await message.channel.send(f"Error: {e}")
 
     # ----------------------------------------------------------------
-    #    Basic LLM / Model mgmt
+    #     Basic LLM / Model mgmt
     # ----------------------------------------------------------------
 
     @commands.command()
@@ -147,15 +146,13 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """
-        Sends a message to the LLM (with old knowledge).
-        """
+        """Sends a message to the LLM (with old knowledge)."""
         async with ctx.typing():
             answer = await self.get_llm_response(question, knowledge_enabled=True)
         await ctx.send(answer)
 
     # ----------------------------------------------------------------
-    #      Knowledge Base Commands
+    #   Knowledge Base Commands
     # ----------------------------------------------------------------
 
     @commands.command()
@@ -207,7 +204,7 @@ class LLMManager(commands.Cog):
             await ctx.send("Tag not found.")
 
     # ----------------------------------------------------------------
-    #             "Learn" Command (Ignoring old knowledge)
+    #          "Learn" Command: Only Solutions, ignoring old knowledge
     # ----------------------------------------------------------------
 
     @commands.command()
@@ -215,8 +212,9 @@ class LLMManager(commands.Cog):
     async def learn(self, ctx, amount: int = 20):
         """
         Reads last [amount] msgs, ignoring bot msgs & this command.
-        Asks LLM (no old knowledge) to produce multiple top-level keys if relevant,
-        each being a tag. Then merges them into the knowledge base.
+        Asks LLM (no old knowledge) to produce only solutions as JSON,
+        with multiple top-level keys if needed, each key = a solution's tag,
+        each value = solution/fix. If invalid => stored in 'General'.
         """
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
@@ -239,7 +237,7 @@ class LLMManager(commands.Cog):
             suggestion = await self.get_llm_response(conversation, knowledge_enabled=False)
 
         await ctx.send(
-            f"Suggested info to add:\n```\n{suggestion}\n```\n"
+            f"Suggested solutions to add:\n```\n{suggestion}\n```\n"
             "Type `yes` to confirm, `no [instructions]` to refine, or `stop` to cancel."
         )
 
@@ -262,8 +260,8 @@ class LLMManager(commands.Cog):
                 elif lower.startswith("no"):
                     instructions = text[2:].strip()
                     refined_prompt = (
-                        "Please output valid JSON with multiple top-level keys if needed, each key is a tag.\n"
-                        "No user mentions, no source links, only important info.\n\n"
+                        "You must ONLY output solutions/fixes as valid JSON with multiple top-level keys if needed. "
+                        "No user mentions, no logs, no problems, only final steps to fix or solve. \n\n"
                         f"{conversation}\n\nUser clarifications:\n{instructions}"
                     )
 
@@ -271,7 +269,7 @@ class LLMManager(commands.Cog):
                         suggestion = await self.get_llm_response(refined_prompt, knowledge_enabled=False)
 
                     await ctx.send(
-                        f"Updated suggestion:\n```\n{suggestion}\n```\n"
+                        f"Updated solutions suggestion:\n```\n{suggestion}\n```\n"
                         "Type `yes` to confirm, `no [something else]` to refine again, or `stop` to cancel."
                     )
                 else:
@@ -282,8 +280,8 @@ class LLMManager(commands.Cog):
 
     def store_learned_suggestion(self, suggestion: str) -> str:
         """
-        Attempt to parse triple-backtick code block. If parse fails, parse entire string.
-        If valid JSON => each top-level key = tag, value appended. Otherwise => 'General'.
+        Try to parse triple-backtick code block. If parse fails, parse entire string.
+        If valid JSON => each top-level key = tag, each value appended. Otherwise => 'General'.
         """
         pattern = r"(?s)```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, suggestion)
@@ -321,4 +319,4 @@ class LLMManager(commands.Cog):
             else:
                 knowledge.setdefault(tag, []).append(data)
         self.save_knowledge(knowledge)
-        return "Stored as tags from JSON!"
+        return "Stored as tags (solutions) from JSON!"
