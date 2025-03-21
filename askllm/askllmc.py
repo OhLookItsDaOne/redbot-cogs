@@ -3,7 +3,6 @@ from redbot.core import commands, Config
 import requests
 import json
 import time
-import os
 from redbot.core.data_manager import cog_data_path
 
 class LLMManager(commands.Cog):
@@ -32,6 +31,43 @@ class LLMManager(commands.Cog):
     async def _get_api_url(self):
         return await self.config.api_url()
 
+    async def get_llm_response(self, question: str):
+        knowledge = self.load_knowledge()
+        model = await self.config.model()
+        api_url = await self._get_api_url()
+
+        prompt = (
+            "Use the provided knowledge to answer accurately. Do not guess.\n\n"
+            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
+            f"Question: {question}"
+        )
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+        headers = {"Content-Type": "application/json"}
+
+        response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("message", {}).get("content", "No valid response received.")
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot or not message.guild:
+            return
+
+        if self.bot.user.mentioned_in(message):
+            question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if question:
+                try:
+                    answer = await self.get_llm_response(question)
+                    await message.channel.send(answer)
+                except Exception as e:
+                    await message.channel.send(f"Error: {e}")
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
@@ -43,14 +79,11 @@ class LLMManager(commands.Cog):
     async def modellist(self, ctx):
         """Lists available models in Ollama."""
         api_url = await self._get_api_url()
-        try:
-            response = requests.get(f"{api_url}/api/tags")
-            response.raise_for_status()
-            models = response.json()
-            model_names = [m["name"] for m in models.get("models", [])]
-            await ctx.send(f"Available models: {', '.join(model_names)}")
-        except Exception as e:
-            await ctx.send(f"Error fetching models: {e}")
+        response = requests.get(f"{api_url}/api/tags")
+        response.raise_for_status()
+        models = response.json()
+        model_names = [m["name"] for m in models.get("models", [])]
+        await ctx.send(f"Available models: {', '.join(model_names)}")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -83,49 +116,22 @@ class LLMManager(commands.Cog):
     async def loadmodel(self, ctx, model: str):
         """Pulls a model and ensures it's ready to use."""
         api_url = await self._get_api_url()
-        try:
-            await ctx.send(f"Pulling model `{model}`...")
-            requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
+        await ctx.send(f"Pulling model `{model}`...")
+        requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
 
-            for _ in range(30):
-                response = requests.get(f"{api_url}/api/tags")
-                response.raise_for_status()
-                models = [m["name"] for m in response.json().get("models", [])]
-                if model in models:
-                    await ctx.send(f"Model `{model}` is now available.")
-                    return
-                time.sleep(2)
+        for _ in range(30):
+            response = requests.get(f"{api_url}/api/tags")
+            response.raise_for_status()
+            models = [m["name"] for m in response.json().get("models", [])]
+            if model in models:
+                await ctx.send(f"Model `{model}` is now available.")
+                return
+            time.sleep(2)
 
-            await ctx.send(f"Model `{model}` is not yet available. Try again later.")
-        except Exception as e:
-            await ctx.send(f"Error loading model `{model}`: {e}")
+        await ctx.send(f"Model `{model}` is not yet available. Try again later.")
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """Sends a message to the LLM and returns its response using stored knowledge."""
-        knowledge = self.load_knowledge()
-        model = await self.config.model()
-        api_url = await self._get_api_url()
-
-        prompt = (
-            "Use the provided knowledge to answer accurately. Do not guess.\n\n"
-            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
-            f"Question: {question}"
-        )
-
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False
-        }
-        headers = {"Content-Type": "application/json"}
-
-        try:
-            response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            answer = data.get("message", {}).get("content", "No valid response received.")
-            await ctx.send(answer)
-
-        except Exception as e:
-            await ctx.send(f"Error communicating with Ollama: {e}")
+        answer = await self.get_llm_response(question)
+        await ctx.send(answer)
