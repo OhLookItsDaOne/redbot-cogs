@@ -179,7 +179,7 @@ class LLMManager(commands.Cog):
             await ctx.send("Tag not found.")
 
     # -----------------------------------------------------------------------------------
-    #                    "Learn" Command (Admin Confirmation + extra no-argument)
+    #                    "Learn" Command (Admin Confirmation + parse JSON)
     # -----------------------------------------------------------------------------------
 
     @commands.command()
@@ -189,7 +189,8 @@ class LLMManager(commands.Cog):
         Learns from recent messages and updates knowledge base upon confirmation.
         Pulls the last [amount] messages from the channel (excluding bot messages),
         asks the LLM to extract relevant info, then asks for admin confirmation.
-        If 'no' is used, you can specify new instructions (or 'ignore' hints) to the LLM.
+        If the LLM suggests valid JSON, each top-level key is stored as a tag.
+        Otherwise, the full suggestion is stored under the 'General' tag.
         """
         # Gather recent messages
         messages = [msg async for msg in ctx.channel.history(limit=amount+1) if msg.author != self.bot.user]
@@ -197,65 +198,66 @@ class LLMManager(commands.Cog):
         content = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
         # Prompt for LLM to suggest knowledge
-        base_prompt = (
+        prompt = (
             "Extract useful and relevant information from the conversation "
-            "for storing as knowledge:\n\n"
+            "for storing as knowledge.\n\n"
+            "Format your response as valid JSON if possible, where each top-level key\n"
+            "represents a suitable tag, and the value is the info or data.\n\n"
             f"{content}"
         )
 
         async with ctx.typing():
-            suggested_info = await self.get_llm_response(base_prompt)
+            suggestion = await self.get_llm_response(prompt)
 
         # Present suggestion to admin
         await ctx.send(
-            f"Suggested info to add:\n```\n{suggested_info}\n```\n"
-            "Type `yes` to confirm, `no` + <extra instructions>, or `stop` to cancel."
+            f"Suggested info to add:\n```\n{suggestion}\n```\n"
+            "Type `yes` to confirm, `no` to retry, or `stop` to cancel."
         )
 
-        def confirm_check(m: discord.Message):
-            """
-            We'll accept:
-            - yes
-            - no ...
-            - stop
-            """
-            if m.author != ctx.author or m.channel != ctx.channel:
-                return False
-            lower = m.content.lower().strip()
-            return lower.startswith("yes") or lower.startswith("no") or lower == "stop"
+        def check(m: discord.Message):
+            return (
+                m.author == ctx.author
+                and m.channel == ctx.channel
+                and m.content.lower() in {"yes", "no", "stop"}
+            )
 
         while True:
             try:
-                response: discord.Message = await self.bot.wait_for("message", check=confirm_check, timeout=120)
-                choice = response.content.lower().strip()
+                response = await self.bot.wait_for("message", check=check, timeout=120)
+                choice = response.content.lower()
 
                 if choice == "yes":
-                    # Save info to "General" tag (or any tag you prefer)
+                    # Attempt to parse the suggestion as JSON
                     knowledge = self.load_knowledge()
-                    knowledge.setdefault("General", []).append(suggested_info)
+
+                    try:
+                        parsed = json.loads(suggestion)
+                        if isinstance(parsed, dict):
+                            # Store each key in the knowledge base
+                            for tag, info in parsed.items():
+                                # Falls 'info' nur ein String, direkt hinzufügen.
+                                # Falls 'info' eine Liste, etc., kann man hier anpassen.
+                                knowledge.setdefault(tag, []).append(info)
+                            await ctx.send("Information parsed as JSON and stored per top-level key.")
+                        else:
+                            # If it's not a dict, store as 'General'
+                            knowledge.setdefault("General", []).append(suggestion)
+                            await ctx.send("Parsed JSON was not an object; stored in 'General' tag.")
+                    except (json.JSONDecodeError, TypeError):
+                        # Not valid JSON, store entire suggestion under 'General'
+                        knowledge.setdefault("General", []).append(suggestion)
+                        await ctx.send("Suggestion was not valid JSON. Stored in 'General' tag.")
+
                     self.save_knowledge(knowledge)
-                    await ctx.send("Information successfully saved.")
                     break
 
-                elif choice.startswith("no"):
-                    # Possibly extract extra instructions after 'no'
-                    # e.g.: user types "no ignore user name 'bla' lines"
-                    extra_instructions = response.content[2:].strip()
-                    if extra_instructions:
-                        new_prompt = (
-                            f"{base_prompt}\n\n"
-                            "User says to consider these additional instructions or ignore hints:\n"
-                            f"{extra_instructions}"
-                        )
-                    else:
-                        new_prompt = base_prompt
-
+                elif choice == "no":
                     async with ctx.typing():
-                        suggested_info = await self.get_llm_response(new_prompt)
-
+                        suggestion = await self.get_llm_response(prompt)
                     await ctx.send(
-                        f"Updated suggestion:\n```\n{suggested_info}\n```\n"
-                        "Type `yes` to confirm, `no <further instructions>` to retry, or `stop` to cancel."
+                        f"Updated suggestion:\n```\n{suggestion}\n```\n"
+                        "Type `yes` to confirm, `no` to retry, or `stop` to cancel."
                     )
 
                 else:  # "stop"
