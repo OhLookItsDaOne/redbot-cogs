@@ -2,6 +2,7 @@ import discord
 from redbot.core import commands, Config
 import requests
 import json
+import time
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
@@ -18,9 +19,9 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
-        """Sets the LLM model to be used."""
+        """Sets the default LLM model to be used."""
         await self.config.model.set(model)
-        await ctx.send(f"LLM model set to `{model}`.")
+        await ctx.send(f"Default LLM model set to `{model}`.")
 
     @commands.command()
     async def modellist(self, ctx):
@@ -52,16 +53,37 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Information stored under `{key}`.")
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def loadmodel(self, ctx, model: str):
+        """Pulls a model and ensures it's ready to use."""
+        api_url = await self._get_api_url()
+        try:
+            await ctx.send(f"Pulling model `{model}`...")
+            requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
+
+            for _ in range(30):
+                response = requests.get(f"{api_url}/api/tags")
+                response.raise_for_status()
+                models = [m["name"] for m in response.json().get("models", [])]
+                if model in models:
+                    await ctx.send(f"Model `{model}` is now available.")
+                    return
+                time.sleep(2)
+
+            await ctx.send(f"Model `{model}` is not yet available. Try again later.")
+        except Exception as e:
+            await ctx.send(f"Error loading model `{model}`: {e}")
+
+    @commands.command()
     async def askllm(self, ctx, *, question: str):
-        """Asks the LLM a question, using stored knowledge as a reference."""
+        """Sends a message to the LLM and returns its response."""
         knowledge = await self.config.knowledge()
         model = await self.config.model()
         api_url = await self._get_api_url()
 
-        knowledge_str = json.dumps(knowledge)
         prompt = (
             "Use the provided knowledge to answer accurately. Do not guess.\n\n"
-            f"Knowledge:\n{knowledge_str}\n\n"
+            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
             f"Question: {question}"
         )
 
