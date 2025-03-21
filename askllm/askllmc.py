@@ -1,5 +1,13 @@
 import discord
 from redbot.core import commands, Config
+import sys
+import subprocess
+
+# Prüfen, ob ollama installiert ist, falls nicht -> installieren
+try:
+    import ollama
+except ModuleNotFoundError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "ollama"], check=True)
 import ollama
 import json
 
