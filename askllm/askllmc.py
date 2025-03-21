@@ -10,7 +10,7 @@ class LLMManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210)
-        self.config.register_global(model="default-llm", api_url=None)
+        self.config.register_global(model="llama3.2", api_url="http://localhost:11434")
         self.config.register_global(knowledge={})
 
     async def _get_api_url(self):
@@ -18,7 +18,7 @@ class LLMManager(commands.Cog):
 
     async def _check_api_connection(self, api_url):
         try:
-            response = requests.get(f"{api_url}/")
+            response = requests.get(f"{api_url}/api/tags")
             response.raise_for_status()
             return True
         except:
@@ -38,8 +38,9 @@ class LLMManager(commands.Cog):
         if not api_url:
             await ctx.send("API URL not set. Please set it using `!setapi`.")
             return
+
         if not await self._check_api_connection(api_url):
-            await ctx.send(f"Cannot connect to API at `{api_url}`. Please check the URL and try again.")
+            await ctx.send(f"Cannot connect to API at `{api_url}`. Check the URL.")
             return
 
         try:
@@ -77,24 +78,30 @@ class LLMManager(commands.Cog):
         if not api_url:
             await ctx.send("API URL not set. Please set it using `!setapi`.")
             return
+
         if not await self._check_api_connection(api_url):
-            await ctx.send(f"Cannot connect to API at `{api_url}`. Please check the URL and try again.")
+            await ctx.send(f"Cannot connect to API at `{api_url}`. Check the URL.")
             return
 
+        knowledge_str = json.dumps(knowledge)
         prompt = (
             "Use the provided knowledge to answer accurately. Do not guess.\n\n"
-            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
+            f"Knowledge:\n{knowledge_str}\n\n"
             f"Question: {question}"
         )
 
-        try:
-            payload = {"model": model, "prompt": prompt, "stream": False}
-            headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+        headers = {"Content-Type": "application/json"}
 
-            response = requests.post(f"{api_url}/api/generate", json=payload, headers=headers)
+        try:
+            response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
-            answer = data.get("response", "No valid response received.")
+            answer = data.get("message", {}).get("content", "No valid response received.")
             await ctx.send(answer)
 
         except Exception as e:
@@ -109,8 +116,9 @@ class LLMManager(commands.Cog):
         if not api_url:
             await ctx.send("API URL not set. Please set it using `!setapi`.")
             return
+
         if not await self._check_api_connection(api_url):
-            await ctx.send(f"Cannot connect to API at `{api_url}`. Please check the URL and try again.")
+            await ctx.send(f"Cannot connect to API at `{api_url}`. Check the URL.")
             return
 
         try:
