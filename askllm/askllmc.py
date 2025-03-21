@@ -4,6 +4,7 @@ import requests
 import json
 import time
 import os
+from redbot.core.data_manager import cog_data_path
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
@@ -12,7 +13,7 @@ class LLMManager(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210)
         self.config.register_global(model="llama3.2", api_url="http://localhost:11434")
-        self.knowledge_file = bot.get_cog_data_path(self) / "llm_knowledge.json"
+        self.knowledge_file = cog_data_path(self) / "llm_knowledge.json"
         self.ensure_knowledge_file()
 
     def ensure_knowledge_file(self):
