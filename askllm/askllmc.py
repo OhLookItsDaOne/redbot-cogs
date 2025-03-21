@@ -3,6 +3,7 @@ from redbot.core import commands, Config
 import requests
 import json
 import time
+import re
 from redbot.core.data_manager import cog_data_path
 
 class LLMManager(commands.Cog):
@@ -12,78 +13,55 @@ class LLMManager(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210)
         self.config.register_global(model="llama3.2", api_url="http://localhost:11434")
-
         # Main knowledge file
         self.knowledge_file = cog_data_path(self) / "llm_knowledge.json"
         self.ensure_knowledge_file(self.knowledge_file)
 
-        # Temporary learn file
-        self.learntemp_file = cog_data_path(self) / "learntemp.json"
-        self.ensure_knowledge_file(self.learntemp_file)
-
     def ensure_knowledge_file(self, path):
         if not path.exists():
-            with path.open('w') as file:
+            with path.open("w") as file:
                 json.dump({}, file)
 
     def load_knowledge(self):
-        with self.knowledge_file.open('r') as file:
+        with self.knowledge_file.open("r") as file:
             return json.load(file)
 
     def save_knowledge(self, knowledge):
-        with self.knowledge_file.open('w') as file:
+        with self.knowledge_file.open("w") as file:
             json.dump(knowledge, file, indent=4)
-
-    # For the learn-procedure
-    def load_learntemp(self):
-        with self.learntemp_file.open('r') as file:
-            return json.load(file)
-
-    def save_learntemp(self, data):
-        with self.learntemp_file.open('w') as file:
-            json.dump(data, file, indent=4)
 
     async def _get_api_url(self):
         return await self.config.api_url()
 
-    async def get_llm_response(self, question: str):
+    async def get_llm_response(self, question: str, knowledge_enabled: bool = True):
         """
-        Normal LLM query (includes existing knowledge).
-        """
-        knowledge = self.load_knowledge()
-        model = await self.config.model()
-        api_url = await self._get_api_url()
-
-        prompt = (
-            "Use the provided knowledge to answer accurately. Do not guess.\n\n"
-            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
-            f"Question: {question}"
-        )
-
-        payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False}
-        headers = {"Content-Type": "application/json"}
-
-        response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("message", {}).get("content", "No valid response received.")
-
-    async def get_llm_learn_response(self, conversation: str):
-        """
-        LLM query used ONLY for the !learn command. 
-        -> Does NOT include old knowledge in the prompt
-        -> Resets the conversation each time
+        If knowledge_enabled=True, we embed the existing knowledge as context.
+        Otherwise we just pass the user's question.
         """
         model = await self.config.model()
         api_url = await self._get_api_url()
 
-        prompt = (
-            "You are to extract useful and relevant knowledge from the following conversation. "
-            "Provide your result as either valid JSON (keys = tags) or plain text. No guessing.\n\n"
-            f"{conversation}"
-        )
+        if knowledge_enabled:
+            # Use existing knowledge from JSON
+            knowledge = self.load_knowledge()
+            context = (
+                "Use the provided knowledge to answer accurately. Do not guess.\n\n"
+                f"Knowledge:\n{json.dumps(knowledge)}\n\n"
+            )
+        else:
+            # No existing knowledge
+            context = (
+                "Extract or summarize the conversation below as valid JSON if possible.\n"
+                "Each top-level key in the JSON should represent a tag in the knowledge.\n\n"
+            )
 
-        payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False}
+        prompt = context + f"Question: {question}"
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
         headers = {"Content-Type": "application/json"}
 
         response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
@@ -92,18 +70,20 @@ class LLMManager(commands.Cog):
         return data.get("message", {}).get("content", "No valid response received.")
 
     @commands.Cog.listener()
-    async def on_message(self, message):
+    async def on_message(self, message: discord.Message):
         """
-        If the bot is mentioned in a message, respond with an LLM-generated answer.
+        If the bot is mentioned in a message, respond with an LLM-generated answer
+        (including existing knowledge).
         """
         if message.author.bot or not message.guild:
             return
+
         if self.bot.user.mentioned_in(message):
             question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
             if question:
                 try:
                     async with message.channel.typing():
-                        answer = await self.get_llm_response(question)
+                        answer = await self.get_llm_response(question, knowledge_enabled=True)
                     await message.channel.send(answer)
                 except Exception as e:
                     await message.channel.send(f"Error: {e}")
@@ -149,7 +129,7 @@ class LLMManager(commands.Cog):
         Sends a message to the LLM and returns its response using stored knowledge.
         """
         async with ctx.typing():
-            answer = await self.get_llm_response(question)
+            answer = await self.get_llm_response(question, knowledge_enabled=True)
         await ctx.send(answer)
 
     # -----------------------------------------------------------------------------------
@@ -211,70 +191,56 @@ class LLMManager(commands.Cog):
             await ctx.send("Tag not found.")
 
     # -----------------------------------------------------------------------------------
-    #                    "Learn" Command (Separate from knowledge)
+    #                    "Learn" Command with ignoring old knowledge
     # -----------------------------------------------------------------------------------
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, amount: int = 20):
         """
-        Gathers last [amount] messages, ignoring bot messages, 
-        uses get_llm_learn_response() which does NOT see old knowledge,
-        asks for confirmation, and if 'yes' -> parse JSON or store in General.
+        Learns from recent messages (excluding bot messages & the !learn message),
+        ignoring old knowledge. We'll parse out a possible JSON block in triple-backticks
+        before trying a full string parse. If that fails, we store in 'General'.
         """
-        # Clear the temp file
-        self.save_learntemp({})
-
-        # Gather recent messages
-        messages = [
-            msg async for msg in ctx.channel.history(limit=amount+1)
-            if msg.author != self.bot.user
-        ]
-        messages.reverse()
-        conv_text = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
-
-        # Prompt for LLM to suggest knowledge, ignoring old knowledge
-        async with ctx.typing():
-            suggestion = await self.get_llm_learn_response(conv_text)
-
-        await ctx.send(
-            f"Suggested info to add:\n```\n{suggestion}\n```\n"
-            "Type `yes` to confirm, `no [extra instructions]` to refine, or `stop` to cancel."
-        )
-
-        def is_valid(m: discord.Message):
-            if m.author != ctx.author or m.channel != ctx.channel:
+        # gather messages except the command that triggered this
+        def not_command_or_bot(m: discord.Message):
+            if m.author.bot:
+                return False
+            # ignore the message that triggered !learn
+            if m.id == ctx.message.id:
                 return False
             return True
 
+        messages = []
+        async for msg in ctx.channel.history(limit=amount+5):
+            if not_command_or_bot(msg):
+                messages.append(msg)
+            if len(messages) >= amount:
+                break
+
+        messages.reverse()
+        conversation = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
+
+        # We do a special LLM call with knowledge_enabled=False
+        async with ctx.typing():
+            suggestion = await self.get_llm_response(conversation, knowledge_enabled=False)
+
+        await ctx.send(
+            f"Suggested info to add:\n```\n{suggestion}\n```\n"
+            "Type `yes` to confirm, `no [instructions]` to refine, or `stop` to cancel."
+        )
+
+        def check(msg: discord.Message):
+            return msg.author == ctx.author and msg.channel == ctx.channel
+
         while True:
             try:
-                response = await self.bot.wait_for("message", check=is_valid, timeout=120)
+                response = await self.bot.wait_for("message", check=check, timeout=120)
                 text = response.content.strip().lower()
 
                 if text == "yes":
-                    # parse JSON or store in 'General'
-                    knowledge = self.load_knowledge()
-                    try:
-                        parsed = json.loads(suggestion)
-                        if isinstance(parsed, dict):
-                            for tag, info in parsed.items():
-                                # Convert to string if needed
-                                if isinstance(info, list):
-                                    # e.g. each item in the list is appended
-                                    for item in info:
-                                        knowledge.setdefault(tag, []).append(item)
-                                else:
-                                    knowledge.setdefault(tag, []).append(info)
-                            await ctx.send("Information stored as JSON-based tags.")
-                        else:
-                            # not a dict
-                            knowledge.setdefault("General", []).append(suggestion)
-                            await ctx.send("Parsed JSON was not an object; stored in 'General'.")
-                    except json.JSONDecodeError:
-                        knowledge.setdefault("General", []).append(suggestion)
-                        await ctx.send("Not valid JSON. Stored in 'General' tag.")
-                    self.save_knowledge(knowledge)
+                    stored = self.store_learned_suggestion(suggestion)
+                    await ctx.send(stored)
                     break
 
                 elif text == "stop":
@@ -282,47 +248,70 @@ class LLMManager(commands.Cog):
                     break
 
                 elif text.startswith("no"):
-                    # user typed no plus instructions, e.g. "no ignore lines by user X"
                     instructions = text[2:].strip()
-                    # re-run with updated instructions
-                    new_prompt = (
-                        f"{conv_text}\n\n"
-                        "User instructions:\n" + instructions
+                    # refine the prompt
+                    refined_prompt = (
+                        f"{conversation}\n\n"
+                        "User clarifications:\n"
+                        f"{instructions}"
                     )
                     async with ctx.typing():
-                        suggestion = await self.get_llm_learn_response(new_prompt)
+                        suggestion = await self.get_llm_response(refined_prompt, knowledge_enabled=False)
                     await ctx.send(
                         f"Updated suggestion:\n```\n{suggestion}\n```\n"
                         "Type `yes` to confirm, `no [something else]` to refine again, or `stop` to cancel."
                     )
-
                 else:
                     await ctx.send("Please type `yes`, `no [instructions]`, or `stop`.")
             except Exception as e:
                 await ctx.send(f"Error or timeout: {e}")
                 break
 
-    async def get_llm_learn_response(self, conversation: str):
+    def store_learned_suggestion(self, suggestion: str) -> str:
         """
-        This LLM query ignores old knowledge (no calls to load_knowledge).
-        The bot won't see previously stored data in knowledge_file,
-        so it doesn't reference that in suggestions.
+        Attempt to parse JSON from triple-backtick or entire string.
+        If parse fails, store in 'General'.
+        Returns a success message.
         """
-        model = await self.config.model()
-        api_url = await self._get_api_url()
+        # first try extracting a code block with triple backticks:
+        pattern = r"(?s)```json\s*(\{.*?\})\s*```"
+        match = re.search(pattern, suggestion)
+        # if code block found, parse only that
+        if match:
+            raw_json = match.group(1)
+            try:
+                parsed = json.loads(raw_json)
+                return self.apply_learned_json(parsed)
+            except (json.JSONDecodeError, TypeError) as e:
+                # fallback to next attempt
+                pass
 
-        # We explicitly instruct: Provide data as valid JSON if possible
-        prompt = (
-            "Extract useful, relevant knowledge from the conversation. "
-            "If possible, format as valid JSON with top-level keys = tags. "
-            "Otherwise plain text is okay.\n\n"
-            f"{conversation}"
-        )
+        # if no code block or parse failed, try direct parse of entire string
+        try:
+            parsed_entire = json.loads(suggestion)
+            if isinstance(parsed_entire, dict):
+                return self.apply_learned_json(parsed_entire)
+        except (json.JSONDecodeError, TypeError):
+            # fallback
+            pass
 
-        payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False}
-        headers = {"Content-Type": "application/json"}
+        # fallback => store entire suggestion in "General"
+        knowledge = self.load_knowledge()
+        knowledge.setdefault("General", []).append(suggestion)
+        self.save_knowledge(knowledge)
+        return "No valid JSON found; suggestion stored in 'General'."
 
-        response = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("message", {}).get("content", "No valid response received.")
+    def apply_learned_json(self, parsed_dict: dict) -> str:
+        """
+        If the JSON is a dictionary: each top-level key is a tag, value appended as item(s).
+        """
+        knowledge = self.load_knowledge()
+        # for each key in parsed -> store in knowledge
+        for tag, data in parsed_dict.items():
+            if isinstance(data, list):
+                for item in data:
+                    knowledge.setdefault(tag, []).append(item)
+            else:
+                knowledge.setdefault(tag, []).append(data)
+        self.save_knowledge(knowledge)
+        return "Valid JSON found; top-level keys stored as tags!"
