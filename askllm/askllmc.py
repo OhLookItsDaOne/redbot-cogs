@@ -63,15 +63,16 @@ class LLMManager(commands.Cog):
         """Asks the LLM a question using stored knowledge as reference."""
         knowledge = await self.config.knowledge()
         model = await self.config.model()
-        context_length = await self.config.context_length()
         api_url = await self.config.api_url()
-        
+
         knowledge_str = json.dumps(knowledge, indent=2)
-        prompt = ("Use the following stored information as reference to answer the question accurately. "
-                  "Do not generate speculative responses. If the information is not available, state that you do not know.\n\n"
-                  f"Stored Knowledge:\n{knowledge_str}\n\n"
-                  f"Question: {question}")
-        
+        prompt = (
+            "Use the following stored information as reference to answer the question accurately. "
+            "Do not generate speculative responses. If the information is not available, state that you do not know.\n\n"
+            f"Stored Knowledge:\n{knowledge_str}\n\n"
+            f"Question: {question}"
+        )
+
         try:
             payload = {
                 "model": model,
@@ -84,7 +85,7 @@ class LLMManager(commands.Cog):
             await ctx.send(answer)
         except Exception as e:
             await ctx.send(f"Error communicating with Ollama. Ensure API URL is correct: {api_url}\nError: {str(e)}")
-    
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def loadmodel(self, ctx, model: str):
