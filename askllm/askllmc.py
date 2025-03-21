@@ -6,6 +6,30 @@ import time
 import re
 from redbot.core.data_manager import cog_data_path
 
+# Helper function for splitting messages into safe chunks
+def chunkify(text, max_size=1900):
+    """Splits a string into a list of chunks that fit under max_size characters."""
+    lines = text.split("\n")
+    current_chunk = ""
+    chunks = []
+
+    for line in lines:
+        # If adding this line would exceed the max_size, we start a new chunk
+        if len(current_chunk) + len(line) + 1 > max_size:
+            chunks.append(current_chunk)
+            current_chunk = line
+        else:
+            if current_chunk:
+                current_chunk += "\n" + line
+            else:
+                current_chunk = line
+
+    # If there's leftover content in current_chunk, push it into the list
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
 
@@ -151,14 +175,17 @@ class LLMManager(commands.Cog):
     async def llmknowshow(self, ctx):
         """
         Displays the current knowledge stored in the LLM's knowledge base,
-        sorted by tag with indices.
+        sorted by tag with indices. If it's too large, splits into multiple messages.
         """
         knowledge = self.load_knowledge()
         formatted_knowledge = "\n".join(
             f"{tag}:\n" + "\n".join(f"  [{i}] {info}" for i, info in enumerate(infos))
             for tag, infos in sorted(knowledge.items())
         )
-        await ctx.send(f"LLM Knowledge Base:\n```\n{formatted_knowledge}\n```")
+
+        chunks = chunkify(formatted_knowledge, max_size=1900)
+        for idx, chunk in enumerate(chunks, 1):
+            await ctx.send(f"LLM Knowledge Base (Part {idx}/{len(chunks)}):\n```\n{chunk}\n```")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -191,22 +218,22 @@ class LLMManager(commands.Cog):
             await ctx.send("Tag not found.")
 
     # -----------------------------------------------------------------------------------
-    #                    "Learn" Command with ignoring old knowledge
+    #                    "Learn" Command (Separate from knowledge)
     # -----------------------------------------------------------------------------------
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, amount: int = 20):
         """
-        Learns from recent messages (excluding bot messages & the !learn message),
-        ignoring old knowledge. We'll parse out a possible JSON block in triple-backticks
-        before trying a full string parse. If that fails, we store in 'General'.
+        Gathers last [amount] messages, ignoring bot msgs & this command,
+        calls get_llm_response with knowledge_enabled=False,
+        prompting the LLM to produce JSON or text,
+        asks for admin confirmation. If yes => parse/store.
         """
         # gather messages except the command that triggered this
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
                 return False
-            # ignore the message that triggered !learn
             if m.id == ctx.message.id:
                 return False
             return True
@@ -221,7 +248,7 @@ class LLMManager(commands.Cog):
         messages.reverse()
         conversation = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
-        # We do a special LLM call with knowledge_enabled=False
+        # we do a special LLM call with knowledge_enabled=False
         async with ctx.typing():
             suggestion = await self.get_llm_response(conversation, knowledge_enabled=False)
 
@@ -236,25 +263,22 @@ class LLMManager(commands.Cog):
         while True:
             try:
                 response = await self.bot.wait_for("message", check=check, timeout=120)
-                text = response.content.strip().lower()
+                text = response.content.strip()
+                lower = text.lower()
 
-                if text == "yes":
-                    stored = self.store_learned_suggestion(suggestion)
-                    await ctx.send(stored)
+                if lower == "yes":
+                    msg = self.store_learned_suggestion(suggestion)
+                    await ctx.send(msg)
                     break
 
-                elif text == "stop":
+                elif lower == "stop":
                     await ctx.send("Learning process cancelled.")
                     break
 
-                elif text.startswith("no"):
+                elif lower.startswith("no"):
                     instructions = text[2:].strip()
                     # refine the prompt
-                    refined_prompt = (
-                        f"{conversation}\n\n"
-                        "User clarifications:\n"
-                        f"{instructions}"
-                    )
+                    refined_prompt = (f"{conversation}\n\nUser clarifications:\n" + instructions)
                     async with ctx.typing():
                         suggestion = await self.get_llm_response(refined_prompt, knowledge_enabled=False)
                     await ctx.send(
@@ -269,30 +293,26 @@ class LLMManager(commands.Cog):
 
     def store_learned_suggestion(self, suggestion: str) -> str:
         """
-        Attempt to parse JSON from triple-backtick or entire string.
-        If parse fails, store in 'General'.
-        Returns a success message.
+        Attempt to parse a code block with triple-backticks first.
+        If parse fails, parse entire string as JSON. If that fails, store in 'General'.
         """
-        # first try extracting a code block with triple backticks:
+        # attempt triple-backtick extraction
         pattern = r"(?s)```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, suggestion)
-        # if code block found, parse only that
         if match:
             raw_json = match.group(1)
             try:
                 parsed = json.loads(raw_json)
                 return self.apply_learned_json(parsed)
-            except (json.JSONDecodeError, TypeError) as e:
-                # fallback to next attempt
+            except (json.JSONDecodeError, TypeError):
                 pass
 
-        # if no code block or parse failed, try direct parse of entire string
+        # if no code block found or parse failed, try entire string
         try:
             parsed_entire = json.loads(suggestion)
             if isinstance(parsed_entire, dict):
                 return self.apply_learned_json(parsed_entire)
         except (json.JSONDecodeError, TypeError):
-            # fallback
             pass
 
         # fallback => store entire suggestion in "General"
@@ -306,7 +326,6 @@ class LLMManager(commands.Cog):
         If the JSON is a dictionary: each top-level key is a tag, value appended as item(s).
         """
         knowledge = self.load_knowledge()
-        # for each key in parsed -> store in knowledge
         for tag, data in parsed_dict.items():
             if isinstance(data, list):
                 for item in data:
