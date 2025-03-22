@@ -1,4 +1,10 @@
 import discord
+import subprocess
+import sys
+
+# Module automatisch installieren
+subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
+
 import mysql.connector
 import re
 import requests
