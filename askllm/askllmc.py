@@ -33,24 +33,38 @@ class LLMManager(commands.Cog):
         cursor.close()
         db.close()
 
-    async def search_content(self, query, limit=10):
+    async def edit_tag_content(self, entry_id, new_content):
         db_config = await self.get_db_config()
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
-        cursor.execute(
-            "SELECT tag, content FROM tags WHERE MATCH(content) AGAINST(%s IN NATURAL LANGUAGE MODE) LIMIT %s;",
-            (query, limit)
-        )
-        results = cursor.fetchall()
+        cursor.execute("UPDATE tags SET content = %s WHERE id = %s;", (new_content, entry_id))
+        db.commit()
         cursor.close()
         db.close()
-        return results
 
-    async def get_all_tags(self):
+    async def delete_tag_by_id(self, entry_id):
         db_config = await self.get_db_config()
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
-        cursor.execute("SELECT tag, content FROM tags ORDER BY tag;")
+        cursor.execute("DELETE FROM tags WHERE id = %s;", (entry_id,))
+        db.commit()
+        cursor.close()
+        db.close()
+
+    async def delete_tag_by_name(self, tag):
+        db_config = await self.get_db_config()
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("DELETE FROM tags WHERE tag = %s;", (tag,))
+        db.commit()
+        cursor.close()
+        db.close()
+
+    async def get_all_content(self):
+        db_config = await self.get_db_config()
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("SELECT id, tag, content FROM tags ORDER BY id;")
         results = cursor.fetchall()
         cursor.close()
         db.close()
@@ -106,15 +120,34 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        results = await self.search_content(question)
-        if not results:
-            await ctx.send("No relevant info found.")
+        await self.process_question(question, ctx.channel)
+
+    async def process_question(self, question, channel):
+        entries = await self.get_all_content()
+        words = re.sub(r"[^\w\s]", "", question.lower()).split()
+
+        filtered = []
+        for _id, tag, content in entries:
+            if any(w in content.lower() for w in words):
+                filtered.append((tag, content))
+
+        if not filtered:
+            await channel.send("No relevant info found.")
             return
 
-        context = "\n".join(f"[{tag}] {content}" for tag, content in results)
-        prompt = f"Using this context:\n{context}\nAnswer the question: {question}"
-        answer = await self.query_llm(prompt, ctx.channel)
-        await ctx.send(answer)
+        context = "\n".join(f"[{tag}] {content}" for tag, content in filtered)
+        prompt = f"Using this knowledge base:\n{context}\nPlease answer the question as clearly and accurately as possible, correcting for typos or vague language if needed:\n{question}"
+        answer = await self.query_llm(prompt, channel)
+        await channel.send(answer)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if self.bot.user.mentioned_in(message):
+            question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if question:
+                await self.process_question(question, message.channel)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -160,12 +193,31 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        results = await self.get_all_tags()
+        results = await self.get_all_content()
         if not results:
             await ctx.send("No tags stored.")
             return
 
-        content = "\n".join(f"[{tag}] {text}" for tag, text in results)
+        lines = [f"[{_id}] ({tag}) {text}" for _id, tag, text in results]
+        content = "\n".join(lines)
         if len(content) > 1900:
             content = content[:1900] + "..."
         await ctx.send(f"```{content}```")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowdelete(self, ctx, entry_id: int):
+        await self.delete_tag_by_id(entry_id)
+        await ctx.send(f"Deleted entry with ID {entry_id}.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowdeletetag(self, ctx, tag: str):
+        await self.delete_tag_by_name(tag.lower())
+        await ctx.send(f"Deleted all entries with tag '{tag}'.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowedit(self, ctx, entry_id: int, *, new_content: str):
+        await self.edit_tag_content(entry_id, new_content)
+        await ctx.send(f"Updated entry {entry_id}.")
