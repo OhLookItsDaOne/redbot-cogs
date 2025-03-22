@@ -6,12 +6,16 @@ import json
 import re
 
 ####################################
-# HELPER: Chunkify for large outputs
+# HELPER: Chunkify
 ####################################
 def chunkify(text, max_size=1900):
+    """
+    Splits a string into chunks of up to max_size characters.
+    """
     lines = text.split("\n")
     current_chunk = ""
     chunks = []
+
     for line in lines:
         if len(current_chunk) + len(line) + 1 > max_size:
             chunks.append(current_chunk)
@@ -28,7 +32,11 @@ def chunkify(text, max_size=1900):
     return chunks
 
 class LLMManager(commands.Cog):
-    """Cog with a separate knowledgesearch.json for partial data."""
+    """
+    Cog that ALWAYS filters knowledge for mention or askllm,
+    then writes only the filtered subset to knowledgesearch.json,
+    which is what actually gets passed to the LLM.
+    """
 
     def __init__(self, bot):
         self.bot = bot
@@ -41,13 +49,16 @@ class LLMManager(commands.Cog):
             with self.knowledge_file.open("w") as f:
                 json.dump({}, f)
 
-        # Filtered knowledge file
+        # Filtered knowledge file (written for each query)
         self.search_file = cog_data_path(self) / "knowledgesearch.json"
         if not self.search_file.exists():
             with self.search_file.open("w") as f:
-                json.dump({}, f, indent=4)
+                json.dump({}, f, indent=2)
 
-    def load_knowledge(self):
+    ################################################################
+    # Load/save knowledge
+    ################################################################
+    def load_knowledge(self) -> dict:
         with self.knowledge_file.open("r") as f:
             return json.load(f)
 
@@ -55,28 +66,22 @@ class LLMManager(commands.Cog):
         with self.knowledge_file.open("w") as f:
             json.dump(knowledge, f, indent=4)
 
-    def load_searchfile(self):
+    def load_searchfile(self) -> dict:
         with self.search_file.open("r") as f:
             return json.load(f)
 
     def save_searchfile(self, subset: dict):
         with self.search_file.open("w") as f:
-            json.dump(subset, f, indent=4)
+            json.dump(subset, f, indent=2)
 
-    async def _get_model(self):
-        return await self.config.model()
-
-    async def _get_api_url(self):
-        return await self.config.api_url()
-
-    ############################################
-    # Simple partial filter
-    ############################################
+    ################################################################
+    # Word-based partial filter
+    ################################################################
     def filter_knowledge(self, question: str, knowledge: dict, max_entries=30) -> dict:
         """
-        1) Tag-level match if a query word is in the tag.
-        2) Entry-level match if a query word is in the entry text.
-        3) Limit total relevant entries to max_entries.
+        1) For each tag, we check if question's words appear in tag name or in entry text.
+        2) If total matched > max_entries, we cut it down so we don't blow up LLM context.
+        3) Return the final subset.
         """
         words = set(re.sub(r"[^\w\s]", "", question.lower()).split())
         result = {}
@@ -89,12 +94,13 @@ class LLMManager(commands.Cog):
                 entry_str = re.sub(r"[^\w\s]", "", str(entry).lower())
                 if any(w in entry_str for w in words):
                     matched_entries.append(entry)
+
             if tagmatch or matched_entries:
                 chosen = matched_entries if matched_entries else entries
                 result[tag] = chosen
                 total_count += len(chosen)
 
-        # If more than max_entries, cut it down
+        # If we exceed max_entries, cut down
         if total_count > max_entries:
             new_res = {}
             running = 0
@@ -109,12 +115,19 @@ class LLMManager(commands.Cog):
                     new_res[t] = ents
                     running += len(ents)
             return new_res
+
         return result
 
-    ############################################
-    # Query LLM with a custom prompt
-    ############################################
-    async def query_llm(self, prompt: str):
+    ################################################################
+    # LLM Query
+    ################################################################
+    async def _get_model(self):
+        return await self.config.model()
+
+    async def _get_api_url(self):
+        return await self.config.api_url()
+
+    async def query_llm(self, prompt: str) -> str:
         model = await self._get_model()
         api_url = await self._get_api_url()
 
@@ -124,39 +137,58 @@ class LLMManager(commands.Cog):
             "stream": False
         }
         headers = {"Content-Type": "application/json"}
-        resp = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+
+        r = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
+        r.raise_for_status()
+        data = r.json()
         return data.get("message", {}).get("content", "No valid response received.")
 
-    ############################################
-    # on_message: entire knowledge
-    ############################################
+    ################################################################
+    # on_message -> word filter => knowledgesearch => LLM
+    ################################################################
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
         if self.bot.user.mentioned_in(message):
-            question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            if question:
-                try:
-                    async with message.channel.typing():
-                        knowledge = self.load_knowledge()
-                        prompt = (
-                            "Use the following knowledge to answer accurately.\n\n"
-                            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
-                            f"Question: {question}"
-                        )
-                        response = await self.query_llm(prompt)
-                    chunks = chunkify(response, 1900)
-                    for idx, c in enumerate(chunks, 1):
-                        await message.channel.send(f"**(Part {idx}/{len(chunks)}):**\n```\n{c}\n```")
-                except Exception as e:
-                    await message.channel.send(f"Error: {e}")
+            query = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if not query:
+                return
 
-    ############################################
-    # Basic / Model mgmt commands
-    ############################################
+            # 1) load full knowledge
+            knowledge = self.load_knowledge()
+            # 2) filter
+            subset = self.filter_knowledge(query, knowledge, max_entries=30)
+            # 3) store in knowledgesearch
+            self.save_searchfile(subset)
+
+            # 4) read back the subset
+            partial = self.load_searchfile()
+
+            # 5) build prompt
+            prompt = (
+                "Use the following relevant knowledge to answer. Do not guess.\n\n"
+                f"Knowledge:\n{json.dumps(partial, indent=2)}\n\n"
+                f"User question: {query}"
+            )
+
+            try:
+                async with message.channel.typing():
+                    response = await self.query_llm(prompt)
+
+                # If the response is short, send once
+                if len(response) <= 2000:
+                    await message.channel.send(f"```\n{response}\n```")
+                else:
+                    chunks = chunkify(response, 1900)
+                    for idx, c in enumerate(chunks, start=1):
+                        await message.channel.send(f"**(Part {idx}/{len(chunks)}):**\n```\n{c}\n```")
+            except Exception as e:
+                await message.channel.send(f"Error: {e}")
+
+    ################################################################
+    # setmodel, setapi, modellist
+    ################################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
@@ -179,51 +211,52 @@ class LLMManager(commands.Cog):
         await self.config.api_url.set(url)
         await ctx.send(f"Ollama API URL set to {url}")
 
-    ##################################################
-    # askllm -> create a new knowledgesearch.json
-    ##################################################
+    ################################################################
+    # askllm -> also only partial knowledge => knowledgesearch
+    ################################################################
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """
-        Filter knowledge => save to 'knowledgesearch.json' => read that file => LLM => chunkify output
+        1) Load entire knowledge
+        2) Filter by question
+        3) Save subset in knowledgesearch.json
+        4) Read that subset, prompt the LLM
+        5) Only chunk if final answer > 2000 chars
         """
-        full_knowledge = self.load_knowledge()
-        filtered = self.filter_knowledge(question, full_knowledge, max_entries=30)
-
-        if filtered:
+        knowledge = self.load_knowledge()
+        subset = self.filter_knowledge(question, knowledge, max_entries=30)
+        if subset:
             note = "Filtered knowledge based on your query."
-            self.save_searchfile(filtered)  # <--- STORE to knowledgesearch.json
+            self.save_searchfile(subset)
         else:
-            note = "No matched entries -> using entire knowledge."
-            self.save_searchfile(full_knowledge)
+            note = "No matched entries -> empty knowledge subset."
+            self.save_searchfile({})  # store empty dict
 
-        # Now read from knowledgesearch.json
         partial = self.load_searchfile()
-        # Build LLM prompt
         prompt = (
             f"{note}\n\n"
-            "Use the following knowledge to answer. Do not guess.\n\n"
+            "Use the following relevant knowledge to answer accurately. Do not guess.\n\n"
             f"Knowledge:\n{json.dumps(partial, indent=2)}\n\n"
-            f"User Question: {question}"
+            f"User question: {question}"
         )
 
         try:
             async with ctx.typing():
                 answer = await self.query_llm(prompt)
-            chunks = chunkify(answer, max_size=1900)
         except Exception as e:
-            chunks = [f"Error: {e}"]
+            return await ctx.send(f"Error: {e}")
 
-        for i, c in enumerate(chunks, 1):
-            await ctx.send(f"**Answer (Part {i}/{len(chunks)}):**\n```\n{c}\n```")
+        if len(answer) <= 2000:
+            await ctx.send(f"```\n{answer}\n```")
+        else:
+            parts = chunkify(answer, 1900)
+            for i, c in enumerate(parts, 1):
+                await ctx.send(f"**Answer (Part {i}/{len(parts)}):**\n```\n{c}\n```")
 
-    ##################################################
+    ################################################################
     # Knowledge base commands
-    ##################################################
+    ################################################################
     def add_entry(self, knowledge: dict, tag: str, info: str):
-        """
-        Add info to a tag if not duplicate
-        """
         if tag not in knowledge:
             knowledge[tag] = []
         if info in knowledge[tag]:
@@ -234,39 +267,44 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
-        knowledge = self.load_knowledge()
-        added = self.add_entry(knowledge, tag, info)
+        k = self.load_knowledge()
+        added = self.add_entry(k, tag, info)
         if added:
-            self.save_knowledge(knowledge)
+            self.save_knowledge(k)
             await ctx.send(f"Stored info under tag {tag}")
         else:
-            await ctx.send(f"Already exists under {tag}; skipping.")
+            await ctx.send(f"Already exists under {tag}, skipping.")
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        knowledge = self.load_knowledge()
-        # Build text
+        """
+        Show entire knowledge, chunk if needed.
+        """
+        k = self.load_knowledge()
         out = ""
-        for tag, items in sorted(knowledge.items()):
+        for tag, items in sorted(k.items()):
             out += f"{tag}:\n"
             for i, val in enumerate(items):
                 out += f"  [{i}] {val}\n"
 
-        chunks = chunkify(out, 1900)
-        for idx, chunk in enumerate(chunks, 1):
-            await ctx.send(f"LLM Knowledge Base (Part {idx}/{len(chunks)}):\n```\n{chunk}\n```")
+        if len(out) <= 2000:
+            await ctx.send(f"```\n{out}\n```")
+        else:
+            parts = chunkify(out, 1900)
+            for idx, chunk in enumerate(parts, 1):
+                await ctx.send(f"LLM Knowledge Base (Part {idx}/{len(parts)}):\n```\n{chunk}\n```")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, tag: str, index: int):
-        knowledge = self.load_knowledge()
-        if tag not in knowledge:
+        k = self.load_knowledge()
+        if tag not in k:
             return await ctx.send("Tag not found.")
-        if 0 <= index < len(knowledge[tag]):
-            removed = knowledge[tag].pop(index)
-            if not knowledge[tag]:
-                del knowledge[tag]
-            self.save_knowledge(knowledge)
+        if 0 <= index < len(k[tag]):
+            removed = k[tag].pop(index)
+            if not k[tag]:
+                del k[tag]
+            self.save_knowledge(k)
             await ctx.send(f"Deleted {removed}")
         else:
             await ctx.send("Invalid index")
@@ -274,22 +312,23 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
-        knowledge = self.load_knowledge()
-        if tag not in knowledge:
+        k = self.load_knowledge()
+        if tag not in k:
             return await ctx.send("Tag not found.")
-        del knowledge[tag]
-        self.save_knowledge(knowledge)
+        del k[tag]
+        self.save_knowledge(k)
         await ctx.send(f"Deleted entire tag {tag}")
 
-    ############################################
-    # learn <tag> <amount>
-    ############################################
+    ################################################################
+    # learn <tag> <amount> -> also no big knowledge
+    ################################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def learn(self, ctx, tag: str, amount: int=20):
+    async def learn(self, ctx, tag: str, amount: int = 20):
         """
-        Pulls last <amount> messages, shows existing solutions for <tag>,
-        LLM tries to propose new solutions, which we store if user says yes.
+        1) Read last <amount> messages (excluding bots + this cmd).
+        2) LLM sees only existing solutions for <tag>, plus conversation, never entire knowledge.
+        3) If user says yes, parse the new solutions.
         """
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
@@ -308,15 +347,16 @@ class LLMManager(commands.Cog):
         msgs.reverse()
         conversation = "\n".join(f"{m.author.name}: {m.content}" for m in msgs)
 
+        # Only pass existing solutions for that tag
+        # => no other tags, no entire knowledge
         knowledge = self.load_knowledge()
         existing = knowledge.get(tag, [])
 
         base_prompt = (
-            f"Existing solutions for tag '{tag}':\n"
+            f"Current solutions for tag '{tag}':\n"
             f"{json.dumps(existing, indent=2)}\n\n"
-            "Below is a conversation. Extract only new or refined solutions for that tag.\n"
-            "Output them as valid JSON, for example:\n"
-            "{ \"solutions\": [\"some new fix\", \"some other fix\"] }\n"
+            "Below is a conversation. Extract new or refined solutions for that tag only.\n"
+            "Output valid JSON, e.g. {\"solutions\": [\"fix1\", \"fix2\"]}\n"
             "No user mentions/logs.\n\n"
             f"Conversation:\n{conversation}"
         )
@@ -327,36 +367,42 @@ class LLMManager(commands.Cog):
         except Exception as e:
             return await ctx.send(f"Error: {e}")
 
-        # chunkify the suggestion itself
-        sug_chunks = chunkify(suggestion, 1900)
-        for i, ch in enumerate(sug_chunks, 1):
-            await ctx.send(f"**Suggested (Part {i}/{len(sug_chunks)}):**\n```\n{ch}\n```")
+        # chunk if needed
+        if len(suggestion) <= 2000:
+            await ctx.send(f"```\n{suggestion}\n```")
+        else:
+            parts = chunkify(suggestion, 1900)
+            for i, c in enumerate(parts, 1):
+                await ctx.send(f"**Suggested (Part {i}/{len(parts)}):**\n```\n{c}\n```")
 
         await ctx.send("Type `yes` to confirm, `no [instructions]` to refine, or `stop` to cancel.")
 
         def check(m: discord.Message):
-            return m.author == ctx.author and m.channel == ctx.channel
+            return (m.author == ctx.author) and (m.channel == ctx.channel)
 
         while True:
             try:
-                resp = await self.bot.wait_for("message", check=check, timeout=120)
-                txt = resp.content.strip().lower()
-                if txt == "yes":
+                msg = await self.bot.wait_for("message", check=check, timeout=120)
+                lower = msg.content.strip().lower()
+                if lower == "yes":
                     ret = self.store_learn_solutions(tag, suggestion)
                     await ctx.send(ret)
                     break
-                elif txt == "stop":
+                elif lower == "stop":
                     await ctx.send("Learning cancelled.")
                     break
-                elif txt.startswith("no"):
-                    instructions = resp.content[2:].strip()
+                elif lower.startswith("no"):
+                    instructions = msg.content[2:].strip()
                     refine_prompt = base_prompt + "\nAdditional instructions:\n" + instructions
                     try:
                         async with ctx.typing():
                             suggestion = await self.query_llm(refine_prompt)
-                        refine_chunks = chunkify(suggestion, 1900)
-                        for ix, c2 in enumerate(refine_chunks, 1):
-                            await ctx.send(f"**Updated (Part {ix}/{len(refine_chunks)}):**\n```\n{c2}\n```")
+                        if len(suggestion) <= 2000:
+                            await ctx.send(f"```\n{suggestion}\n```")
+                        else:
+                            more_parts = chunkify(suggestion, 1900)
+                            for ix, cc in enumerate(more_parts, 1):
+                                await ctx.send(f"**Updated (Part {ix}/{len(more_parts)}):**\n```\n{cc}\n```")
                         await ctx.send("Type `yes` to confirm, `no [instructions]` to refine again, or `stop` to cancel.")
                     except Exception as ee:
                         await ctx.send(f"Error: {ee}")
@@ -367,35 +413,41 @@ class LLMManager(commands.Cog):
                 break
 
     def store_learn_solutions(self, tag: str, suggestion: str) -> str:
+        """
+        Parse LLM's suggestion for new solutions:
+        Must be in {\"solutions\": [...]} JSON or fallback to 'General'.
+        """
         pat = r"(?s)```json\s*(\{.*?\})\s*```"
         mt = re.search(pat, suggestion)
         raw = suggestion
         if mt:
             raw = mt.group(1)
+
         try:
             data = json.loads(raw)
             if not isinstance(data, dict):
-                raise ValueError("parsed is not a dict")
+                raise ValueError("parsed data isn't a dict")
             solutions = data.get("solutions", [])
             if not isinstance(solutions, list):
-                raise ValueError("missing 'solutions' array")
+                raise ValueError("No valid 'solutions' array")
 
             knowledge = self.load_knowledge()
             changed = 0
             if tag not in knowledge:
                 knowledge[tag] = []
+
             for fix in solutions:
                 if fix not in knowledge[tag]:
                     knowledge[tag].append(fix)
                     changed += 1
+
             self.save_knowledge(knowledge)
-            return f"Added {changed} new solution(s) to tag '{tag}'"
+            return f"Added {changed} solution(s) to tag '{tag}'."
         except Exception:
             knowledge = self.load_knowledge()
-            # store entire text in "General"
-            from_text = self.add_entry_to_tag(knowledge, "General", suggestion)
+            added = self.add_entry_to_tag(knowledge, "General", suggestion)
             self.save_knowledge(knowledge)
-            if from_text:
-                return "LLM output wasn't valid JSON. Entire text stored in 'General'."
+            if added:
+                return "Not valid JSON. Entire text stored in 'General'."
             else:
-                return "LLM output wasn't valid JSON, and was already in 'General'."
+                return "Not valid JSON, but text was already in 'General'."
