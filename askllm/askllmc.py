@@ -162,35 +162,51 @@ class LLMManager(commands.Cog):
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """
-        1) Filter knowledge by question + partial match on tags/entries
-        2) If no matches, fallback to entire knowledge
-        3) Build prompt, ask LLM
+        1) Filter knowledge by question.
+        2) Build prompt.
+        3) Send prompt to LLM.
+        4) Chunk the response so it never exceeds Discord’s 2000-char limit.
         """
-        knowledge = self.load_knowledge()
-        filtered = self.filter_knowledge_by_query(question, knowledge, max_entries=30)
-
-        if filtered:
-            note = "Filtered knowledge based on your question.\n"
-            final_knowledge = filtered
+        full_knowledge = self.load_knowledge()
+        relevant_knowledge = self.search_knowledge(question, full_knowledge)
+    
+        if relevant_knowledge:
+            subset = relevant_knowledge
+            note = "Filtered knowledge:\n"
         else:
-            note = "No matched entries found; using entire knowledge.\n"
-            final_knowledge = knowledge
-
-        prompt = (
+            subset = full_knowledge
+            note = "No matched entries, using entire knowledge.\n"
+    
+        prompt_context = (
             f"{note}"
             "Use the following knowledge to answer accurately. Do not guess.\n\n"
-            f"Knowledge:\n{json.dumps(final_knowledge, indent=2)}\n\n"
+            f"Knowledge:\n{json.dumps(subset, indent=2)}\n\n"
             f"User Question: {question}"
         )
+    
+        model = await self.config.model()
+        api_url = await self._get_api_url()
+    
         async with ctx.typing():
             try:
-                answer = await self.query_llm(prompt)
-                if not filtered:
-                    answer += "\n\n(Note: no matched entries, used entire knowledge.)"
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt_context}],
+                    "stream": False
+                }
+                headers = {"Content-Type": "application/json"}
+                r = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
+                r.raise_for_status()
+                data = r.json()
+                answer = data.get("message", {}).get("content", "No valid response received.")
+    
+                # Now chunkify the final answer so it never exceeds 2000 chars
+                chunks = chunkify(answer, max_size=1900)
             except Exception as e:
-                answer = f"Error: {e}"
-
-        await ctx.send(answer)
+                chunks = [f"Error: {e}"]
+    
+        for i, c in enumerate(chunks, 1):
+            await ctx.send(f"**Answer (Part {i}/{len(chunks)}):**\n```\n{c}\n```")
 
     ############################
     # Knowledge base commands
