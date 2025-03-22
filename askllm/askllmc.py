@@ -153,27 +153,29 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Added info under '{tag.lower()}'.")
 
     @commands.command()
-        async def llmknowshow(self, ctx):
-            results = await self.get_all_content()
-            if not results:
-                return await ctx.send("No tags stored.")
-    
-            chunks = []
-            current_chunk = "```\n"
-            for _id, tag, text in results:
-                line = f"[{_id}] ({tag}) {text}\n"
-                if len(current_chunk) + len(line) > 1990:
-                    current_chunk += "```"
-                    chunks.append(current_chunk)
-                    current_chunk = "```\n" + line
-                else:
-                    current_chunk += line
-            if current_chunk.strip():
+    async def llmknowshow(self, ctx):
+        results = await self.get_all_content()
+        if not results:
+            await ctx.send("No tags stored.")
+            return
+
+        chunks = []
+        current_chunk = "```\n"
+        for _id, tag, text in results:
+            line = f"[{_id}] ({tag}) {text}\n"
+            if len(current_chunk) + len(line) > 1990:
                 current_chunk += "```"
                 chunks.append(current_chunk)
-    
-            for chunk in chunks:
-                await ctx.send(chunk)
+                current_chunk = "```\n" + line
+            else:
+                current_chunk += line
+
+        if current_chunk.strip():
+            current_chunk += "```"
+            chunks.append(current_chunk)
+
+        for chunk in chunks:
+            await ctx.send(chunk)
             
     @commands.command()
     @commands.has_permissions(administrator=True)
