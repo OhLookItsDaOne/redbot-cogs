@@ -55,24 +55,48 @@ class LLMManager(commands.Cog):
         with self.knowledge_file.open("w") as file:
             json.dump(knowledge, file, indent=4)
 
-    #
-    #  Add an entry to a tag only if it doesn't already exist. Returns True if added, False if duplicate.
-    #
     def add_entry_to_tag(self, knowledge: dict, tag: str, entry) -> bool:
+        """
+        Adds 'entry' to knowledge[tag] only if an identical entry isn't already there.
+        Returns True if added, False if it's a duplicate.
+        """
         if tag not in knowledge:
             knowledge[tag] = []
-        if entry in knowledge[tag]:  # simple direct-compare for duplicates
+        if entry in knowledge[tag]:
             return False
         knowledge[tag].append(entry)
         return True
+
+    ######################################################
+    # Simple naive approach to filter knowledge by query
+    ######################################################
+    def search_knowledge(self, query: str, knowledge: dict) -> dict:
+        """
+        Returns a subset of the knowledge dict containing any of the keywords in 'query'.
+        We'll do a simple approach:
+         - split query into keywords
+         - check if any keyword is found (case-insensitive) in each knowledge entry
+        """
+        keywords = set(query.lower().split())
+        filtered = {}
+
+        for tag, entries in knowledge.items():
+            matched_entries = []
+            for entry in entries:
+                entry_str = str(entry).lower()
+                if any(kw in entry_str for kw in keywords):
+                    matched_entries.append(entry)
+            if matched_entries:
+                filtered[tag] = matched_entries
+        return filtered
 
     async def _get_api_url(self):
         return await self.config.api_url()
 
     async def get_llm_response(self, prompt: str):
         """
-        We call this to send a custom prompt to the LLM
-        without automatically including old knowledge in the context.
+        Basic function to send a custom prompt to the LLM
+        with no automatic knowledge injection.
         """
         model = await self.config.model()
         api_url = await self._get_api_url()
@@ -88,9 +112,9 @@ class LLMManager(commands.Cog):
         data = response.json()
         return data.get("message", {}).get("content", "No valid response received.")
 
-    #
-    #  on_message: if the bot is mentioned, reply with old knowledge
-    #
+    ###############################################
+    # on_message: mention -> respond with knowledge
+    ###############################################
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -100,12 +124,9 @@ class LLMManager(commands.Cog):
             if question:
                 try:
                     async with message.channel.typing():
-                        # build a prompt that includes all knowledge
-                        # (like the old logic if you want)
-                        # or if you already have a function for that, reuse it
                         knowledge = self.load_knowledge()
-                        api_url = await self._get_api_url()
                         model = await self.config.model()
+                        api_url = await self._get_api_url()
 
                         context = (
                             "Use the following knowledge to answer accurately. "
@@ -127,10 +148,9 @@ class LLMManager(commands.Cog):
                 except Exception as e:
                     await message.channel.send(f"Error: {e}")
 
-    ##################################################
+    ###############################################
     # Basic LLM / Model mgmt
-    ##################################################
-
+    ###############################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
@@ -156,78 +176,57 @@ class LLMManager(commands.Cog):
         await self.config.api_url.set(url)
         await ctx.send(f"Ollama API URL set to `{url}`")
 
-    #
-    #  askllm uses the entire knowledge
-    #
-def search_knowledge(query: str, knowledge: dict) -> dict:
-    """
-    Returns a subset of the knowledge dict that contains any of the keywords in 'query'.
-    We'll do a simple naive approach:
-      - split query into keywords
-      - check if any keyword is found (case-insensitive) in the knowledge entry.
-    """
-    keywords = set(query.lower().split())  # naive splitting on whitespace
-    filtered = {}
+    ###############################################
+    # askllm with filtered knowledge
+    ###############################################
+    @commands.command()
+    async def askllm(self, ctx, *, question: str):
+        """
+        Filters knowledge to only the entries containing keywords from 'question'.
+        If none found, fallback to entire knowledge. Then ask the LLM.
+        """
+        full_knowledge = self.load_knowledge()
+        relevant_knowledge = self.search_knowledge(question, full_knowledge)
 
-    for tag, entries in knowledge.items():
-        matched_entries = []
-        for entry in entries:
-            # Convert entry to string for searching
-            entry_str = str(entry).lower()
-            # If ANY of the keywords appear in entry_str, we keep it
-            if any(kw in entry_str for kw in keywords):
-                matched_entries.append(entry)
-        if matched_entries:
-            filtered[tag] = matched_entries
-    return filtered
+        if relevant_knowledge:
+            subset = relevant_knowledge
+            note = "Showing only filtered results based on your question.\n"
+        else:
+            subset = full_knowledge
+            note = "No matched entries found; using entire knowledge.\n"
 
+        prompt_context = (
+            f"{note}"
+            "Use the following knowledge to answer accurately. Do not guess.\n\n"
+            f"Knowledge:\n{json.dumps(subset, indent=2)}\n\n"
+            f"User Question: {question}"
+        )
 
-@commands.command()
-async def askllm(self, ctx, *, question: str):
-    """
-    Sends a message to the LLM, but first filters knowledge 
-    to only those entries that match the user's question.
-    """
-    full_knowledge = self.load_knowledge()
-    # 1) Filter knowledge based on the question
-    relevant_knowledge = search_knowledge(question, full_knowledge)
+        model = await self.config.model()
+        api_url = await self._get_api_url()
 
-    # 2) Build prompt with only relevant knowledge
-    #    If 'relevant_knowledge' is empty, we might show the user a note about "no relevant info found."
-    prompt_context = (
-        "Use the following relevant knowledge to answer accurately. Do not guess.\n\n"
-        f"Relevant Knowledge:\n{json.dumps(relevant_knowledge, indent=2)}\n\n"
-        f"User Question: {question}"
-    )
+        async with ctx.typing():
+            try:
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt_context}],
+                    "stream": False
+                }
+                headers = {"Content-Type": "application/json"}
+                r = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
+                r.raise_for_status()
+                data = r.json()
+                answer = data.get("message", {}).get("content", "No valid response received.")
+                if not relevant_knowledge:
+                    answer += "\n\n(Note: no matched entries; used entire knowledge.)"
+            except Exception as e:
+                answer = f"Error: {e}"
 
-    # 3) Send prompt to LLM
-    model = await self.config.model()
-    api_url = await self._get_api_url()
+        await ctx.send(answer)
 
-    async with ctx.typing():
-        try:
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt_context}],
-                "stream": False
-            }
-            headers = {"Content-Type": "application/json"}
-            r = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-            r.raise_for_status()
-            data = r.json()
-            answer = data.get("message", {}).get("content", "No valid response received.")
-            if not relevant_knowledge:
-                # Optionally let the user know that no matched knowledge was found
-                answer += "\n\nNote: I found no matching knowledge entries. This might be a guess."
-        except Exception as e:
-            answer = f"Error: {e}"
-
-    await ctx.send(answer)
-
-    ##################################################
-    #    Knowledge Base Commands
-    ##################################################
-
+    ###############################################
+    # Knowledge Base Commands
+    ###############################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
@@ -256,7 +255,7 @@ async def askllm(self, ctx, *, question: str):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, tag: str, index: int):
-        """Deletes info by index."""
+        """Deletes info by index from a specific tag."""
         knowledge = self.load_knowledge()
         if tag in knowledge and 0 <= index < len(knowledge[tag]):
             deleted = knowledge[tag].pop(index)
@@ -279,18 +278,17 @@ async def askllm(self, ctx, *, question: str):
         else:
             await ctx.send("Tag not found.")
 
-    ###################################################
-    #    New Learn Command: !learn <tag> <message_count>
-    ###################################################
+    ###############################################
+    # New Learn Command: !learn <tag> <message_count>
+    ###############################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, tag: str, amount: int = 20):
         """
-        Gathers last [amount] messages (excluding bots & this command).
+        Reads last [amount] messages (excluding bot msgs & this command).
         The LLM sees only that conversation and the existing knowledge for <tag>.
         LLM should output JSON with new solutions. Then admin decides yes/no/stop.
         """
-        # 1) Gather messages
         def not_command_or_bot(m: discord.Message):
             if m.author.bot:
                 return False
@@ -308,21 +306,18 @@ async def askllm(self, ctx, *, question: str):
         messages.reverse()
         conversation = "\n".join(f"{m.author.name}: {m.content}" for m in messages)
 
-        # 2) Grab existing knowledge for this tag
+        # existing knowledge for this tag
         knowledge = self.load_knowledge()
         existing_entries = knowledge.get(tag, [])
 
-        # 3) Build specialized prompt
-        # LLM sees only the existing entries for that tag (if any),
-        # and the conversation. Output new solutions as valid JSON
         base_prompt = (
             f"Existing solutions for tag '{tag}':\n"
             f"{json.dumps(existing_entries, indent=2)}\n\n"
             "Below is a conversation. Extract only new or refined solutions for that tag.\n"
-            "Output them as valid JSON. Example structure:\n"
+            "Output them as valid JSON. Example:\n"
             "{\n"
             "  \"solutions\": [\n"
-            "    \"some new fix...\"," 
+            "    \"some new fix...\",\n"
             "    \"some other fix...\"\n"
             "  ]\n"
             "}\n\n"
@@ -333,7 +328,6 @@ async def askllm(self, ctx, *, question: str):
         async with ctx.typing():
             suggestion = await self.get_llm_response(base_prompt)
 
-        # Present to admin
         await ctx.send(
             f"Suggested new solutions for tag '{tag}':\n```\n{suggestion}\n```\n"
             "Type `yes` to confirm, `no [instructions]` to refine, or `stop` to cancel."
@@ -342,23 +336,20 @@ async def askllm(self, ctx, *, question: str):
         def check(msg: discord.Message):
             return msg.author == ctx.author and msg.channel == ctx.channel
 
-        # 4) Wait for admin interaction
         while True:
             try:
-                response = await self.bot.wait_for("message", check=check, timeout=120)
-                text = response.content.strip().lower()
+                resp = await self.bot.wait_for("message", check=check, timeout=120)
+                txt = resp.content.strip().lower()
 
-                if text == "yes":
-                    # parse JSON, store in that tag
+                if txt == "yes":
                     ret = self.store_learn_solutions(tag, suggestion)
                     await ctx.send(ret)
                     break
-                elif text == "stop":
+                elif txt == "stop":
                     await ctx.send("Learning process cancelled.")
                     break
-                elif text.startswith("no"):
-                    # refine
-                    instructions = response.content[2:].strip()
+                elif txt.startswith("no"):
+                    instructions = resp.content[2:].strip()
                     new_prompt = base_prompt + f"\n\nAdditional instructions:\n{instructions}"
                     async with ctx.typing():
                         suggestion = await self.get_llm_response(new_prompt)
@@ -386,7 +377,6 @@ async def askllm(self, ctx, *, question: str):
         We'll parse that and store each entry in 'tag', skipping duplicates.
         If parse fails, store entire suggestion in 'General'.
         """
-        # attempt code block parse
         pattern = r"(?s)```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, suggestion)
         raw = suggestion
@@ -424,4 +414,3 @@ async def askllm(self, ctx, *, question: str):
                 return "LLM output wasn't valid JSON. Entire text stored in 'General'."
             else:
                 return "LLM output wasn't valid JSON, but that text was already in 'General'."
-
