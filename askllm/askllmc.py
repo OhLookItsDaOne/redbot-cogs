@@ -10,6 +10,31 @@ import re
 import requests
 from redbot.core import commands, Config
 
+# Add synonyms here to enhance naive matching. 
+# Format: "canonical word": ["synonym1", "synonym2", ...]
+SYNONYMS_MAP = {
+    "blackbox": ["black box", "square", "obstruct", "blocked view"],
+    "skse": ["script extender"],
+    # Expand or modify as needed
+}
+
+def expand_query_words(user_words: list[str]) -> set[str]:
+    """
+    For each user word, add that word plus any synonyms from the map.
+    """
+    expanded = set()
+    for w in user_words:
+        expanded.add(w)
+        # If the canonical form is known, add synonyms
+        if w in SYNONYMS_MAP:
+            for syn in SYNONYMS_MAP[w]:
+                expanded.add(syn)
+        # Also check if w is a known synonym => add the canonical
+        for canonical, synonyms in SYNONYMS_MAP.items():
+            if w in synonyms:
+                expanded.add(canonical)
+    return expanded
+
 class LLMManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -83,52 +108,75 @@ class LLMManager(commands.Cog):
     async def process_question(self, question, channel, author=None):
         # 1) Load DB + parse question
         entries = await self.get_all_content()
-        words = re.sub(r"[^\w\s]", "", question.lower()).split()
+
+        # Clean out punctuation, lower them
+        raw_words = re.sub(r"[^\w\s]", "", question.lower()).split()
+        # Expand synonyms
+        expanded_words = expand_query_words(raw_words)
 
         # 2) Special case: user asks "Where did this info come from?"
         if re.search(r"where.*(source|info|information|come from)", question, re.IGNORECASE):
-            # Attempt to match any relevant entries
-            matched_any = False
+            all_links = set()
+            matched = False
+
+            # Check each DB entry for any of the query words
             for _id, tag, content in entries:
-                # If any input word is in the entry, check for links
-                if any(w in content.lower() for w in words):
+                c_lower = content.lower()
+                # If entry content has at least one word from expanded_words:
+                if any(word in c_lower for word in expanded_words):
+                    matched = True
+                    # Gather all links from this content
                     links = re.findall(r"https?://\S+", content)
-                    if links:
-                        formatted = "This information comes from these sources:\n" + "\n".join(links)
-                        await channel.send(formatted)
-                        matched_any = True
-            if not matched_any:
-                await channel.send("No links or sources found in the database for that.")
+                    for link in links:
+                        all_links.add(link)
+
+            if matched and all_links:
+                # Return unique links
+                formatted = "This information comes from these sources:\n" + "\n".join(all_links)
+                await channel.send(formatted)
+            elif matched and not all_links:
+                await channel.send("No links or sources found in the matching database entries.")
+            else:
+                await channel.send("No relevant info found for that.")
             return
 
         # 3) Relevance-scoring for normal queries
         relevance_scores = []
         for _id, tag, content in entries:
-            score = sum(content.lower().count(w) for w in words)
+            c_lower = content.lower()
+            # Instead of counting each occurrence, we do +1 if at least one match
+            # for each word in expanded_words
+            score = 0
+            for w in expanded_words:
+                if w in c_lower:
+                    score += 1
             if score > 0:
-                relevance_scores.append((score, tag, content))
+                relevance_scores.append((score, _id, tag, content))
 
         if not relevance_scores:
             await channel.send("No relevant info found.")
             return
 
         # Sort by descending score
-        relevance_scores.sort(reverse=True)
+        relevance_scores.sort(key=lambda x: x[0], reverse=True)
+        # Take top 20
         top_entries = relevance_scores[:20]
 
         # Build knowledge context
-        knowledge = "\n".join(f"[{tag}] {content}" for _, tag, content in top_entries)
+        knowledge = "\n".join(f"[{tag}] {content}" for _, _id, tag, content in top_entries)
 
         # 4) Build short user chat history
         chat_history = ""
         if author:
             async for msg in channel.history(limit=20):
+                # ignore commands, bot mentions
                 if (
                     msg.author == author
                     and not msg.content.startswith("!")
                     and not msg.content.startswith("<@")
                 ):
                     chat_history = msg.content.strip() + "\n" + chat_history
+                    # only keep last 5 lines
                     if chat_history.count("\n") >= 4:
                         break
 
@@ -142,8 +190,15 @@ class LLMManager(commands.Cog):
             f"User question:\n{question}"
         )
 
-        # 6) Query LLM + send
+        # 6) Query LLM
         answer = await self.query_llm(prompt, channel)
+
+        # 7) Check if LLM gave "No valid response"
+        if answer.strip() == "No valid response received.":
+            await channel.send("Hmm, I couldn't get a valid reply. Try again?")
+            return
+
+        # Otherwise, normal
         await channel.send(answer)
 
     @commands.command()
@@ -207,7 +262,7 @@ class LLMManager(commands.Cog):
 
         for chunk in chunks:
             await ctx.send(chunk)
-            
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, entry_id: int):
