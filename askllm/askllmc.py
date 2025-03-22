@@ -159,32 +159,70 @@ class LLMManager(commands.Cog):
     #
     #  askllm uses the entire knowledge
     #
-    @commands.command()
-    async def askllm(self, ctx, *, question: str):
-        """Sends a question to the LLM using entire knowledge in context."""
-        knowledge = self.load_knowledge()
-        model = await self.config.model()
-        api_url = await self._get_api_url()
+def search_knowledge(query: str, knowledge: dict) -> dict:
+    """
+    Returns a subset of the knowledge dict that contains any of the keywords in 'query'.
+    We'll do a simple naive approach:
+      - split query into keywords
+      - check if any keyword is found (case-insensitive) in the knowledge entry.
+    """
+    keywords = set(query.lower().split())  # naive splitting on whitespace
+    filtered = {}
 
-        prompt = (
-            "Use the provided knowledge to answer accurately. Do not guess.\n\n"
-            f"Knowledge:\n{json.dumps(knowledge)}\n\n"
-            f"Question: {question}"
-        )
-        async with ctx.typing():
-            r = requests.post(
-                f"{api_url}/api/chat",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False
-                },
-                headers={"Content-Type": "application/json"}
-            )
+    for tag, entries in knowledge.items():
+        matched_entries = []
+        for entry in entries:
+            # Convert entry to string for searching
+            entry_str = str(entry).lower()
+            # If ANY of the keywords appear in entry_str, we keep it
+            if any(kw in entry_str for kw in keywords):
+                matched_entries.append(entry)
+        if matched_entries:
+            filtered[tag] = matched_entries
+    return filtered
+
+
+@commands.command()
+async def askllm(self, ctx, *, question: str):
+    """
+    Sends a message to the LLM, but first filters knowledge 
+    to only those entries that match the user's question.
+    """
+    full_knowledge = self.load_knowledge()
+    # 1) Filter knowledge based on the question
+    relevant_knowledge = search_knowledge(question, full_knowledge)
+
+    # 2) Build prompt with only relevant knowledge
+    #    If 'relevant_knowledge' is empty, we might show the user a note about "no relevant info found."
+    prompt_context = (
+        "Use the following relevant knowledge to answer accurately. Do not guess.\n\n"
+        f"Relevant Knowledge:\n{json.dumps(relevant_knowledge, indent=2)}\n\n"
+        f"User Question: {question}"
+    )
+
+    # 3) Send prompt to LLM
+    model = await self.config.model()
+    api_url = await self._get_api_url()
+
+    async with ctx.typing():
+        try:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt_context}],
+                "stream": False
+            }
+            headers = {"Content-Type": "application/json"}
+            r = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
             r.raise_for_status()
             data = r.json()
             answer = data.get("message", {}).get("content", "No valid response received.")
-        await ctx.send(answer)
+            if not relevant_knowledge:
+                # Optionally let the user know that no matched knowledge was found
+                answer += "\n\nNote: I found no matching knowledge entries. This might be a guess."
+        except Exception as e:
+            answer = f"Error: {e}"
+
+    await ctx.send(answer)
 
     ##################################################
     #    Knowledge Base Commands
