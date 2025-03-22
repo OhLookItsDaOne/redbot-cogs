@@ -71,7 +71,7 @@ class LLMManager(commands.Cog):
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "options": {"num_ctx": 32000}
+            "options": {"num_ctx": 14000}
         }
         headers = {"Content-Type": "application/json"}
         async with channel.typing():
@@ -104,9 +104,9 @@ class LLMManager(commands.Cog):
                         break
 
         prompt = (
-            f"You are a helpful assistant with access to a knowledge base.\n"
-            f"Use the following knowledge base to answer the user's question.\n"
-            f"Correct vague language or typos, and be specific and helpful.\n"
+            f"You are a helpful assistant.\n"
+            f"Use the following knowledge database to answer the user's question.\n"
+            f"Correct vague language or typos, and be specific, friendly and helpful.\n"
             f"Avoid repeating what's already been said in previous user messages.\n\n"
             f"Recent user context (last messages):\n{chat_history}\n\n"
             f"Knowledge Base:\n{knowledge}\n\n"
@@ -157,9 +157,26 @@ class LLMManager(commands.Cog):
         results = await self.get_all_content()
         if not results:
             return await ctx.send("No tags stored.")
-        content = "\n".join(f"[{_id}] ({tag}) {text}" for _id, tag, text in results)
-        await ctx.send(f"```{content[:1990]}{'...' if len(content) > 1990 else ''}```")
 
+        chunks = []
+        current_chunk = "```
+"
+        for _id, tag, text in results:
+            line = f"[{_id}] ({tag}) {text}\n"
+            if len(current_chunk) + len(line) > 1990:
+                current_chunk += "```"
+                chunks.append(current_chunk)
+                current_chunk = "```
+" + line
+            else:
+                current_chunk += line
+        if current_chunk.strip():
+            current_chunk += "```"
+            chunks.append(current_chunk)
+
+        for chunk in chunks:
+            await ctx.send(chunk)
+            
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, entry_id: int):
