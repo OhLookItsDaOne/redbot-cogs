@@ -1,10 +1,7 @@
 import discord
 import subprocess
 import sys
-
-# Module automatisch installieren
 subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
-
 import mysql.connector
 import re
 import requests
@@ -41,6 +38,16 @@ class LLMManager(commands.Cog):
             "SELECT tag, content FROM tags WHERE MATCH(content) AGAINST(%s IN NATURAL LANGUAGE MODE) LIMIT %s;",
             (query, limit)
         )
+        results = cursor.fetchall()
+        cursor.close()
+        db.close()
+        return results
+
+    async def get_all_tags(self):
+        db_config = await self.get_db_config()
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("SELECT tag, content FROM tags ORDER BY tag;")
         results = cursor.fetchall()
         cursor.close()
         db.close()
@@ -133,3 +140,15 @@ class LLMManager(commands.Cog):
     async def llmknow(self, ctx, tag: str, *, info: str):
         await self.add_tag_content(tag.lower(), info)
         await ctx.send(f"Added info under '{tag.lower()}'.")
+
+    @commands.command()
+    async def llmknowshow(self, ctx):
+        results = await self.get_all_tags()
+        if not results:
+            await ctx.send("No tags stored.")
+            return
+
+        content = "\n".join(f"[{tag}] {text}" for tag, text in results)
+        if len(content) > 1900:
+            content = content[:1900] + "..."
+        await ctx.send(f"```{content}```")
