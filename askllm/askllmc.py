@@ -81,37 +81,68 @@ class LLMManager(commands.Cog):
         return data.get("message", {}).get("content", "No valid response received.")
 
     async def process_question(self, question, channel, author=None):
+        # 1) Load DB + parse question
         entries = await self.get_all_content()
         words = re.sub(r"[^\w\s]", "", question.lower()).split()
+
+        # 2) Special case: user asks "Where did this info come from?"
+        if re.search(r"where.*(source|info|information|come from)", question, re.IGNORECASE):
+            # Attempt to match any relevant entries
+            matched_any = False
+            for _id, tag, content in entries:
+                # If any input word is in the entry, check for links
+                if any(w in content.lower() for w in words):
+                    links = re.findall(r"https?://\S+", content)
+                    if links:
+                        formatted = "This information comes from these sources:\n" + "\n".join(links)
+                        await channel.send(formatted)
+                        matched_any = True
+            if not matched_any:
+                await channel.send("No links or sources found in the database for that.")
+            return
+
+        # 3) Relevance-scoring for normal queries
         relevance_scores = []
         for _id, tag, content in entries:
             score = sum(content.lower().count(w) for w in words)
             if score > 0:
                 relevance_scores.append((score, tag, content))
+
         if not relevance_scores:
             await channel.send("No relevant info found.")
             return
+
+        # Sort by descending score
         relevance_scores.sort(reverse=True)
         top_entries = relevance_scores[:20]
+
+        # Build knowledge context
         knowledge = "\n".join(f"[{tag}] {content}" for _, tag, content in top_entries)
 
+        # 4) Build short user chat history
         chat_history = ""
         if author:
             async for msg in channel.history(limit=20):
-                if msg.author == author and not msg.content.startswith("!") and not msg.content.startswith("<@"):
+                if (
+                    msg.author == author
+                    and not msg.content.startswith("!")
+                    and not msg.content.startswith("<@")
+                ):
                     chat_history = msg.content.strip() + "\n" + chat_history
                     if chat_history.count("\n") >= 4:
                         break
 
+        # 5) Final prompt
         prompt = (
-            f"You are a helpful assistant.\n"
-            f"Use the following knowledge database to answer the user's question.\n"
-            f"Correct vague language or typos, and be specific, friendly and helpful.\n"
-            f"Avoid repeating what's already been said in previous user messages.\n\n"
-            f"Recent user context (last messages):\n{chat_history}\n\n"
+            "You must only use the following information to answer the user's question.\n"
+            "Do not guess or fabricate answers.\n"
+            "If unsure, reply: 'Sorry, I couldn't find that in the knowledge base.'\n\n"
+            f"Recent user context:\n{chat_history}\n\n"
             f"Knowledge Base:\n{knowledge}\n\n"
             f"User question:\n{question}"
         )
+
+        # 6) Query LLM + send
         answer = await self.query_llm(prompt, channel)
         await channel.send(answer)
 
