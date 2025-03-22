@@ -20,13 +20,11 @@ class LLMManager(commands.Cog):
             db_config={"host": "", "user": "", "password": "", "database": ""}
         )
 
-    # MariaDB Helpers
     async def get_db_config(self):
         return await self.config.db_config()
 
     async def add_tag_content(self, tag, content):
-        db_config = await self.get_db_config()
-        db = mysql.connector.connect(**db_config)
+        db = mysql.connector.connect(**await self.get_db_config())
         cursor = db.cursor()
         cursor.execute("INSERT INTO tags (tag, content) VALUES (%s, %s);", (tag, content))
         db.commit()
@@ -34,8 +32,7 @@ class LLMManager(commands.Cog):
         db.close()
 
     async def edit_tag_content(self, entry_id, new_content):
-        db_config = await self.get_db_config()
-        db = mysql.connector.connect(**db_config)
+        db = mysql.connector.connect(**await self.get_db_config())
         cursor = db.cursor()
         cursor.execute("UPDATE tags SET content = %s WHERE id = %s;", (new_content, entry_id))
         db.commit()
@@ -43,8 +40,7 @@ class LLMManager(commands.Cog):
         db.close()
 
     async def delete_tag_by_id(self, entry_id):
-        db_config = await self.get_db_config()
-        db = mysql.connector.connect(**db_config)
+        db = mysql.connector.connect(**await self.get_db_config())
         cursor = db.cursor()
         cursor.execute("DELETE FROM tags WHERE id = %s;", (entry_id,))
         db.commit()
@@ -52,8 +48,7 @@ class LLMManager(commands.Cog):
         db.close()
 
     async def delete_tag_by_name(self, tag):
-        db_config = await self.get_db_config()
-        db = mysql.connector.connect(**db_config)
+        db = mysql.connector.connect(**await self.get_db_config())
         cursor = db.cursor()
         cursor.execute("DELETE FROM tags WHERE tag = %s;", (tag,))
         db.commit()
@@ -61,8 +56,7 @@ class LLMManager(commands.Cog):
         db.close()
 
     async def get_all_content(self):
-        db_config = await self.get_db_config()
-        db = mysql.connector.connect(**db_config)
+        db = mysql.connector.connect(**await self.get_db_config())
         cursor = db.cursor()
         cursor.execute("SELECT id, tag, content FROM tags ORDER BY id;")
         results = cursor.fetchall()
@@ -70,75 +64,60 @@ class LLMManager(commands.Cog):
         db.close()
         return results
 
-    # Query the LLM
     async def query_llm(self, prompt, channel):
-        final_prompt = prompt + "\n\nPlease keep final answer under 2000 characters."
         model = await self.config.model()
         api_url = await self.config.api_url()
-
-        payload = {"model": model, "messages": [{"role": "user", "content": final_prompt}], "stream": False}
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"num_ctx": 32000}
+        }
         headers = {"Content-Type": "application/json"}
-
         async with channel.typing():
             resp = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-
         return data.get("message", {}).get("content", "No valid response received.")
 
-    # Commands
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setmodel(self, ctx, model: str):
-        await self.config.model.set(model)
-        await ctx.send(f"LLM model set to '{model}'.")
+    async def process_question(self, question, channel, author=None):
+        entries = await self.get_all_content()
+        words = re.sub(r"[^\w\s]", "", question.lower()).split()
+        relevance_scores = []
+        for _id, tag, content in entries:
+            score = sum(content.lower().count(w) for w in words)
+            if score > 0:
+                relevance_scores.append((score, tag, content))
+        if not relevance_scores:
+            await channel.send("No relevant info found.")
+            return
+        relevance_scores.sort(reverse=True)
+        top_entries = relevance_scores[:20]
+        knowledge = "\n".join(f"[{tag}] {content}" for _, tag, content in top_entries)
 
-    @commands.command()
-    async def modellist(self, ctx):
-        api_url = await self.config.api_url()
-        try:
-            r = requests.get(f"{api_url}/api/tags")
-            r.raise_for_status()
-            data = r.json()
-            models = [m["name"] for m in data.get("models", [])]
-            await ctx.send(f"Available models: {', '.join(models)}")
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
+        chat_history = ""
+        if author:
+            async for msg in channel.history(limit=20):
+                if msg.author == author and not msg.content.startswith("!") and not msg.content.startswith("<@"):
+                    chat_history = msg.content.strip() + "\n" + chat_history
+                    if chat_history.count("\n") >= 4:
+                        break
 
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setapi(self, ctx, url: str):
-        url = url.rstrip("/")
-        await self.config.api_url.set(url)
-        await ctx.send(f"Ollama API URL set to '{url}'.")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setdb(self, ctx, host: str, user: str, password: str, database: str):
-        await self.config.db_config.set({"host": host, "user": user, "password": password, "database": database})
-        await ctx.send("Database configuration updated.")
+        prompt = (
+            f"You are a helpful assistant with access to a knowledge base.\n"
+            f"Use the following knowledge base to answer the user's question.\n"
+            f"Correct vague language or typos, and be specific and helpful.\n"
+            f"Avoid repeating what's already been said in previous user messages.\n\n"
+            f"Recent user context (last messages):\n{chat_history}\n\n"
+            f"Knowledge Base:\n{knowledge}\n\n"
+            f"User question:\n{question}"
+        )
+        answer = await self.query_llm(prompt, channel)
+        await channel.send(answer)
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        await self.process_question(question, ctx.channel)
-
-    async def process_question(self, question, channel):
-        entries = await self.get_all_content()
-        words = re.sub(r"[^\w\s]", "", question.lower()).split()
-
-        filtered = []
-        for _id, tag, content in entries:
-            if any(w in content.lower() for w in words):
-                filtered.append((tag, content))
-
-        if not filtered:
-            await channel.send("No relevant info found.")
-            return
-
-        context = "\n".join(f"[{tag}] {content}" for tag, content in filtered)
-        prompt = f"Using this knowledge base:\n{context}\nPlease answer the question as clearly and accurately as possible, correcting for typos or vague language if needed:\n{question}"
-        answer = await self.query_llm(prompt, channel)
-        await channel.send(answer)
+        await self.process_question(question, ctx.channel, author=ctx.author)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -147,43 +126,25 @@ class LLMManager(commands.Cog):
         if self.bot.user.mentioned_in(message):
             question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
             if question:
-                await self.process_question(question, message.channel)
+                await self.process_question(question, message.channel, author=message.author)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def learn(self, ctx, tag: str, amount: int = 20):
-        msgs = [msg async for msg in ctx.channel.history(limit=amount+5) if not msg.author.bot][:amount]
-        conversation = "\n".join(f"{m.author.name}: {m.content}" for m in reversed(msgs))
+    async def setmodel(self, ctx, model: str):
+        await self.config.model.set(model)
+        await ctx.send(f"LLM model set to '{model}'.")
 
-        prompt = f"Summarize or produce new helpful info for '{tag}':\n{conversation}"
-        suggestion = await self.query_llm(prompt, ctx.channel)
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setapi(self, ctx, url: str):
+        await self.config.api_url.set(url.rstrip("/"))
+        await ctx.send(f"Ollama API URL set to '{url}'.")
 
-        await ctx.send(suggestion)
-        await ctx.send("Type 'yes' to confirm, 'edit [instructions]' to refine, or 'stop' to cancel.")
-
-        def check(m):
-            return m.author == ctx.author and m.channel == ctx.channel
-
-        while True:
-            reply = await self.bot.wait_for("message", check=check, timeout=180)
-            text = reply.content.strip()
-            lower = text.lower()
-
-            if lower == "yes":
-                await self.add_tag_content(tag.lower(), suggestion)
-                await ctx.send(f"Stored new info under '{tag.lower()}'.")
-                break
-
-            elif lower.startswith("edit"):
-                instructions = text[4:].strip()
-                refine_prompt = f"{prompt}\n\nUser additional instructions: {instructions}"
-                suggestion = await self.query_llm(refine_prompt, ctx.channel)
-                await ctx.send(suggestion)
-                await ctx.send("Type 'yes' to confirm, 'edit [instructions]' to refine, or 'stop' to cancel.")
-
-            elif lower == "stop":
-                await ctx.send("Learning canceled.")
-                break
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setdb(self, ctx, host: str, user: str, password: str, database: str):
+        await self.config.db_config.set({"host": host, "user": user, "password": password, "database": database})
+        await ctx.send("Database configuration updated.")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -195,14 +156,9 @@ class LLMManager(commands.Cog):
     async def llmknowshow(self, ctx):
         results = await self.get_all_content()
         if not results:
-            await ctx.send("No tags stored.")
-            return
-
-        lines = [f"[{_id}] ({tag}) {text}" for _id, tag, text in results]
-        content = "\n".join(lines)
-        if len(content) > 1900:
-            content = content[:1900] + "..."
-        await ctx.send(f"```{content}```")
+            return await ctx.send("No tags stored.")
+        content = "\n".join(f"[{_id}] ({tag}) {text}" for _id, tag, text in results)
+        await ctx.send(f"```{content[:1990]}{'...' if len(content) > 1990 else ''}```")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
