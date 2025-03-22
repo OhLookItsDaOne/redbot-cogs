@@ -6,34 +6,42 @@ import requests
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
 
+##########################################################
+# A simple filter for lines by given keywords
+##########################################################
 def filter_lines_by_keywords(lines: list, keywords: list) -> list:
-    """Returns only those lines that contain ANY of the given keywords (case-insensitive)."""
+    """Returns lines that contain ANY of the keywords (case-insensitive)."""
     filtered = []
     for line in lines:
-        lower_line = line.lower()
-        if any(kw.lower() in lower_line for kw in keywords):
+        low = line.lower()
+        if any(kw.lower() in low for kw in keywords):
             filtered.append(line)
     return filtered
 
 class LLMManager(commands.Cog):
     """
-    A simplified two-phase approach for !askllm, with separate JSON files per tag.
-    No chunkify, no triple backticks in final answer. If LLM goes over 2000 chars, it might fail.
-    Also ensures learn/tag commands create .json if missing.
+    Cog that:
+    - Uses separate .json files for each tag in ./tags/
+    - Two-phase approach for ask:
+      Phase1: LLM sees the file list + user question => picks { files: [...], keywords:{...} }
+      Phase2: We load & filter those lines => final answer.
+    - Responds to both !askllm and bot mention with same approach.
+    - Shows 'typing' for each phase, doesn't chunkify final answer.
+    - Includes learn, llmknowshow, llmknow, etc. with triple-backtick for show.
     """
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1234567890)
+        self.config = Config.get_conf(self, identifier=9999999999)
         self.config.register_global(model="gemma3:12b", api_url="http://localhost:11434")
 
         self.tags_folder = cog_data_path(self) / "tags"
         if not self.tags_folder.exists():
             self.tags_folder.mkdir(parents=True, exist_ok=True)
 
-    #############################################
-    # Basic Model / API commands
-    #############################################
+    ##########################################################
+    # Basic Model/API commands
+    ##########################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
@@ -44,9 +52,9 @@ class LLMManager(commands.Cog):
     async def modellist(self, ctx):
         api_url = await self.config.api_url()
         try:
-            r = requests.get(f"{api_url}/api/tags")
-            r.raise_for_status()
-            data = r.json()
+            resp = requests.get(f"{api_url}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
             models = [m["name"] for m in data.get("models", [])]
             if models:
                 await ctx.send(f"Available models: {', '.join(models)}")
@@ -58,24 +66,23 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setapi(self, ctx, url: str):
-        """Sets the Ollama API URL."""
         url = url.rstrip("/")
         await self.config.api_url.set(url)
         await ctx.send(f"Ollama API URL set to '{url}'.")
 
-    #############################################
+    ##########################################################
     # Tag file utilities
-    #############################################
+    ##########################################################
     def list_tag_files(self) -> list:
-        """Returns all .json files in tags_folder."""
-        result = []
+        """Returns all .json files in the tags_folder."""
+        files = []
         for fname in os.listdir(self.tags_folder):
             if fname.lower().endswith(".json"):
-                result.append(fname)
-        return result
+                files.append(fname)
+        return files
 
     def load_tag_file(self, fname: str) -> list:
-        """Loads a single tag file as a list of lines, or empty if missing/corrupt."""
+        """Loads fname as a list of lines, or returns [] if missing/corrupt."""
         path = self.tags_folder / fname
         if not path.exists():
             return []
@@ -93,15 +100,15 @@ class LLMManager(commands.Cog):
         with path.open("w", encoding="utf-8") as f:
             json.dump(lines, f, indent=2)
 
-    #############################################
-    # LLM query with "keep answer short"
-    #############################################
-    async def query_llm(self, prompt: str) -> str:
+    ##########################################################
+    # The LLM call with "typing" indicator, no chunkify
+    ##########################################################
+    async def query_llm(self, prompt: str, channel: discord.abc.Messageable) -> str:
         """
-        Instruct LLM to keep final answer short. 
-        No chunkify. If it disobeys, we might see a Discord error.
+        We instruct LLM to keep final answer under 2000 chars.
+        We'll show 'typing' in the given channel while calling the LLM.
         """
-        final_prompt = prompt + "\n\nPlease keep your final answer concise (<2000 chars)."
+        final_prompt = prompt + "\n\nPlease keep your final answer under 2000 characters."
         model = await self.config.model()
         api_url = await self.config.api_url()
 
@@ -110,52 +117,46 @@ class LLMManager(commands.Cog):
             "messages": [{"role":"user","content":final_prompt}],
             "stream": False
         }
-        headers = {"Content-Type": "application/json"}
-        r = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-        text = data.get("message",{}).get("content","No valid response received.")
-        return text.replace("\n\n","\n")
+        headers = {"Content-Type":"application/json"}
 
-    #############################################
-    # The two-phase askllm approach
-    #############################################
-    @commands.command()
-    async def askllm(self, ctx, *, question: str):
+        async with channel.typing():
+            resp = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        text = data.get("message", {}).get("content", "No valid response received.")
+        return text.replace("\n\n", "\n")
+
+    ##########################################################
+    # The Shared Two-Phase Logic
+    ##########################################################
+    async def run_two_phase(self, question: str, channel: discord.abc.Messageable):
         """
-        Phase1 -> LLM sees file list + question -> returns JSON with { files:[], keywords:{} }
-        Phase2 -> We load+filter those lines, pass them + question back to LLM, 
-                  then send final answer with no triple backticks or chunkify
+        The two-phase logic:
+          Phase1 => LLM sees file list + question => returns JSON
+          Phase2 => We load+filter lines, pass them + question => final answer
+        Then we send final to 'channel' with no chunkify.
         """
         all_files = self.list_tag_files()
         if not all_files:
-            return await ctx.send("No tag files found. Please use !learn or !llmknow to create some first.")
+            await channel.send("No tag files exist. Please use !learn or !llmknow first.")
+            return
 
-        # Phase 1
+        # Phase1 prompt
         files_str = "\n".join(all_files)
         phase1_prompt = (
-            "We have multiple JSON files containing lines of specialized info.\n"
-            "User question:\n"
-            f"{question}\n\n"
+            "We have multiple JSON files with lines of info.\n"
+            f"User question:\n{question}\n\n"
             "List of possible files:\n"
             f"{files_str}\n\n"
-            "Propose which files might be relevant and what keywords to look for in each file.\n"
-            "Return valid JSON:\n"
-            "{\n"
-            "  \"files\": [ \"somefile.json\" ],\n"
-            "  \"keywords\": {\n"
-            "    \"somefile.json\": [\"keyword1\",\"keyword2\"]\n"
-            "  }\n"
-            "}\n"
-            "If none relevant, 'files':[], 'keywords':{}."
+            "Return JSON: { \"files\": [...], \"keywords\": { 'file.json': [ 'kw1','kw2'], ... } }.\n"
+            "If none relevant => 'files':[], 'keywords':{}."
         )
-        try:
-            phase1_answer = await self.query_llm(phase1_prompt)
-        except Exception as e:
-            return await ctx.send(f"Phase1 error: {e}")
+        # We do the LLM call
+        phase1_answer = await self.query_llm(phase1_prompt, channel)
 
-        # Attempt to parse the JSON
-        pat = r"(?s)```json\s*(\{.*?\})\s*```"
+        # parse JSON
+        pat = r"```json\s*(\{.*?\})\s*```"
         mt = re.search(pat, phase1_answer)
         raw_json = mt.group(1) if mt else phase1_answer.strip()
 
@@ -171,12 +172,13 @@ class LLMManager(commands.Cog):
         except:
             pass
 
-        # filter out nonexistent
+        # filter nonexistent
         final_files = [f for f in chosen_files if f in all_files]
         if not final_files:
-            return await ctx.send("No relevant files found or invalid Phase1 response. Stopping.")
+            await channel.send("No relevant files or invalid Phase1 JSON. Stopping.")
+            return
 
-        # Phase 2 -> load & filter
+        # Phase 2 => load+filter lines
         subset_map = {}
         for f in final_files:
             lines = self.load_tag_file(f)
@@ -186,24 +188,144 @@ class LLMManager(commands.Cog):
             subset_map[f] = lines
 
         phase2_prompt = (
-            "Below is the filtered content from the chosen files:\n"
+            "Here are lines from the chosen files after filtering:\n"
             f"{json.dumps(subset_map, indent=2)}\n\n"
-            "Now answer the user's question based on this info only:\n"
-            f"{question}"
+            f"Now answer the user's question:\n{question}"
+        )
+        final_answer = await self.query_llm(phase2_prompt, channel)
+
+        # send final answer
+        await channel.send(final_answer)
+
+    ##########################################################
+    # on_message => mention => run_two_phase
+    ##########################################################
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if self.bot.user.mentioned_in(message):
+            question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if question:
+                await self.run_two_phase(question, message.channel)
+
+    ##########################################################
+    # !askllm => same approach
+    ##########################################################
+    @commands.command()
+    async def askllm(self, ctx, *, question: str):
+        """Runs the same two-phase approach as mention => run_two_phase."""
+        await self.run_two_phase(question, ctx.channel)
+
+    ##########################################################
+    # !learn <tag> <amount>
+    ##########################################################
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def learn(self, ctx, tag: str, amount: int=20):
+        """
+        Reads last <amount> msgs, LLM => { "solutions":[...] }, user says yes/no/stop
+        """
+        def not_command_or_bot(m: discord.Message):
+            return (not m.author.bot) and (m.id != ctx.message.id)
+
+        msgs = []
+        async for msg in ctx.channel.history(limit=amount+5):
+            if not_command_or_bot(msg):
+                msgs.append(msg)
+            if len(msgs)>=amount:
+                break
+        msgs.reverse()
+        conversation = "\n".join(f"{m.author.name}: {m.content}" for m in msgs)
+
+        fname = f"{tag.lower()}.json"
+        old_data = self.load_tag_file(fname)
+
+        base_prompt = (
+            f"Existing solutions for tag '{tag}':\n"
+            f"{json.dumps(old_data, indent=2)}\n\n"
+            "Below is a conversation. Extract new or refined solutions for that tag.\n"
+            "Output JSON: {\"solutions\":[\"fix1\",\"fix2\"]}\n\n"
+            f"Conversation:\n{conversation}"
         )
         try:
-            final_answer = await self.query_llm(phase2_prompt)
+            suggestion = await self.query_llm(base_prompt, ctx.channel)
         except Exception as e:
-            return await ctx.send(f"Phase2 error: {e}")
+            return await ctx.send(f"Error: {e}")
 
-        await ctx.send(final_answer)  # no triple backticks, no chunkify
+        await ctx.send(suggestion)
+        await ctx.send("Type 'yes' to confirm, 'no [instructions]' to refine, or 'stop' to cancel.")
 
-    #############################################
-    # !llmknowshow => merges & displays all tags
-    #############################################
+        def check(m: discord.Message):
+            return (m.author == ctx.author and m.channel == ctx.channel)
+
+        while True:
+            try:
+                reply = await self.bot.wait_for("message", check=check, timeout=180)
+                text = reply.content.strip().lower()
+                if text=="yes":
+                    out = self.store_learn_solutions(fname, suggestion)
+                    await ctx.send(out)
+                    break
+                elif text=="stop":
+                    await ctx.send("Learning canceled.")
+                    break
+                elif text.startswith("no"):
+                    instructions = reply.content[2:].strip()
+                    refine_prompt = base_prompt + "\nAdditional instructions:\n" + instructions
+                    try:
+                        suggestion = await self.query_llm(refine_prompt, ctx.channel)
+                        await ctx.send(suggestion)
+                        await ctx.send("Type 'yes' to confirm, 'no [instructions]' or 'stop' to cancel.")
+                    except Exception as ee:
+                        await ctx.send(f"Error: {ee}")
+                else:
+                    await ctx.send("Please type 'yes', 'no [instructions]', or 'stop'.")
+
+            except Exception as ex:
+                await ctx.send(f"Error or timeout: {ex}")
+                break
+
+    def store_learn_solutions(self, fname: str, suggestion: str) -> str:
+        pat = r"```json\s*(\{.*?\})\s*```"
+        mt = re.search(pat, suggestion)
+        raw = suggestion
+        if mt:
+            raw = mt.group(1)
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("parsed JSON not a dict")
+            arr = data.get("solutions", [])
+            if not isinstance(arr, list):
+                raise ValueError("No valid 'solutions' array")
+
+            old = self.load_tag_file(fname)
+            changed=0
+            for fix in arr:
+                if fix not in old:
+                    old.append(fix)
+                    changed+=1
+            self.save_tag_file(fname, old)
+            return f"Added {changed} new solution(s) to '{fname}'."
+
+        except Exception:
+            # fallback => general
+            gf = "general.json"
+            gf_data = self.load_tag_file(gf)
+            if suggestion not in gf_data:
+                gf_data.append(suggestion)
+                self.save_tag_file(gf, gf_data)
+                return f"Invalid JSON; entire text stored in '{gf}'."
+            else:
+                return f"Invalid JSON; already in '{gf}'."
+
+    ##########################################################
+    # !llmknowshow => merges all tags with triple backticks
+    ##########################################################
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays all lines from all tag files, with indexing."""
+        """Merge all .json tags, display them as code."""
         files = self.list_tag_files()
         if not files:
             return await ctx.send("No tags exist.")
@@ -215,164 +337,51 @@ class LLMManager(commands.Cog):
             for i, val in enumerate(lines):
                 out += f"  [{i}] {val}\n"
             out += "\n"
+        if len(out)<=2000:
+            await ctx.send(f"```{out}```")
+        else:
+            await ctx.send("Knowledge too large for a single Discord message. Sorry.")
 
-        # We won't chunkify. If it's 2k+ chars, we risk an error
-        # If you prefer a fallback, you can do it here
-        await ctx.send(out)
-
-    #############################################
-    # !llmknow <tag> "message"
-    #############################################
+    ##########################################################
+    # !llmknow <tag> <info>
+    ##########################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
-        """Adds <info> to <tag>.json, skipping duplicates. Creates the file if missing."""
         fname = f"{tag.lower()}.json"
         lines = self.load_tag_file(fname)
         if info in lines:
-            return await ctx.send("That info already exists; skipping.")
+            return await ctx.send("That info already exists, skipping.")
         lines.append(info)
         self.save_tag_file(fname, lines)
-        await ctx.send(f"Added info to {fname}.")
+        await ctx.send(f"Added info to '{fname}'.")
 
-    #############################################
+    ##########################################################
     # !llmknowdelete <tag> <index>
-    #############################################
+    ##########################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, tag: str, index: int):
-        """Removes a single line from <tag>.json by index."""
         fname = f"{tag.lower()}.json"
         lines = self.load_tag_file(fname)
         if not lines:
             return await ctx.send("No lines or tag file doesn't exist.")
-        if 0 <= index < len(lines):
+        if 0<=index<len(lines):
             removed = lines.pop(index)
             self.save_tag_file(fname, lines)
             await ctx.send(f"Deleted: {removed}")
         else:
             await ctx.send("Invalid index.")
 
-    #############################################
+    ##########################################################
     # !llmknowdeletetag <tag>
-    #############################################
+    ##########################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
-        """Removes <tag>.json entirely."""
         fname = f"{tag.lower()}.json"
         path = self.tags_folder / fname
         if not path.exists():
             return await ctx.send("Tag file not found.")
         path.unlink()
         await ctx.send(f"Deleted entire tag '{fname}'.")
-
-    #############################################
-    # !learn <tag> <message_count>
-    #############################################
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def learn(self, ctx, tag: str, amount: int=20):
-        """
-        Reads last <amount> messages, calls LLM for { "solutions": [ ... ] },
-        appends them to <tag>.json
-        """
-        def not_command_or_bot(m: discord.Message):
-            if m.author.bot:
-                return False
-            if m.id == ctx.message.id:
-                return False
-            return True
-
-        # gather messages
-        msgs = []
-        async for msg in ctx.channel.history(limit=amount+5):
-            if not_command_or_bot(msg):
-                msgs.append(msg)
-            if len(msgs) >= amount:
-                break
-        msgs.reverse()
-        conversation = "\n".join(f"{m.author.name}: {m.content}" for m in msgs)
-
-        fname = f"{tag.lower()}.json"
-        old_lines = self.load_tag_file(fname)
-
-        prompt = (
-            f"Existing solutions for tag '{tag}':\n"
-            f"{json.dumps(old_lines, indent=2)}\n\n"
-            "Below is a conversation. Extract new or refined solutions for that tag.\n"
-            "Output JSON: { \"solutions\":[\"fix1\",\"fix2\"] }\n\n"
-            f"Conversation:\n{conversation}"
-        )
-        try:
-            suggestion = await self.query_llm(prompt)
-        except Exception as e:
-            return await ctx.send(f"Error: {e}")
-
-        # no chunkify, no triple backticks
-        await ctx.send(suggestion)
-
-        await ctx.send("Type 'yes' to confirm, 'no [instr]' to refine, or 'stop' to cancel.")
-
-        def check(m: discord.Message):
-            return (m.author==ctx.author) and (m.channel==ctx.channel)
-
-        while True:
-            try:
-                reply = await self.bot.wait_for("message", check=check, timeout=120)
-                txt = reply.content.strip().lower()
-                if txt=="yes":
-                    out = self.store_learn_solutions(fname, suggestion)
-                    await ctx.send(out)
-                    break
-                elif txt=="stop":
-                    await ctx.send("Learning cancelled.")
-                    break
-                elif txt.startswith("no"):
-                    instructions = reply.content[2:].strip()
-                    refine_prompt = prompt + "\nAdditional instructions:\n" + instructions
-                    try:
-                        suggestion = await self.query_llm(refine_prompt)
-                        await ctx.send(suggestion)
-                        await ctx.send("Type 'yes' to confirm, 'no [instr]' or 'stop'.")
-                    except Exception as ee:
-                        await ctx.send(f"Error: {ee}")
-                else:
-                    await ctx.send("Please type 'yes', 'no [instructions]', or 'stop'.")
-            except Exception as e:
-                await ctx.send(f"Error or timeout: {e}")
-                break
-
-    def store_learn_solutions(self, fname: str, suggestion: str) -> str:
-        """Parses { 'solutions':[...]} from the suggestion, appends them to <fname>, skipping duplicates."""
-        pat = r"```json\s*(\{.*?\})\s*```"
-        mt = re.search(pat, suggestion)
-        raw = suggestion
-        if mt:
-            raw = mt.group(1)
-        try:
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError("Not a dict.")
-            arr = data.get("solutions", [])
-            if not isinstance(arr, list):
-                raise ValueError("No valid 'solutions' array.")
-
-            old = self.load_tag_file(fname)
-            changed=0
-            for fix in arr:
-                if fix not in old:
-                    old.append(fix)
-                    changed+=1
-            self.save_tag_file(fname, old)
-            return f"Added {changed} new solution(s) to {fname}"
-        except Exception:
-            # fallback -> store entire text in "general.json"
-            gf = "general.json"
-            gf_data = self.load_tag_file(gf)
-            if suggestion not in gf_data:
-                gf_data.append(suggestion)
-                self.save_tag_file(gf, gf_data)
-                return f"Invalid JSON. Entire text stored in {gf}."
-            else:
-                return f"Invalid JSON, already in {gf}."
