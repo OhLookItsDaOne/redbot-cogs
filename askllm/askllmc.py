@@ -1,13 +1,13 @@
 import discord
-from redbot.core import commands, Config
-from redbot.core.data_manager import cog_data_path
-import requests
+import os
 import json
 import re
-import os
+import requests
+from redbot.core import commands, Config
+from redbot.core.data_manager import cog_data_path
 
 ###################################
-# HELPER: chunkify
+# chunkify: Aufteilen langer Strings
 ###################################
 def chunkify(text, max_size=1900):
     lines = text.split("\n")
@@ -26,25 +26,12 @@ def chunkify(text, max_size=1900):
 
     if current_chunk:
         chunks.append(current_chunk)
-
     return chunks
-
-###################################
-# HELPER: chunked send
-###################################
-async def send_chunked_or_single(ctx, text: str):
-    """Sends the LLM's response in one message if short, or in chunks if > 2000 chars."""
-    if len(text) <= 2000:
-        await ctx.send(f"```\n{text}\n```")
-    else:
-        parts = chunkify(text, 1900)
-        for i, c in enumerate(parts, start=1):
-            await ctx.send(f"**(Part {i}/{len(parts)}):**\n```\n{c}\n```")
 
 class LLMManager(commands.Cog):
     """
-    Cog that stores each 'tag' in a separate JSON file in `tags/`.
-    The LLM picks one file for the final answer or says 'none'.
+    Ein Cog, in dem jedes "Tag" als eigene JSON-Datei in ./tags/ abgelegt wird.
+    Die LLM kann so per Command genau eine Datei auswählen (oder 'none' sagen).
     """
 
     def __init__(self, bot):
@@ -52,16 +39,50 @@ class LLMManager(commands.Cog):
         self.config = Config.get_conf(self, identifier=1234567890)
         self.config.register_global(model="gemma3:12b", api_url="http://localhost:11434")
 
-        # We'll store separate JSON files in `tags/`
+        # Ordner für die Tag-Dateien
         self.tags_folder = cog_data_path(self) / "tags"
         if not self.tags_folder.exists():
             self.tags_folder.mkdir(parents=True, exist_ok=True)
 
     ############################################################
-    # 1) Listing tag files
+    # Model- und API-Verwaltung
+    ############################################################
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setmodel(self, ctx, model: str):
+        """Setzt das Standard-LLM-Modell."""
+        await self.config.model.set(model)
+        await ctx.send(f"LLM model set to {model}")
+
+    @commands.command()
+    async def modellist(self, ctx):
+        """Zeigt verfügbare Modelle (laut Ollama)."""
+        api_url = await self.config.api_url()
+        try:
+            r = requests.get(f"{api_url}/api/tags")
+            r.raise_for_status()
+            dat = r.json()
+            models = [m["name"] for m in dat.get("models", [])]
+            if models:
+                await ctx.send(f"Available models: {', '.join(models)}")
+            else:
+                await ctx.send("No models found.")
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setapi(self, ctx, url: str):
+        """Setzt die Ollama API-URL."""
+        url = url.rstrip("/")
+        await self.config.api_url.set(url)
+        await ctx.send(f"Ollama API URL set to {url}")
+
+    ############################################################
+    # Tools zum Umgang mit Tag-Dateien (tags/*.json)
     ############################################################
     def list_tag_files(self) -> list:
-        """Returns a list of all .json files in the `tags/` folder, e.g. ['crash.json','enb.json']. """
+        """Gibt eine Liste aller .json-Dateien im 'tags/'-Ordner zurück."""
         all_files = []
         for fname in os.listdir(self.tags_folder):
             if fname.lower().endswith(".json"):
@@ -69,189 +90,84 @@ class LLMManager(commands.Cog):
         return all_files
 
     def load_tag_file(self, fname: str) -> list:
-        """Loads a single tag file as a Python list. If you prefer dict, adjust accordingly."""
+        """Lädt eine Tag-Datei (z. B. 'crash.json') als Liste (oder leer bei Fehler)."""
         path = self.tags_folder / fname
         if not path.exists():
             return []
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-            if not isinstance(data, list):
-                # If you store a dict or something else, adjust logic
+            if isinstance(data, list):
+                return data
+            else:
                 return []
-        return data
 
-    def save_tag_file(self, fname: str, content: list):
+    def save_tag_file(self, fname: str, data_list: list):
+        """Speichert die Liste data_list in 'fname' als JSON."""
         path = self.tags_folder / fname
         with path.open("w", encoding="utf-8") as f:
-            json.dump(content, f, indent=2)
+            json.dump(data_list, f, indent=2)
 
     ############################################################
-    # 2) Asking the LLM which tag file is relevant
-    ############################################################
-    async def decide_tag_file(self, user_question: str, tag_files: list) -> str:
-        """
-        Asks the LLM which single file from tag_files best addresses user_question.
-        If none is relevant, the LLM should respond 'none'.
-        We'll prompt the LLM: 'Here are tag files: ...; pick exactly one or say none.'
-        """
-        filenames_str = "\n".join(tag_files)
-        prompt = (
-            "We have several JSON files, each containing specialized info:\n"
-            f"{filenames_str}\n\n"
-            "A user asked:\n"
-            f"{user_question}\n\n"
-            "Pick exactly ONE filename from the above list that best addresses the question. "
-            "If none is relevant, say 'none'. Return only the filename or 'none'."
-        )
-        answer = await self.query_llm(prompt)
-        cleaned = answer.strip().lower()
-        return cleaned
-
-    async def query_llm(self, prompt: str) -> str:
-        """Sends prompt to LLM, removing double newlines from the result."""
-        model = await self.config.model()
-        api_url = await self.config.api_url()
-
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False
-        }
-        headers = {"Content-Type":"application/json"}
-        resp = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-        text = data.get("message",{}).get("content","No valid response received.")
-        # remove double spacing
-        text = text.replace("\n\n","\n")
-        return text
-
-    ############################################################
-    # 3) After deciding file, load it & ask for final answer
-    ############################################################
-    async def answer_from_chosen_file(self, user_question: str, chosen_file: str) -> str:
-        """
-        Loads chosen_file from tags folder, sends it to LLM with the user's question.
-        Example data format is a list of lines, so we do json.dumps.
-        """
-        data_list = self.load_tag_file(chosen_file)
-        knowledge_str = json.dumps(data_list, indent=2)
-        prompt = (
-            "We have chosen this JSON file as relevant. Use its content to answer.\n\n"
-            f"File: {chosen_file}\n"
-            f"Content:\n{knowledge_str}\n\n"
-            f"User question: {user_question}\n"
-            "Don't guess. If no direct info, say so."
-        )
-        final_answer = await self.query_llm(prompt)
-        return final_answer
-
-    ############################################################
-    # Simple "ask" command that picks the file, loads it, etc.
-    ############################################################
-    @commands.command()
-    async def askllm(self, ctx, *, question: str):
-        """
-        1) List all .json in tags/
-        2) LLM picks one or 'none'
-        3) If 'none', say "No relevant data."
-        4) Otherwise, load the file and do final answer
-        5) chunkify the final response
-        """
-        tag_files = self.list_tag_files()
-        if not tag_files:
-            return await ctx.send("No tag files exist. Please create some in `tags/` folder.")
-
-        # 1) LLM picks a single file
-        chosen = await self.decide_tag_file(question, tag_files)
-        if chosen == "none" or chosen not in tag_files:
-            return await ctx.send("No relevant file found or the LLM said 'none'.")
-
-        # 2) Load that file, produce final answer
-        answer = await self.answer_from_chosen_file(question, chosen)
-
-        # 3) chunkify if needed
-        if len(answer) <= 2000:
-            await ctx.send(f"```\n{answer}\n```")
-        else:
-            parts = chunkify(answer, 1900)
-            for i, c in enumerate(parts,1):
-                await ctx.send(f"**(Part {i}/{len(parts)}):**\n```\n{c}\n```")
-
-    ############################################################
-    # If you want to add a method to create new tag files, etc.
+    # Commands zum Verwalten von Tag-Dateien
     ############################################################
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def createtag(self, ctx, tagname: str):
-        """
-        Create an empty JSON file for a new 'tag'.
-        e.g. !createtag crash
-        => tags/crash.json
-        """
-        filename = f"{tagname.lower()}.json"
-        path = self.tags_folder / filename
+        """Erzeugt eine leere JSON-Datei (z. B. 'crash.json') in 'tags/'."""
+        fname = f"{tagname.lower()}.json"
+        path = self.tags_folder / fname
         if path.exists():
-            return await ctx.send("That file/tag already exists.")
+            return await ctx.send("Diese Datei / Tag existiert bereits.")
         with path.open("w", encoding="utf-8") as f:
             json.dump([], f, indent=2)
-        await ctx.send(f"Created tag file: {filename}")
+        await ctx.send(f"Created new tag file: {fname}")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def tagadd(self, ctx, tagname: str, *, info: str):
-        """
-        Add a line of info to an existing tag file.
-        e.g. !tagadd crash "Try using crash analyzer xyz"
-        """
-        filename = f"{tagname.lower()}.json"
-        path = self.tags_folder / filename
+        """Fügt einen Eintrag (info) zur bestehenden Tagdatei (z. B. crash.json) hinzu."""
+        fname = f"{tagname.lower()}.json"
+        path = self.tags_folder / fname
         if not path.exists():
-            return await ctx.send("That tag file doesn't exist. Create it first or check spelling.")
-
-        data = self.load_tag_file(filename)  # returns a list
+            return await ctx.send("That tag file doesn't exist. Use !createtag first.")
+        data = self.load_tag_file(fname)
         if info in data:
             return await ctx.send("That info already exists in the file.")
         data.append(info)
-        self.save_tag_file(filename, data)
-        await ctx.send(f"Appended info to {filename}")
+        self.save_tag_file(fname, data)
+        await ctx.send(f"Appended info to {fname}")
 
     @commands.command()
     async def tagshow(self, ctx):
-        """
-        Lists all .json files and their contents
-        """
+        """Listet alle Tag-Dateien mit ihren Inhalten."""
         files = self.list_tag_files()
         if not files:
             return await ctx.send("No tag files exist.")
         out = "Existing Tag Files:\n"
         for f in files:
-            out += f"{f}\n"
+            out += f"{f}:\n"
             content = self.load_tag_file(f)
             for i, line in enumerate(content):
                 out += f"  [{i}] {line}\n"
             out += "\n"
 
-        if len(out)<=2000:
+        if len(out) <= 2000:
             await ctx.send(f"```\n{out}\n```")
         else:
-            chunks = chunkify(out,1900)
-            for idx, chunk in enumerate(chunks,1):
-                await ctx.send(f"**(Part {idx}/{len(chunks)}):**\n```\n{chunk}\n```")
+            chunks = chunkify(out, 1900)
+            for idx, c in enumerate(chunks, 1):
+                await ctx.send(f"**(Part {idx}/{len(chunks)}):**\n```\n{c}\n```")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def tagdelete(self, ctx, tagname: str, index: int):
-        """
-        Delete an entry from a given tag file by index
-        e.g. !tagdelete crash 0
-        """
+        """Löscht einen Eintrag nach Index aus der Tagdatei (z. B. !tagdelete crash 0)."""
         fname = f"{tagname.lower()}.json"
         path = self.tags_folder / fname
         if not path.exists():
             return await ctx.send("That tag file doesn't exist.")
         data = self.load_tag_file(fname)
-        if 0<=index<len(data):
+        if 0 <= index < len(data):
             removed = data.pop(index)
             self.save_tag_file(fname, data)
             await ctx.send(f"Removed: {removed}")
@@ -261,13 +177,74 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def tagdeletetag(self, ctx, tagname: str):
-        """
-        Completely remove a tag file
-        e.g. !tagdeletetag crash
-        """
+        """Löscht die gesamte Tag-Datei (z. B. 'crash.json')."""
         fname = f"{tagname.lower()}.json"
         path = self.tags_folder / fname
         if not path.exists():
             return await ctx.send("That tag doesn't exist.")
         path.unlink()
         await ctx.send(f"Deleted file: {fname}")
+
+    ############################################################
+    # LLM: wähle EINE Tag-Datei oder 'none'
+    ############################################################
+    async def decide_tag_file(self, user_question: str, tag_files: list) -> str:
+        """
+        Fragt das LLM: "Hier sind Tag-Dateien. Wähle GENAU EINE, die am besten passt,
+        oder gib 'none' zurück, falls nichts relevant ist."
+        """
+        filenames_str = "\n".join(tag_files)
+        prompt = (
+            "We have multiple JSON files, each with specialized knowledge.\n"
+            f"{filenames_str}\n\n"
+            "A user asked:\n"
+            f"{user_question}\n\n"
+            "Pick exactly ONE filename from the list that best addresses the question. "
+            "If none is relevant, say 'none'. Return only that filename or 'none'."
+        )
+        answer = await self.query_llm(prompt)
+        return answer.strip().lower()
+
+    async def answer_from_chosen_file(self, user_question: str, chosen_file: str) -> str:
+        """
+        Lädt 'chosen_file' und gibt den Inhalt ans LLM, damit es eine finale Antwort generiert.
+        """
+        data_list = self.load_tag_file(chosen_file)  # e.g. a list of lines
+        knowledge_str = json.dumps(data_list, indent=2)
+        prompt = (
+            f"We have chosen file '{chosen_file}' as relevant.\n"
+            "Below is its content:\n"
+            f"{knowledge_str}\n\n"
+            f"User question: {user_question}\n"
+            "Please answer using only this data. If there's nothing relevant, say so."
+        )
+        final_answer = await self.query_llm(prompt)
+        return final_answer
+
+    ############################################################
+    # Endgültiger Befehl: !askllm
+    ############################################################
+    @commands.command()
+    async def askllm(self, ctx, *, question: str):
+        """
+        1) Listet alle Tag-Dateien (.json)
+        2) LLM wählt EINE aus (oder 'none')
+        3) Lädt nur diese Datei, generiert finale Antwort
+        4) chunkify wenn >2000 Zeichen
+        """
+        tag_files = self.list_tag_files()
+        if not tag_files:
+            return await ctx.send("No tag files found in './tags'. Create some with !createtag <name>.")
+
+        chosen = await self.decide_tag_file(question, tag_files)
+        if chosen == "none" or chosen not in tag_files:
+            return await ctx.send("LLM says 'none' or no valid file was chosen. No relevant tag found.")
+
+        # Load + final answer
+        final_answer = await self.answer_from_chosen_file(question, chosen)
+        if len(final_answer) <= 2000:
+            await ctx.send(f"```\n{final_answer}\n```")
+        else:
+            parts = chunkify(final_answer, 1900)
+            for i, c in enumerate(parts,1):
+                await ctx.send(f"**(Part {i}/{len(parts)}):**\n```\n{c}\n```")
