@@ -1,7 +1,10 @@
 import discord
 import subprocess
 import sys
+
+# Module automatisch installieren
 subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
+
 import mysql.connector
 import re
 import requests
@@ -123,17 +126,31 @@ class LLMManager(commands.Cog):
         suggestion = await self.query_llm(prompt, ctx.channel)
 
         await ctx.send(suggestion)
-        await ctx.send("Type 'yes' to confirm, 'stop' to cancel.")
+        await ctx.send("Type 'yes' to confirm, 'edit [instructions]' to refine, or 'stop' to cancel.")
 
         def check(m):
             return m.author == ctx.author and m.channel == ctx.channel
 
-        reply = await self.bot.wait_for("message", check=check, timeout=180)
-        if reply.content.lower() == "yes":
-            await self.add_tag_content(tag.lower(), suggestion)
-            await ctx.send(f"Stored new info under '{tag.lower()}'.")
-        else:
-            await ctx.send("Learning canceled.")
+        while True:
+            reply = await self.bot.wait_for("message", check=check, timeout=180)
+            text = reply.content.strip()
+            lower = text.lower()
+
+            if lower == "yes":
+                await self.add_tag_content(tag.lower(), suggestion)
+                await ctx.send(f"Stored new info under '{tag.lower()}'.")
+                break
+
+            elif lower.startswith("edit"):
+                instructions = text[4:].strip()
+                refine_prompt = f"{prompt}\n\nUser additional instructions: {instructions}"
+                suggestion = await self.query_llm(refine_prompt, ctx.channel)
+                await ctx.send(suggestion)
+                await ctx.send("Type 'yes' to confirm, 'edit [instructions]' to refine, or 'stop' to cancel.")
+
+            elif lower == "stop":
+                await ctx.send("Learning canceled.")
+                break
 
     @commands.command()
     @commands.has_permissions(administrator=True)
