@@ -1,6 +1,7 @@
 import discord
 import subprocess
 import sys
+import json  # <-- We'll parse the LLM's JSON here.
 
 # Module automatisch installieren
 subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
@@ -9,31 +10,6 @@ import mysql.connector
 import re
 import requests
 from redbot.core import commands, Config
-
-# Add synonyms here to enhance naive matching. 
-# Format: "canonical word": ["synonym1", "synonym2", ...]
-SYNONYMS_MAP = {
-    "blackbox": ["black box", "square", "obstruct", "blocked view"],
-    "skse": ["script extender"],
-    # Expand or modify as needed
-}
-
-def expand_query_words(user_words: list[str]) -> set[str]:
-    """
-    For each user word, add that word plus any synonyms from the map.
-    """
-    expanded = set()
-    for w in user_words:
-        expanded.add(w)
-        # If the canonical form is known, add synonyms
-        if w in SYNONYMS_MAP:
-            for syn in SYNONYMS_MAP[w]:
-                expanded.add(syn)
-        # Also check if w is a known synonym => add the canonical
-        for canonical, synonyms in SYNONYMS_MAP.items():
-            if w in synonyms:
-                expanded.add(canonical)
-    return expanded
 
 class LLMManager(commands.Cog):
     def __init__(self, bot):
@@ -90,13 +66,15 @@ class LLMManager(commands.Cog):
         return results
 
     async def query_llm(self, prompt, channel):
+        """Calls the main LLM with a straightforward prompt.
+           `temperature=0` to minimize creative/hallucinated responses."""
         model = await self.config.model()
         api_url = await self.config.api_url()
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "options": {"num_ctx": 14000}
+            "options": {"num_ctx": 14000, "temperature": 0}
         }
         headers = {"Content-Type": "application/json"}
         async with channel.typing():
@@ -105,101 +83,100 @@ class LLMManager(commands.Cog):
             data = resp.json()
         return data.get("message", {}).get("content", "No valid response received.")
 
+    async def pick_best_entry_with_llm(self, question: str, entries: list, channel) -> int:
+        """
+        Let the LLM score each entry for relevance.
+        Return the index of the best entry, or -1 if no entry is relevant.
+
+        We'll ask the LLM for strict JSON like:
+        {
+          "scores": [ int, ... ]
+        }
+        where each int is 0..10.
+        """
+        # Build prompt listing the entries
+        numbered_entries = []
+        for i, (eid, tag, content) in enumerate(entries):
+            snippet = (
+                f"Entry {i}:\n"
+                f"ID: {eid}, Tag: {tag}\n"
+                f"{content}\n"
+                "---"
+            )
+            numbered_entries.append(snippet)
+
+        prompt = f"""You are a helpful ranking assistant.
+
+User's question:
+{question}
+
+We have {len(numbered_entries)} database entries. Rate each from 0 to 10, how relevant it is to the question.
+Return exact JSON in this format (no code fences, no extra text):
+
+{{
+  "scores": [score_for_entry0, score_for_entry1, ...]
+}}
+
+0 = not relevant at all
+10 = extremely relevant
+
+Entries:
+{chr(10).join(numbered_entries)}
+"""
+
+        llm_response = await self.query_llm(prompt, channel)
+
+        best_index = -1
+        best_score = -1
+        try:
+            # remove possible code fences
+            json_str = re.sub(r"```(json)?", "", llm_response)
+            data = json.loads(json_str)
+            scores = data.get("scores", [])
+            for i, s in enumerate(scores):
+                if s > best_score:
+                    best_score = s
+                    best_index = i
+        except Exception as e:
+            await channel.send(f"Error: could not parse LLM JSON rating: {e}")
+            return -1
+
+        # if best_score < 2 => not relevant
+        if best_score < 2:
+            return -1
+
+        return best_index
+
     async def process_question(self, question, channel, author=None):
-        # 1) Load DB + parse question
-        entries = await self.get_all_content()
+        """We do naive DB filtering. Then let the LLM rank them. Finally we output exactly that entry's text."""
+        # 1) Naive DB filter
+        all_entries = await self.get_all_content()
+        words = re.sub(r"[^\\w\\s]", "", question.lower()).split()
 
-        # Clean out punctuation, lower them
-        raw_words = re.sub(r"[^\w\s]", "", question.lower()).split()
-        # Expand synonyms
-        expanded_words = expand_query_words(raw_words)
-
-        # 2) Special case: user asks "Where did this info come from?"
-        if re.search(r"where.*(source|info|information|come from)", question, re.IGNORECASE):
-            all_links = set()
-            matched = False
-
-            # Check each DB entry for any of the query words
-            for _id, tag, content in entries:
-                c_lower = content.lower()
-                # If entry content has at least one word from expanded_words:
-                if any(word in c_lower for word in expanded_words):
-                    matched = True
-                    # Gather all links from this content
-                    links = re.findall(r"https?://\S+", content)
-                    for link in links:
-                        all_links.add(link)
-
-            if matched and all_links:
-                # Return unique links
-                formatted = "This information comes from these sources:\n" + "\n".join(all_links)
-                await channel.send(formatted)
-            elif matched and not all_links:
-                await channel.send("No links or sources found in the matching database entries.")
-            else:
-                await channel.send("No relevant info found for that.")
-            return
-
-        # 3) Relevance-scoring for normal queries
-        relevance_scores = []
-        for _id, tag, content in entries:
-            c_lower = content.lower()
-            # Instead of counting each occurrence, we do +1 if at least one match
-            # for each word in expanded_words
-            score = 0
-            for w in expanded_words:
-                if w in c_lower:
-                    score += 1
+        # basic filter
+        filtered = []
+        for (eid, tag, content) in all_entries:
+            # count how many words appear at least once
+            score = sum(1 for w in set(words) if w in content.lower())
             if score > 0:
-                relevance_scores.append((score, _id, tag, content))
+                filtered.append((eid, tag, content))
 
-        if not relevance_scores:
+        if not filtered:
             await channel.send("No relevant info found.")
             return
 
-        # Sort by descending score
-        relevance_scores.sort(key=lambda x: x[0], reverse=True)
-        # Take top 20
-        top_entries = relevance_scores[:20]
-
-        # Build knowledge context
-        knowledge = "\n".join(f"[{tag}] {content}" for _, _id, tag, content in top_entries)
-
-        # 4) Build short user chat history
-        chat_history = ""
-        if author:
-            async for msg in channel.history(limit=20):
-                # ignore commands, bot mentions
-                if (
-                    msg.author == author
-                    and not msg.content.startswith("!")
-                    and not msg.content.startswith("<@")
-                ):
-                    chat_history = msg.content.strip() + "\n" + chat_history
-                    # only keep last 5 lines
-                    if chat_history.count("\n") >= 4:
-                        break
-
-        # 5) Final prompt
-        prompt = (
-            "You must only use the following information to answer the user's question.\n"
-            "Do not guess or fabricate answers.\n"
-            "If unsure, reply: 'Sorry, I couldn't find that in the knowledge base.'\n\n"
-            f"Recent user context:\n{chat_history}\n\n"
-            f"Knowledge Base:\n{knowledge}\n\n"
-            f"User question:\n{question}"
-        )
-
-        # 6) Query LLM
-        answer = await self.query_llm(prompt, channel)
-
-        # 7) Check if LLM gave "No valid response"
-        if answer.strip() == "No valid response received.":
-            await channel.send("Hmm, I couldn't get a valid reply. Try again?")
+        # 2) Let LLM pick best among these top 5
+        filtered = filtered[:5]
+        best_index = await self.pick_best_entry_with_llm(question, filtered, channel)
+        if best_index < 0:
+            await channel.send("No relevant entry found or user unclear. Please refine question.")
             return
 
-        # Otherwise, normal
-        await channel.send(answer)
+        # 3) Show user the EXACT DB text (no summation => no hallucination)
+        eid, best_tag, best_content = filtered[best_index]
+        await channel.send(f"[{best_tag}] (ID: {eid})\n{best_content}")
+
+    #--- Commands
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
@@ -213,6 +190,8 @@ class LLMManager(commands.Cog):
             question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
             if question:
                 await self.process_question(question, message.channel, author=message.author)
+
+    #--- Admin commands (unchanged)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
