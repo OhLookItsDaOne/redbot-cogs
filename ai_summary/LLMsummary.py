@@ -19,7 +19,7 @@ class LLMSummary(commands.Cog):
         self.config = Config.get_conf(self, identifier=9876543211)
         default_global = {
             "model": "default-llm",
-            "context_length": 32000,
+            "context_length": 4864,
             "api_url": "http://localhost:11434",
             "summary_message_limit": 50  # Anzahl der Nachrichten, die standardmäßig zusammengefasst werden
         }
