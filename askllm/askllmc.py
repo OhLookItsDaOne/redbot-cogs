@@ -22,7 +22,7 @@ from qdrant_client import QdrantClient
 
 class LLMManager(commands.Cog):
     """Cog to interact with the LLM and manage a MariaDB-based knowledge storage."""
-
+    
     def __init__(self, bot):
         self.bot = bot
         # Registrierung der globalen Konfiguration:
@@ -43,7 +43,6 @@ class LLMManager(commands.Cog):
         return await loop.run_in_executor(None, task, *args, **kwargs)
 
     # --- Datenbankoperationen (synchron implementiert, asynchron aufrufbar) ---
-
     def _add_tag_content_sync(self, tag, content, db_config):
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
@@ -172,7 +171,7 @@ Entries:
         return best_index
 
     # Hier wird die Datenbank abgefragt und die Ergebnisse an die LLM übergeben (nur bei einer LLM-Anfrage)
-     async def process_question(self, question, channel, author=None):
+    async def process_question(self, question, channel, author=None):
         all_entries = await self.get_all_content()
         if not all_entries:
             await channel.send("No information stored in the database.")
@@ -184,7 +183,6 @@ Entries:
 
         filtered = []
         for (eid, tag, content) in all_entries:
-            # Normalisiere Tag und Content
             tag_norm = re.sub(r"[^\w\s]", "", tag.lower())
             content_norm = re.sub(r"[^\w\s]", "", content.lower())
             combined = f"{tag_norm} {content_norm}"
@@ -275,8 +273,7 @@ Entries:
         await self.add_tag_content(tag.lower(), info)
         await ctx.send(f"Added info under '{tag.lower()}'.")
 
-
-        @commands.command()
+    @commands.command()
     async def llmknowshow(self, ctx):
         """Shows the contents of the DB, splitting output into chunks of <= 4000 characters."""
         results = await self.get_all_content()
@@ -290,18 +287,15 @@ Entries:
         chunks = []
         current_chunk = header
 
-        # Hilfsfunktion, um den aktuellen Chunk abzuschließen und zu speichern.
         def flush_chunk():
             nonlocal current_chunk
             chunks.append(current_chunk + footer)
             current_chunk = header
 
-        # Für jeden Eintrag in der DB:
         for _id, tag, text in results:
             line = f"[{_id}] ({tag}) {text}\n"
             allowed_line_length = max_length - len(header) - len(footer)
             if len(line) > allowed_line_length:
-                # Zeile in kleinere Teile aufteilen (basierend auf allowed_line_length)
                 parts = [line[i:i+allowed_line_length] for i in range(0, len(line), allowed_line_length)]
                 for part in parts:
                     if len(current_chunk) + len(part) > max_length - len(footer):
@@ -315,11 +309,9 @@ Entries:
         if current_chunk != header:
             flush_chunk()
 
-        # Zusätzliche Sicherheitsprüfung: Zerlege jeden Chunk, falls er versehentlich noch länger als max_length ist.
         final_chunks = []
         for chunk in chunks:
             if len(chunk) > max_length:
-                # Falls chunk zu lang ist, teilen wir ihn weiter in max_length-Stücke.
                 for i in range(0, len(chunk), max_length):
                     final_chunks.append(chunk[i:i+max_length])
             else:
