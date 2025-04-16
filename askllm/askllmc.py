@@ -201,26 +201,49 @@ Entries:
         aggregated_context = "\n\n".join(
             [f"[{eid}] ({tag}): {content}" for eid, tag, content in top_entries]
         )
+        def validate_links(self, text):
+        """Prüft alle URLs im Text. Entfernt Links, die 'example.com' enthalten oder nicht erreichbar sind."""
+        url_regex = r'https?://[^\s]+'
+        links = re.findall(url_regex, text)
+        for link in links:
+            # Falls es sich um einen Platzhalter handelt, entferne ihn
+            if "example.com" in link:
+                text = text.replace(link, "")
+            else:
+                try:
+                    # Führe eine HEAD-Anfrage aus – wenn der Statuscode >= 400 ist, entferne den Link
+                    response = requests.head(link, timeout=5)
+                    if response.status_code >= 400:
+                        text = text.replace(link, "")
+                except Exception:
+                    # Bei einer Exception den Link ebenfalls entfernen
+                    text = text.replace(link, "")
+        # Entferne überflüssige Leerzeichen und Zeilenumbrüche
+        text = re.sub(r'\s+', ' ', text)
+        return text
 
         # Entferne HTML-Tags aus dem aggregierten Kontext, falls vorhanden.
+                # Entferne HTML-Tags aus dem Kontext (falls vorhanden)
         def strip_html(raw_html):
             cleanr = re.compile('<.*?>')
             return re.sub(cleanr, '', raw_html)
-        aggregated_context = strip_html(aggregated_context)
-        
-        # Kürze den Kontext, falls er zu lang ist (hier maximal 4000 Zeichen)
-        max_context_length = 4000
-        if len(aggregated_context) > max_context_length:
-            aggregated_context = aggregated_context[:max_context_length] + "\n...[truncated]"
 
-        # Erstelle den finalen Prompt: Der Kontext und die Frage werden kombiniert.
+        context_text = strip_html(best_content)
+        # Prüfe die Links im Kontext und entferne ungültige URLs:
+        context_text = self.validate_links(context_text)
+        
+        # Optional: Kürze den Kontext, falls er zu lang ist – hier maximal 4000 Zeichen
+        max_context_length = 4000
+        if len(context_text) > max_context_length:
+            context_text = context_text[:max_context_length] + "\n...[truncated]"
+        
+        # Baue den finalen Prompt:
         final_prompt = (
-            f"Using the following context extracted from the documentation:\n{aggregated_context}\n\n"
+            f"Using the following context extracted from the documentation:\n{context_text}\n\n"
             "Please answer the following question concisely and accurately. "
             "Include any relevant links as Markdown if present.\n\n"
             f"Question: {question}"
         )
-
         final_answer = await self.query_llm(final_prompt, channel)
         await channel.send(final_answer)
 
