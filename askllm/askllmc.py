@@ -1,183 +1,299 @@
-import sys
-import subprocess
-
-# Dynamische Installation der benötigten Pakete
-required_packages = ['qdrant-client', 'sentence-transformers']
-
-def install_missing_packages(packages):
-    try:
-        import pkg_resources  # Zum Überprüfen installierter Pakete
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "setuptools"])
-        import pkg_resources
-
-    installed = {pkg.key for pkg in pkg_resources.working_set}
-    missing = [pkg for pkg in packages if pkg.lower() not in installed]
-    
-    if missing:
-        print(f"Installing missing packages: {', '.join(missing)}")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
-    else:
-        print("All required packages are already installed.")
-
-install_missing_packages(required_packages)
-
-# Nun die Imports, nachdem wir sichergestellt haben, dass die Pakete vorhanden sind:
 import discord
-from redbot.core import commands, Config
-import requests
+import subprocess
+import sys
 import json
+import re
+import requests
 import time
-import os
+import asyncio
+import mysql.connector
+
+# Dynamische Installation von mysql-connector-python, falls nicht vorhanden.
+try:
+    import mysql.connector
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
+    import mysql.connector
+
+from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
+from redbot.core.utils.chat_formatting import box
 
 class LLMManager(commands.Cog):
-    """Cog to interact with Ollama LLM and manage knowledge storage."""
-    
+    """Cog to interact with the LLM and manage a MariaDB-based knowledge storage."""
+
     def __init__(self, bot):
         self.bot = bot
-        # Hier wird das Standardmodell (gemma3:4b) gesetzt und die URLs konfiguriert.
-        self.config = Config.get_conf(self, identifier=9876543210)
+        # Registrierung der globalen Konfiguration:
+        self.config = Config.get_conf(self, identifier=9999999999)
         self.config.register_global(
-            model="gemma3:4b",  # Standardmodell auf gemma3:4b
-            api_url="http://192.168.10.5:11434",  # Ollama API URL
-            chroma_url="http://192.168.10.5:6333"   # Qdrant URL, passe ggf. an deine Umgebung an
+            model="gemma3:12b",
+            api_url="http://192.168.10.5:11434",
+            db_config={"host": "", "user": "", "password": "", "database": ""}
         )
-        self.knowledge_file = cog_data_path(self) / "llm_knowledge.json"
-        self.ensure_knowledge_file()
 
-    def ensure_knowledge_file(self):
-        if not self.knowledge_file.exists():
-            with self.knowledge_file.open('w') as file:
-                json.dump({}, file)
+    # Hilfsmethode, um DB-Konfiguration abzurufen.
+    async def get_db_config(self):
+        return await self.config.db_config()
 
-    def load_knowledge(self):
-        with self.knowledge_file.open('r') as file:
-            return json.load(file)
+    # Führt synchrone DB-Aufgaben in einem Executor aus, um Blockierungen zu vermeiden.
+    async def run_db_task(self, task, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, task, *args, **kwargs)
 
-    def save_knowledge(self, knowledge):
-        with self.knowledge_file.open('w') as file:
-            json.dump(knowledge, file, indent=4)
+    # --- Datenbankoperationen (synchron implementiert, asynchron aufrufbar) ---
 
-    async def _get_api_url(self):
-        return await self.config.api_url()
+    def _add_tag_content_sync(self, tag, content, db_config):
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("INSERT INTO tags (tag, content) VALUES (%s, %s);", (tag, content))
+        db.commit()
+        cursor.close()
+        db.close()
 
-    async def qdrant_query(self, query_text, top_k=3):
-        chroma_url = await self.config.chroma_url()
-        # Hier laden wir das Modell; für Performance könntest du das einmal cachen.
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        embedding = model.encode(query_text).tolist()
-        client = QdrantClient(url=chroma_url)
-        results = client.search(
-            collection_name="fuswiki",
-            query_vector=embedding,
-            limit=top_k
-        )
-        return "\n\n".join([hit.payload["text"] for hit in results])
+    async def add_tag_content(self, tag, content):
+        db_config = await self.get_db_config()
+        await self.run_db_task(self._add_tag_content_sync, tag, content, db_config)
+
+    def _edit_tag_content_sync(self, entry_id, new_content, db_config):
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("UPDATE tags SET content = %s WHERE id = %s;", (new_content, entry_id))
+        db.commit()
+        cursor.close()
+        db.close()
+
+    async def edit_tag_content(self, entry_id, new_content):
+        db_config = await self.get_db_config()
+        await self.run_db_task(self._edit_tag_content_sync, entry_id, new_content, db_config)
+
+    def _delete_tag_by_id_sync(self, entry_id, db_config):
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("DELETE FROM tags WHERE id = %s;", (entry_id,))
+        db.commit()
+        cursor.close()
+        db.close()
+
+    async def delete_tag_by_id(self, entry_id):
+        db_config = await self.get_db_config()
+        await self.run_db_task(self._delete_tag_by_id_sync, entry_id, db_config)
+
+    def _delete_tag_by_name_sync(self, tag, db_config):
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("DELETE FROM tags WHERE tag = %s;", (tag,))
+        db.commit()
+        cursor.close()
+        db.close()
+
+    async def delete_tag_by_name(self, tag):
+        db_config = await self.get_db_config()
+        await self.run_db_task(self._delete_tag_by_name_sync, tag, db_config)
+
+    def _get_all_content_sync(self, db_config):
+        db = mysql.connector.connect(**db_config)
+        cursor = db.cursor()
+        cursor.execute("SELECT id, tag, content FROM tags ORDER BY id;")
+        results = cursor.fetchall()
+        cursor.close()
+        db.close()
+        return results
+
+    async def get_all_content(self):
+        db_config = await self.get_db_config()
+        return await self.run_db_task(self._get_all_content_sync, db_config)
+
+    # --- LLM-Abfrage ---
+    async def query_llm(self, prompt, channel):
+        model = await self.config.model()
+        api_url = await self.config.api_url()
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"num_ctx": 14000, "temperature": 0}
+        }
+        headers = {"Content-Type": "application/json"}
+        async with channel.typing():
+            resp = requests.post(f"{api_url}/api/chat", json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        return data.get("message", {}).get("content", "No valid response received.")
+
+    # Lässt die LLM eine Liste von DB-Einträgen bewerten, um den besten relevanten Eintrag zu finden.
+    async def pick_best_entry_with_llm(self, question: str, entries: list, channel) -> int:
+        numbered_entries = []
+        for i, (eid, tag, content) in enumerate(entries):
+            snippet = (
+                f"Entry {i}:\n"
+                f"ID: {eid}, Tag: {tag}\n"
+                f"{content}\n"
+                "---"
+            )
+            numbered_entries.append(snippet)
+
+        prompt = f"""You are a helpful ranking assistant.
+
+User's question:
+{question}
+
+We have {len(numbered_entries)} database entries. Rate each from 0 to 10, how relevant it is to the question.
+Return exact JSON in this format (no code fences, no extra text):
+
+{{
+  "scores": [score_for_entry0, score_for_entry1, ...]
+}}
+
+0 = not relevant at all
+10 = extremely relevant
+
+Entries:
+{chr(10).join(numbered_entries)}
+"""
+        llm_response = await self.query_llm(prompt, channel)
+        best_index = -1
+        best_score = -1
+        try:
+            json_str = re.sub(r"```(json)?", "", llm_response)
+            data = json.loads(json_str)
+            scores = data.get("scores", [])
+            for i, s in enumerate(scores):
+                if s > best_score:
+                    best_score = s
+                    best_index = i
+        except Exception as e:
+            await channel.send(f"Error: could not parse LLM JSON rating: {e}")
+            return -1
+
+        if best_score < 2:
+            return -1
+        return best_index
+
+    # Hier wird die DB abgefragt und die Ergebnisse an die LLM übergeben (nur bei einer LLM-Anfrage)
+    async def process_question(self, question, channel, author=None):
+        all_entries = await self.get_all_content()
+        # Filtere Einträge auf Basis eines simplen Wortvergleichs
+        words = re.sub(r"[^\w\s]", "", question.lower()).split()
+        filtered = []
+        for (eid, tag, content) in all_entries:
+            score = sum(1 for w in set(words) if w in content.lower())
+            if score > 0:
+                filtered.append((eid, tag, content))
+        if not filtered:
+            await channel.send("No relevant info found.")
+            return
+        # Begrenze auf die Top 5 Einträge, um die LLM-Auswertung effizient zu halten.
+        filtered = filtered[:5]
+        best_index = await self.pick_best_entry_with_llm(question, filtered, channel)
+        if best_index < 0:
+            await channel.send("No relevant entry found or question too unclear. Please refine your question.")
+            return
+        eid, best_tag, best_content = filtered[best_index]
+        await channel.send(f"[{best_tag}] (ID: {eid})\n{best_content}")
+
+    # --- Commands und Listener ---
+
+    @commands.command()
+    async def askllm(self, ctx, *, question: str):
+        """Sends your question to the LLM using data from the database."""
+        await self.process_question(question, ctx.channel, author=ctx.author)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if self.bot.user.mentioned_in(message):
+            question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if question:
+                await self.process_question(question, message.channel, author=message.author)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
-        """Sets the default LLM model to be used."""
         await self.config.model.set(model)
-        await ctx.send(f"Default LLM model set to `{model}`.")
-
-    @commands.command()
-    async def modellist(self, ctx):
-        """Lists available models in Ollama."""
-        api_url = await self._get_api_url()
-        try:
-            response = requests.get(f"{api_url}/api/tags")
-            response.raise_for_status()
-            models = response.json()
-            model_names = [m["name"] for m in models.get("models", [])]
-            await ctx.send(f"Available models: {', '.join(model_names)}")
-        except Exception as e:
-            await ctx.send(f"Error fetching models: {e}")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setchroma(self, ctx, url: str):
-        """Sets Qdrant API URL."""
-        await self.config.chroma_url.set(url.rstrip("/"))
-        await ctx.send(f"Qdrant API URL set to `{url}`")
+        await ctx.send(f"LLM model set to '{model}'.")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setapi(self, ctx, url: str):
-        """Sets the API URL for Ollama."""
-        url = url.rstrip("/")
-        await self.config.api_url.set(url)
-        await ctx.send(f"Ollama API URL set to `{url}`")
+        await self.config.api_url.set(url.rstrip("/"))
+        await ctx.send(f"Ollama API URL set to '{url}'.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setdb(self, ctx, host: str, user: str, password: str, database: str):
+        await self.config.db_config.set({"host": host, "user": user, "password": password, "database": database})
+        await ctx.send("Database configuration updated.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def initdb(self, ctx):
+        """Initializes the database schema (creates the tags table if it doesn't exist)."""
+        db_config = await self.get_db_config()
+        try:
+            db = mysql.connector.connect(**db_config)
+            cursor = db.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tag VARCHAR(255) NOT NULL,
+                    content TEXT NOT NULL
+                );
+            """)
+            db.commit()
+            cursor.close()
+            db.close()
+            await ctx.send("Database schema initialized.")
+        except mysql.connector.Error as err:
+            await ctx.send(f"Database initialization error: {err}")
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
-        """Adds information under a tag to the LLM's knowledge base."""
-        knowledge = self.load_knowledge()
-        if tag not in knowledge:
-            knowledge[tag] = []
-        knowledge[tag].append(info)
-        self.save_knowledge(knowledge)
-        await ctx.send(f"Information stored under tag `{tag}` in LLM knowledge base.")
+        """Adds new information under a specified tag."""
+        await self.add_tag_content(tag.lower(), info)
+        await ctx.send(f"Added info under '{tag.lower()}'.")
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays the current knowledge stored in the LLM's knowledge base."""
-        knowledge = self.load_knowledge()
-        formatted_knowledge = json.dumps(knowledge, indent=4)
-        await ctx.send(f"LLM Knowledge Base:\n```json\n{formatted_knowledge}\n```")
+        results = await self.get_all_content()
+        if not results:
+            await ctx.send("No tags stored.")
+            return
+        chunks = []
+        current_chunk = "```\n"
+        for _id, tag, text in results:
+            line = f"[{_id}] ({tag}) {text}\n"
+            if len(current_chunk) + len(line) > 1900:
+                current_chunk += "```"
+                chunks.append(current_chunk)
+                current_chunk = "```\n" + line
+            else:
+                current_chunk += line
+        if current_chunk.strip():
+            current_chunk += "```"
+            chunks.append(current_chunk)
+        for chunk in chunks:
+            await ctx.send(chunk)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def loadmodel(self, ctx, model: str):
-        """Pulls a model and ensures it's ready to use."""
-        api_url = await self._get_api_url()
-        try:
-            await ctx.send(f"Pulling model `{model}`...")
-            requests.post(f"{api_url}/api/pull", json={"name": model}).raise_for_status()
-
-            for _ in range(30):
-                response = requests.get(f"{api_url}/api/tags")
-                response.raise_for_status()
-                models = [m["name"] for m in response.json().get("models", [])]
-                if model in models:
-                    await ctx.send(f"Model `{model}` is now available.")
-                    return
-                time.sleep(2)
-
-            await ctx.send(f"Model `{model}` is not yet available. Try again later.")
-        except Exception as e:
-            await ctx.send(f"Error loading model `{model}`: {e}")
+    async def llmknowdelete(self, ctx, entry_id: int):
+        await self.delete_tag_by_id(entry_id)
+        await ctx.send(f"Deleted entry with ID {entry_id}.")
 
     @commands.command()
-    async def askllm(self, ctx, *, question: str):
-        """Sends question to LLM using Qdrant embeddings."""
-        model = await self.config.model()
-        api_url = await self._get_api_url()
-        context_info = await self.qdrant_query(question, top_k=3)
-    
-        prompt = (
-            "Use the provided context to answer accurately. Do not guess.\n\n"
-            f"Context:\n{context_info}\n\n"
-            f"Question: {question}"
-        )
-    
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False
-        }
-    
-        try:
-            response = requests.post(f"{api_url}/api/chat", json=payload)
-            response.raise_for_status()
-            answer = response.json().get("message", {}).get("content", "No valid response received.")
-            await ctx.send(answer)
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
+    @commands.has_permissions(administrator=True)
+    async def llmknowdeletetag(self, ctx, tag: str):
+        await self.delete_tag_by_name(tag.lower())
+        await ctx.send(f"Deleted all entries with tag '{tag.lower()}'.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowedit(self, ctx, entry_id: int, *, new_content: str):
+        await self.edit_tag_content(entry_id, new_content)
+        await ctx.send(f"Updated entry {entry_id}.")
 
 def setup(bot):
     bot.add_cog(LLMManager(bot))
