@@ -17,7 +17,15 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 
 class LLMManager(commands.Cog):
-    """Cog to interact with the LLM and manage a Qdrant-based knowledge storage."""
+    """Cog to interact with the LLM using a Qdrant-based knowledge storage.
+
+    This cog uses Qdrant as its exclusive knowledge base.
+    Knowledge entries can be added manually (source "manual") with !llmknow,
+    or imported from a GitHub Wiki using !importwiki (which marks these with source "wiki").
+    The commands !llmknowshow, !llmknowdelete, !llmknowdeletetag and !llmknowedit allow management of the stored knowledge.
+    The command !askllm (and automatic processing when mentioned) perform a semantic search in Qdrant,
+    aggregate the context and then query the LLM for a final answer.
+    """
     
     def __init__(self, bot):
         self.bot = bot
@@ -41,7 +49,8 @@ class LLMManager(commands.Cog):
     # --- Knowledge Management in Qdrant ---
     def upsert_knowledge(self, tag, content, source="manual"):
         """Berechnet das Embedding für den Inhalt und fügt den Wissenspunkt in Qdrant ein.
-           Der Parameter 'source' ermöglicht die Unterscheidung zwischen Wiki- und manuellen Einträgen."""
+        Der Parameter 'source' unterscheidet zwischen manuellen und Wiki-Einträgen.
+        Falls die Collection nicht existiert, wird sie erstellt."""
         try:
             self.q_client.get_collection(collection_name=self.collection_name)
         except Exception:
@@ -56,10 +65,10 @@ class LLMManager(commands.Cog):
             collection_name=self.collection_name,
             points=[{"id": doc_id, "vector": vector, "payload": payload}]
         )
-    
+
     @commands.command()
     async def llmknow(self, ctx, tag: str, *, info: str):
-        """Adds new information under the specified tag (source 'manual') into Qdrant."""
+        """Adds new manual knowledge under the specified tag into Qdrant."""
         await self.ensure_qdrant_client()
         self.upsert_knowledge(tag.lower(), info, source="manual")
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
@@ -95,14 +104,14 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Deleted all entries with tag '{tag.lower()}'.")
     
     def _delete_wiki_entries_sync(self):
-        """Deletes all entries in Qdrant with source 'wiki'."""
+        """Deletes all Wiki entries from Qdrant (where source is 'wiki')."""
         filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
         self.q_client.delete(collection_name=self.collection_name, filter=filt)
     
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def deletewiki(self, ctx):
-        """Deletes only the Wiki-based knowledge entries (source 'wiki')."""
+        """Deletes only the Wiki-based knowledge entries."""
         await self.ensure_qdrant_client()
         await asyncio.get_running_loop().run_in_executor(None, self._delete_wiki_entries_sync)
         await ctx.send("Deleted all Wiki entries.")
@@ -125,13 +134,12 @@ class LLMManager(commands.Cog):
     
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays all knowledge entries from Qdrant (manual + Wiki) in chunks of <= 2000 characters."""
+        """Displays all knowledge entries from Qdrant in chunks of <= 2000 characters."""
         await self.ensure_qdrant_client()
         points = await self.get_all_knowledge()
         if not points:
             await ctx.send("No knowledge entries stored.")
             return
-        
         aggregated = "\n".join([
             f"[{point.id}] ({point.payload.get('tag','NoTag')}, source: {point.payload.get('source','unknown')}): {point.payload.get('content','')}"
             for point in points
@@ -185,16 +193,13 @@ class LLMManager(commands.Cog):
         if not qdrant_results:
             await channel.send("No relevant information found.")
             return
-        
         aggregated_context = "\n\n".join([
             f"[{result.id}] ({result.payload.get('tag', 'NoTag')}): {result.payload.get('content', '')}"
             for result in qdrant_results
         ])
-        
         def strip_html(raw_html):
             cleanr = re.compile('<.*?>')
             return re.sub(cleanr, '', raw_html)
-        
         def validate_links(text):
             url_regex = r'https?://[^\s]+'
             links = re.findall(url_regex, text)
@@ -210,15 +215,13 @@ class LLMManager(commands.Cog):
                         text = text.replace(link, "")
             text = re.sub(r'\s+', ' ', text)
             return text
-        
         context_text = strip_html(aggregated_context)
         context_text = validate_links(context_text)
         if len(context_text) > 4000:
             context_text = context_text[:4000] + "\n...[truncated]"
-        
         final_prompt = (
             f"Using the following context extracted from the documentation:\n{context_text}\n\n"
-            "Please answer the following question concisely and accurately. Include any relevant links as Markdown if present.\n\n"
+            "Please answer the following question concisely and accurately. Do not fabricate details. If the context contains conflicting information, explain briefly and state the most commonly recommended option. If no clear recommendation exists, state so. Include any relevant links as Markdown if present.\n\n"
             f"Question: {question}"
         )
         final_answer = await self.query_llm(final_prompt, channel)
