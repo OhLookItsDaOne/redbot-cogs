@@ -169,7 +169,7 @@ Entries:
             return -1
         return best_index
     
-    # --- Angepasste Funktion zur Frageverarbeitung ---
+    # --- Angepasste Funktion zur Frageverarbeitung ---    
     async def process_question(self, question, channel, author=None):
         all_entries = await self.get_all_content()
         if not all_entries:
