@@ -268,28 +268,34 @@ Entries:
         """Adds new information under a specified tag."""
         await self.add_tag_content(tag.lower(), info)
         await ctx.send(f"Added info under '{tag.lower()}'.")
-
     @commands.command()
     async def llmknowshow(self, ctx):
+        """Displays the current knowledge stored in the DB, splitting output into chunks so that no message exceeds 4000 characters."""
         results = await self.get_all_content()
         if not results:
             await ctx.send("No tags stored.")
             return
+
+        max_length = 4000  # Maximale Zeichenlänge pro Nachricht (inklusive Formatierung)
         chunks = []
         current_chunk = "```\n"
         for _id, tag, text in results:
             line = f"[{_id}] ({tag}) {text}\n"
-            if len(current_chunk) + len(line) > 1900:
+            # Wenn das Hinzufügen der nächsten Zeile das Limit überschreitet, schließe den aktuellen Chunk ab
+            if len(current_chunk) + len(line) > max_length - 3:  # -3 für die abschließenden Backticks
                 current_chunk += "```"
                 chunks.append(current_chunk)
                 current_chunk = "```\n" + line
             else:
                 current_chunk += line
+
         if current_chunk.strip():
             current_chunk += "```"
             chunks.append(current_chunk)
+
         for chunk in chunks:
             await ctx.send(chunk)
+
 
     @commands.command()
     @commands.has_permissions(administrator=True)
