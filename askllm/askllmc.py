@@ -32,16 +32,16 @@ class LLMManager(commands.Cog):
             api_url="http://192.168.10.5:11434",
             db_config={"host": "", "user": "", "password": "", "database": ""}
         )
-
+    
     # Hilfsmethode, um DB-Konfiguration abzurufen.
     async def get_db_config(self):
         return await self.config.db_config()
-
+    
     # Führt synchrone DB-Aufgaben in einem Executor aus, um Blockierungen zu vermeiden.
     async def run_db_task(self, task, *args, **kwargs):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, task, *args, **kwargs)
-
+    
     # --- Datenbankoperationen (synchron implementiert, asynchron aufrufbar) ---
     def _add_tag_content_sync(self, tag, content, db_config):
         db = mysql.connector.connect(**db_config)
@@ -50,11 +50,11 @@ class LLMManager(commands.Cog):
         db.commit()
         cursor.close()
         db.close()
-
+    
     async def add_tag_content(self, tag, content):
         db_config = await self.get_db_config()
         await self.run_db_task(self._add_tag_content_sync, tag, content, db_config)
-
+    
     def _edit_tag_content_sync(self, entry_id, new_content, db_config):
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
@@ -62,11 +62,11 @@ class LLMManager(commands.Cog):
         db.commit()
         cursor.close()
         db.close()
-
+    
     async def edit_tag_content(self, entry_id, new_content):
         db_config = await self.get_db_config()
         await self.run_db_task(self._edit_tag_content_sync, entry_id, new_content, db_config)
-
+    
     def _delete_tag_by_id_sync(self, entry_id, db_config):
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
@@ -74,11 +74,11 @@ class LLMManager(commands.Cog):
         db.commit()
         cursor.close()
         db.close()
-
+    
     async def delete_tag_by_id(self, entry_id):
         db_config = await self.get_db_config()
         await self.run_db_task(self._delete_tag_by_id_sync, entry_id, db_config)
-
+    
     def _delete_tag_by_name_sync(self, tag, db_config):
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
@@ -86,11 +86,11 @@ class LLMManager(commands.Cog):
         db.commit()
         cursor.close()
         db.close()
-
+    
     async def delete_tag_by_name(self, tag):
         db_config = await self.get_db_config()
         await self.run_db_task(self._delete_tag_by_name_sync, tag, db_config)
-
+    
     def _get_all_content_sync(self, db_config):
         db = mysql.connector.connect(**db_config)
         cursor = db.cursor()
@@ -99,11 +99,11 @@ class LLMManager(commands.Cog):
         cursor.close()
         db.close()
         return results
-
+    
     async def get_all_content(self):
         db_config = await self.get_db_config()
         return await self.run_db_task(self._get_all_content_sync, db_config)
-
+    
     # --- LLM-Abfrage ---
     async def query_llm(self, prompt, channel):
         model = await self.config.model()
@@ -120,8 +120,7 @@ class LLMManager(commands.Cog):
             resp.raise_for_status()
             data = resp.json()
         return data.get("message", {}).get("content", "No valid response received.")
-
-    # Lässt die LLM eine Liste von DB-Einträgen bewerten, um den besten relevanten Eintrag zu finden.
+    
     async def pick_best_entry_with_llm(self, question: str, entries: list, channel) -> int:
         numbered_entries = []
         for i, (eid, tag, content) in enumerate(entries):
@@ -132,12 +131,12 @@ class LLMManager(commands.Cog):
                 "---"
             )
             numbered_entries.append(snippet)
-
+    
         prompt = f"""You are a helpful ranking assistant.
-
+    
 User's question:
 {question}
-
+    
 We have {len(numbered_entries)} database entries. Rate each from 0 to 10, how relevant it is to the question.
 Return exact JSON in this format (no code fences, no extra text):
 
@@ -165,19 +164,18 @@ Entries:
         except Exception as e:
             await channel.send(f"Error: could not parse LLM JSON rating: {e}")
             return -1
-
+    
         if best_score < 2:
             return -1
         return best_index
-
-    # Hier wird die Datenbank abgefragt und die Ergebnisse an die LLM übergeben (nur bei einer LLM-Anfrage)
+    
     async def process_question(self, question, channel, author=None):
         all_entries = await self.get_all_content()
         if not all_entries:
             await channel.send("No information stored in the database.")
             return
 
-        # Normalisiere sowohl die Frage als auch jeden Eintrag (Tag und Content), um Vergleiche zu ermöglichen.
+        # Normalisiere Frage und Einträge für den Vergleich
         question_norm = re.sub(r"[^\w\s]", "", question.lower())
         words = question_norm.split()
 
@@ -194,7 +192,7 @@ Entries:
             await channel.send("No relevant info found.")
             return
 
-        # Begrenze auf die Top 5 Einträge für die LLM-Auswertung
+        # Begrenze auf die Top 5 Einträge
         filtered = filtered[:5]
         best_index = await self.pick_best_entry_with_llm(question, filtered, channel)
         if best_index < 0:
@@ -203,20 +201,28 @@ Entries:
 
         eid, best_tag, best_content = filtered[best_index]
 
+        # HTML-Tags entfernen, falls der Inhalt als HTML vorliegt.
+        def strip_html(raw_html):
+            cleanr = re.compile('<.*?>')
+            cleantext = re.sub(cleanr, '', raw_html)
+            return cleantext
+
+        best_content = strip_html(best_content)
+
         # Kürze den Inhalt, falls er zu lang ist – hier maximal 1000 Zeichen (anpassbar)
-        max_length = 1000
-        if len(best_content) > max_length:
-            best_content = best_content[:max_length] + "\n...[truncated]"
+        max_content_length = 1000
+        if len(best_content) > max_content_length:
+            best_content = best_content[:max_content_length] + "\n...[truncated]"
 
         await channel.send(f"[{best_tag}] (ID: {eid})\n{best_content}")
 
+    
     # --- Commands und Listener ---
-
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """Sends your question to the LLM using data from the database."""
         await self.process_question(question, ctx.channel, author=ctx.author)
-
+    
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -225,25 +231,25 @@ Entries:
             question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
             if question:
                 await self.process_question(question, message.channel, author=message.author)
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmodel(self, ctx, model: str):
         await self.config.model.set(model)
         await ctx.send(f"LLM model set to '{model}'.")
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setapi(self, ctx, url: str):
         await self.config.api_url.set(url.rstrip("/"))
         await ctx.send(f"Ollama API URL set to '{url}'.")
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setdb(self, ctx, host: str, user: str, password: str, database: str):
         await self.config.db_config.set({"host": host, "user": user, "password": password, "database": database})
         await ctx.send("Database configuration updated.")
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def initdb(self, ctx):
@@ -265,33 +271,33 @@ Entries:
             await ctx.send("Database schema initialized.")
         except mysql.connector.Error as err:
             await ctx.send(f"Database initialization error: {err}")
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx, tag: str, *, info: str):
         """Adds new information under a specified tag."""
         await self.add_tag_content(tag.lower(), info)
         await ctx.send(f"Added info under '{tag.lower()}'.")
-
+    
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Shows the contents of the DB, splitting output into chunks of <= 4000 characters."""
+        """Shows the contents of the DB, splitting output into chunks of <= 2000 characters."""
         results = await self.get_all_content()
         if not results:
             await ctx.send("No tags stored.")
             return
-
-        max_length = 4000
+    
+        max_length = 2000  # Discord-Nachrichtenlimit
         header = "```\n"
         footer = "```"
         chunks = []
         current_chunk = header
-
+    
         def flush_chunk():
             nonlocal current_chunk
             chunks.append(current_chunk + footer)
             current_chunk = header
-
+    
         for _id, tag, text in results:
             line = f"[{_id}] ({tag}) {text}\n"
             allowed_line_length = max_length - len(header) - len(footer)
@@ -305,10 +311,11 @@ Entries:
                 if len(current_chunk) + len(line) > max_length - len(footer):
                     flush_chunk()
                 current_chunk += line
-
+    
         if current_chunk != header:
             flush_chunk()
-
+    
+        # Zusätzliche Prüfung, falls ein Chunk versehentlich zu lang ist (sollte aber nicht vorkommen)
         final_chunks = []
         for chunk in chunks:
             if len(chunk) > max_length:
@@ -316,27 +323,27 @@ Entries:
                     final_chunks.append(chunk[i:i+max_length])
             else:
                 final_chunks.append(chunk)
-
+    
         for chunk in final_chunks:
             await ctx.send(chunk)
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdelete(self, ctx, entry_id: int):
         await self.delete_tag_by_id(entry_id)
         await ctx.send(f"Deleted entry with ID {entry_id}.")
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
         await self.delete_tag_by_name(tag.lower())
         await ctx.send(f"Deleted all entries with tag '{tag.lower()}'.")
-
+    
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowedit(self, ctx, entry_id: int, *, new_content: str):
         await self.edit_tag_content(entry_id, new_content)
         await ctx.send(f"Updated entry {entry_id}.")
-
+    
 def setup(bot):
     bot.add_cog(LLMManager(bot))
