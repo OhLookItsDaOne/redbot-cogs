@@ -29,7 +29,7 @@ class LLMManager(commands.Cog):
             qdrant_url="http://192.168.10.5:6333"
         )
         self.collection_name = "fus_wiki"  # Name der Qdrant-Collection
-        self.q_client = None  # Wird lazy initialisiert
+        self.q_client = None  # Lazy initialization
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # Erzeugt 384-dim Vektoren
 
     async def ensure_qdrant_client(self):
@@ -39,10 +39,9 @@ class LLMManager(commands.Cog):
             self.q_client = QdrantClient(url=qdrant_url)
 
     # --- Knowledge Management in Qdrant ---
-    def upsert_knowledge(self, tag, content):
+    def upsert_knowledge(self, tag, content, source="manual"):
         """Berechnet das Embedding für den Inhalt und fügt den Wissenspunkt in Qdrant ein.
-           Falls die Collection nicht existiert, wird sie erstellt."""
-        # Stelle sicher, dass die Collection existiert:
+           Der Parameter 'source' ermöglicht die Unterscheidung zwischen Wiki- und manuellen Einträgen."""
         try:
             self.q_client.get_collection(collection_name=self.collection_name)
         except Exception:
@@ -51,20 +50,19 @@ class LLMManager(commands.Cog):
                 vectors_config={"size": 384, "distance": "Cosine"}
             )
         vector = self.embedding_model.encode(content).tolist()
-        payload = {"tag": tag, "content": content}
-        # Verwende als ID die aktuelle Zeit in Millisekunden
+        payload = {"tag": tag, "content": content, "source": source}
         doc_id = int(time.time() * 1000)
         self.q_client.upsert(
             collection_name=self.collection_name,
             points=[{"id": doc_id, "vector": vector, "payload": payload}]
         )
-
+    
     @commands.command()
     async def llmknow(self, ctx, tag: str, *, info: str):
-        """Adds new information under the specified tag into Qdrant."""
+        """Adds new information under the specified tag (source 'manual') into Qdrant."""
         await self.ensure_qdrant_client()
-        self.upsert_knowledge(tag.lower(), info)
-        await ctx.send(f"Added info under '{tag.lower()}'.")
+        self.upsert_knowledge(tag.lower(), info, source="manual")
+        await ctx.send(f"Added manual info under '{tag.lower()}'.")
     
     def _get_all_knowledge_sync(self):
         """Liefert alle Dokumente aus der Qdrant-Collection als Liste."""
@@ -77,6 +75,7 @@ class LLMManager(commands.Cog):
     def _delete_knowledge_by_id_sync(self, doc_id):
         self.q_client.delete(collection_name=self.collection_name, points=[doc_id])
     
+    @commands.command()
     async def llmknowdelete(self, ctx, doc_id: int):
         """Deletes a knowledge entry from Qdrant by its ID."""
         await self.ensure_qdrant_client()
@@ -90,10 +89,23 @@ class LLMManager(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
-        """Deletes all knowledge entries with a given tag."""
+        """Deletes all knowledge entries with the given tag."""
         await self.ensure_qdrant_client()
         await asyncio.get_running_loop().run_in_executor(None, self._delete_knowledge_by_tag_sync, tag.lower())
         await ctx.send(f"Deleted all entries with tag '{tag.lower()}'.")
+    
+    def _delete_wiki_entries_sync(self):
+        """Deletes all entries in Qdrant with source 'wiki'."""
+        filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
+        self.q_client.delete(collection_name=self.collection_name, filter=filt)
+    
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def deletewiki(self, ctx):
+        """Deletes only the Wiki-based knowledge entries (source 'wiki')."""
+        await self.ensure_qdrant_client()
+        await asyncio.get_running_loop().run_in_executor(None, self._delete_wiki_entries_sync)
+        await ctx.send("Deleted all Wiki entries.")
     
     def _edit_knowledge_sync(self, doc_id, new_tag, new_content):
         new_vector = self.embedding_model.encode(new_content).tolist()
@@ -113,7 +125,7 @@ class LLMManager(commands.Cog):
     
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays all knowledge entries from Qdrant in chunks of <= 2000 characters."""
+        """Displays all knowledge entries from Qdrant (manual + Wiki) in chunks of <= 2000 characters."""
         await self.ensure_qdrant_client()
         points = await self.get_all_knowledge()
         if not points:
@@ -121,7 +133,7 @@ class LLMManager(commands.Cog):
             return
         
         aggregated = "\n".join([
-            f"[{point.id}] ({point.payload.get('tag','NoTag')}): {point.payload.get('content','')}"
+            f"[{point.id}] ({point.payload.get('tag','NoTag')}, source: {point.payload.get('source','unknown')}): {point.payload.get('content','')}"
             for point in points
         ])
         max_length = 2000
@@ -259,150 +271,6 @@ class LLMManager(commands.Cog):
         except Exception as e:
             await ctx.send(f"Error initializing collection: {e}")
     
-    # --- Import Wiki Command ---
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def importwiki(self, ctx):
-        """
-        Imports the GitHub Wiki into the Qdrant knowledge base.
-        It clears the collection first, then clones (or updates) the repository,
-        processes all markdown files, and upserts them into Qdrant.
-        """
-        await self.ensure_qdrant_client()
-        # Recreate the collection to clear any existing data
-        try:
-            self.q_client.recreate_collection(
-                collection_name=self.collection_name,
-                vectors_config={"size": 384, "distance": "Cosine"}
-            )
-            await ctx.send(f"Collection '{self.collection_name}' recreated in Qdrant (old entries cleared).")
-        except Exception as e:
-            await ctx.send(f"Error recreating collection: {e}")
-            return
-        
-        # Git-Repository-Info
-        repo_url = "https://github.com/Kvitekvist/FUS.wiki.git"
-        # Lokaler Zielpfad (Passe diesen Pfad an deine Umgebung an)
-        clone_path = r"C:\Users\Tim.Thießen\Documents\wiki"
-        
-        # Klonen oder Aktualisieren des Repositories
-        if os.path.exists(clone_path):
-            if os.path.isdir(os.path.join(clone_path, ".git")):
-                try:
-                    subprocess.run(["git", "-C", clone_path, "pull"], check=True)
-                    await ctx.send("Repository updated.")
-                except Exception as e:
-                    await ctx.send(f"Error updating repository: {e}")
-                    return
-            else:
-                shutil.rmtree(clone_path)
-                try:
-                    subprocess.run(["git", "clone", repo_url, clone_path], check=True)
-                    await ctx.send("Repository cloned.")
-                except Exception as e:
-                    await ctx.send(f"Error cloning repository: {e}")
-                    return
-        else:
-            try:
-                subprocess.run(["git", "clone", repo_url, clone_path], check=True)
-                await ctx.send("Repository cloned.")
-            except Exception as e:
-                await ctx.send(f"Error cloning repository: {e}")
-                return
-        
-        # Hilfsfunktionen
-        def strip_html(raw_html):
-            cleanr = re.compile('<.*?>')
-            return re.sub(cleanr, '', raw_html)
-        
-        def generate_smart_tags(html_content):
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html_content, "html.parser")
-            headers = soup.find_all(re.compile('^h[1-3]$'))
-            tags = [header.get_text().strip() for header in headers if header.get_text().strip()]
-            unique_tags = list(dict.fromkeys(tags))
-            if unique_tags:
-                return ", ".join(unique_tags)
-            return "No Tags"
-        
-        def process_markdown_file(file_path):
-            """Liest eine Markdown-Datei, wandelt sie in HTML um, generiert Smart Tags und bereinigt den Text."""
-            with open(file_path, "r", encoding="utf-8") as f:
-                md_content = f.read()
-            html_content = markdown.markdown(md_content)
-            smart_tags = generate_smart_tags(html_content)
-            plain_text = strip_html(html_content)
-            return smart_tags if smart_tags != "No Tags" else os.path.splitext(os.path.basename(file_path))[0], plain_text
-        
-        # Finde alle Markdown-Dateien im Repository
-        files = glob.glob(os.path.join(clone_path, "*.md"))
-        await ctx.send(f"Found {len(files)} markdown files. Starting import...")
-        
-        for file_path in files:
-            tag, content = process_markdown_file(file_path)
-            try:
-                vector = self.embedding_model.encode(content).tolist()
-                payload = {"tag": tag, "content": content}
-                doc_id = int(time.time() * 1000)
-                self.q_client.upsert(
-                    collection_name=self.collection_name,
-                    points=[{"id": doc_id, "vector": vector, "payload": payload}]
-                )
-                await ctx.send(f"Inserted document ID {doc_id} with tag '{tag}' from file {file_path}.")
-            except Exception as e:
-                await ctx.send(f"Error inserting document from {file_path}: {e}")
-            time.sleep(0.1)
-        
-        await ctx.send("Wiki import completed.")
-    
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
-            return
-        if self.bot.user.mentioned_in(message):
-            question = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            if question:
-                await self.process_question(question, message.channel, author=message.author)
-    
-    @commands.command()
-    async def askllm(self, ctx, *, question: str):
-        """Sends your question to the LLM using knowledge from Qdrant."""
-        await self.process_question(question, ctx.channel, author=ctx.author)
-    
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setmodel(self, ctx, model: str):
-        await self.config.model.set(model)
-        await ctx.send(f"LLM model set to '{model}'.")
-    
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setapi(self, ctx, url: str):
-        await self.config.api_url.set(url.rstrip("/"))
-        await ctx.send(f"Ollama API URL set to '{url}'.")
-    
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setqdrant(self, ctx, url: str):
-        await self.config.qdrant_url.set(url.rstrip("/"))
-        self.q_client = QdrantClient(url=url.rstrip("/"))
-        await ctx.send(f"Qdrant URL set to '{url}'.")
-    
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def initcollection(self, ctx):
-        """Initializes (or recreates) the Qdrant collection for storing knowledge."""
-        await self.ensure_qdrant_client()
-        try:
-            self.q_client.recreate_collection(
-                collection_name=self.collection_name,
-                vectors_config={"size": 384, "distance": "Cosine"}
-            )
-            await ctx.send(f"Collection '{self.collection_name}' initialized in Qdrant.")
-        except Exception as e:
-            await ctx.send(f"Error initializing collection: {e}")
-    
-    # Weitere Konfigurationsbefehle...
     @commands.Cog.listener()
     async def on_ready(self):
         print("LLMManager cog loaded.")
