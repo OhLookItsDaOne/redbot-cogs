@@ -18,31 +18,39 @@ class LLMManager(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
-        # Registrierung der globalen Konfiguration:
+        # Konfiguration: Modell, API-URL und Qdrant-URL
         self.config = Config.get_conf(self, identifier=9999999999)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333"
         )
-        self.collection_name = "fus_wiki"  # Name der Qdrant-Collection
-        # Qdrant-Client wird erst bei Bedarf initialisiert (lazy loading)
-        self.q_client = None
+        self.collection_name = "fus_wiki"  # Name der Collection in Qdrant
+        self.q_client = None  # Lazy initialization
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # Erzeugt 384-dim Vektoren
 
     async def ensure_qdrant_client(self):
         """Stellt sicher, dass der Qdrant-Client initialisiert ist."""
         if not self.q_client:
-            # Abrufen des qdrant_url-Wertes; get_raw ist awaitable.
             qdrant_url = await self.config.get_raw("qdrant_url", default="http://192.168.10.5:6333")
             self.q_client = QdrantClient(url=qdrant_url)
 
     # --- Wissensbasis: Hinzufügen, Anzeigen, Löschen, Editieren über Qdrant ---
     def upsert_knowledge(self, tag, content):
-        """Berechnet das Embedding für den Inhalt und fügt es in Qdrant ein."""
+        """Berechnet das Embedding für den Inhalt und fügt es in Qdrant ein.
+           Falls die Collection nicht existiert, wird sie erstellt."""
+        # Stelle sicher, dass die Collection existiert:
+        try:
+            self.q_client.get_collection(collection_name=self.collection_name)
+        except Exception:
+            # Erstelle (oder rekreiere) die Collection, falls sie nicht existiert.
+            self.q_client.recreate_collection(
+                collection_name=self.collection_name,
+                vectors_config={"size": 384, "distance": "Cosine"}
+            )
         vector = self.embedding_model.encode(content).tolist()
         payload = {"tag": tag, "content": content}
-        # Verwende hier als Dokument-ID die aktuelle Zeit in Millisekunden
+        # Erzeuge eine eindeutige Dokument-ID anhand der aktuellen Zeit in Millisekunden
         doc_id = int(time.time() * 1000)
         self.q_client.upsert(
             collection_name=self.collection_name,
@@ -57,8 +65,8 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Added info under '{tag.lower()}'.")
     
     def _get_all_knowledge_sync(self):
-        """Liefert alle Dokumente aus der Qdrant-Collection."""
-        return list(self.q_client.scroll_iter(collection_name=self.collection_name, with_payload=True))
+        """Liefert alle Dokumente aus der Qdrant-Collection als Liste."""
+        return list(self.q_client.scroll(collection_name=self.collection_name, with_payload=True))
     
     async def get_all_knowledge(self):
         await self.ensure_qdrant_client()
@@ -111,7 +119,7 @@ class LLMManager(commands.Cog):
             return
         
         aggregated = "\n".join([
-            f"[{point.id}] ({point.payload.get('tag','NoTag')}): {point.payload.get('content','')}"
+            f"[{point.id}] ({point.payload.get('tag', 'NoTag')}): {point.payload.get('content', '')}"
             for point in points
         ])
         max_length = 2000
