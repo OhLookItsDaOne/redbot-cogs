@@ -6,7 +6,6 @@ import re
 import requests
 import time
 import asyncio
-import mysql.connector
 
 # Dynamische Installation von mysql-connector-python, falls nicht vorhanden.
 try:
@@ -18,6 +17,8 @@ except ImportError:
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
 from redbot.core.utils.chat_formatting import box
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
 
 class LLMManager(commands.Cog):
     """Cog to interact with the LLM and manage a MariaDB-based knowledge storage."""
@@ -170,25 +171,38 @@ Entries:
             return -1
         return best_index
 
-    # Hier wird die DB abgefragt und die Ergebnisse an die LLM übergeben (nur bei einer LLM-Anfrage)
+    # Hier wird die Datenbank abgefragt und die Ergebnisse an die LLM übergeben (nur bei einer LLM-Anfrage)
     async def process_question(self, question, channel, author=None):
         all_entries = await self.get_all_content()
-        # Filtere Einträge auf Basis eines simplen Wortvergleichs
-        words = re.sub(r"[^\w\s]", "", question.lower()).split()
+        if not all_entries:
+            await channel.send("No information stored in the database.")
+            return
+
+        # Normalisiere sowohl die Frage als auch jeden Eintrag (Tag und Content), um Vergleiche zu ermöglichen.
+        question_norm = re.sub(r"[^\w\s]", "", question.lower())
+        words = question_norm.split()
+
         filtered = []
         for (eid, tag, content) in all_entries:
-            score = sum(1 for w in set(words) if w in content.lower())
+            # Normalisiere Tag und Content
+            tag_norm = re.sub(r"[^\w\s]", "", tag.lower())
+            content_norm = re.sub(r"[^\w\s]", "", content.lower())
+            combined = f"{tag_norm} {content_norm}"
+            score = sum(1 for w in set(words) if w in combined)
             if score > 0:
                 filtered.append((eid, tag, content))
+
         if not filtered:
             await channel.send("No relevant info found.")
             return
-        # Begrenze auf die Top 5 Einträge, um die LLM-Auswertung effizient zu halten.
+
+        # Begrenze auf die Top 5 Einträge für die LLM-Auswertung
         filtered = filtered[:5]
         best_index = await self.pick_best_entry_with_llm(question, filtered, channel)
         if best_index < 0:
             await channel.send("No relevant entry found or question too unclear. Please refine your question.")
             return
+
         eid, best_tag, best_content = filtered[best_index]
         await channel.send(f"[{best_tag}] (ID: {eid})\n{best_content}")
 
