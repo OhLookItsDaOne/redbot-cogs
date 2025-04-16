@@ -1,20 +1,50 @@
+import sys
+import subprocess
+
+# Dynamische Installation der benötigten Pakete
+required_packages = ['qdrant-client', 'sentence-transformers']
+
+def install_missing_packages(packages):
+    try:
+        import pkg_resources  # Zum Überprüfen installierter Pakete
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "setuptools"])
+        import pkg_resources
+
+    installed = {pkg.key for pkg in pkg_resources.working_set}
+    missing = [pkg for pkg in packages if pkg.lower() not in installed]
+    
+    if missing:
+        print(f"Installing missing packages: {', '.join(missing)}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    else:
+        print("All required packages are already installed.")
+
+install_missing_packages(required_packages)
+
+# Nun die Imports, nachdem wir sichergestellt haben, dass die Pakete vorhanden sind:
 import discord
 from redbot.core import commands, Config
 import requests
 import json
 import time
 import os
+from redbot.core.data_manager import cog_data_path
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from redbot.core.data_manager import cog_data_path
 
 class LLMManager(commands.Cog):
     """Cog to interact with Ollama LLM and manage knowledge storage."""
-
+    
     def __init__(self, bot):
         self.bot = bot
+        # Hier wird das Standardmodell (gemma3:4b) gesetzt und die URLs konfiguriert.
         self.config = Config.get_conf(self, identifier=9876543210)
-        self.config.register_global(model="llama3.2", api_url="http://localhost:11434")
+        self.config.register_global(
+            model="gemma3:4b",  # Standardmodell auf gemma3:4b
+            api_url="http://192.168.10.5:11434",  # Ollama API URL
+            chroma_url="http://192.168.10.5:6333"   # Qdrant URL, passe ggf. an deine Umgebung an
+        )
         self.knowledge_file = cog_data_path(self) / "llm_knowledge.json"
         self.ensure_knowledge_file()
 
@@ -34,20 +64,18 @@ class LLMManager(commands.Cog):
     async def _get_api_url(self):
         return await self.config.api_url()
 
-# Methode innerhalb deiner Cog-Klasse ergänzen:
-async def qdrant_query(self, query_text, top_k=3):
-    chroma_url = await self.config.chroma_url()
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    embedding = model.encode(query_text).tolist()
-
-    client = QdrantClient(url=chroma_url)
-    results = client.search(
-        collection_name="fuswiki",
-        query_vector=embedding,
-        limit=top_k
-    )
-
-    return "\n\n".join([hit.payload["text"] for hit in results])
+    async def qdrant_query(self, query_text, top_k=3):
+        chroma_url = await self.config.chroma_url()
+        # Hier laden wir das Modell; für Performance könntest du das einmal cachen.
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        embedding = model.encode(query_text).tolist()
+        client = QdrantClient(url=chroma_url)
+        results = client.search(
+            collection_name="fuswiki",
+            query_vector=embedding,
+            limit=top_k
+        )
+        return "\n\n".join([hit.payload["text"] for hit in results])
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -123,12 +151,12 @@ async def qdrant_query(self, query_text, top_k=3):
             await ctx.send(f"Model `{model}` is not yet available. Try again later.")
         except Exception as e:
             await ctx.send(f"Error loading model `{model}`: {e}")
+
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         """Sends question to LLM using Qdrant embeddings."""
         model = await self.config.model()
         api_url = await self._get_api_url()
-    
         context_info = await self.qdrant_query(question, top_k=3)
     
         prompt = (
@@ -150,3 +178,6 @@ async def qdrant_query(self, query_text, top_k=3):
             await ctx.send(answer)
         except Exception as e:
             await ctx.send(f"Error: {e}")
+
+def setup(bot):
+    bot.add_cog(LLMManager(bot))
