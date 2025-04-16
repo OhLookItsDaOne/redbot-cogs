@@ -169,16 +169,17 @@ Entries:
             return -1
         return best_index
     
+    # --- Angepasste Funktion zur Frageverarbeitung ---
     async def process_question(self, question, channel, author=None):
         all_entries = await self.get_all_content()
         if not all_entries:
             await channel.send("No information stored in the database.")
             return
-
+    
         # Normalisiere Frage und Einträge für den Vergleich
         question_norm = re.sub(r"[^\w\s]", "", question.lower())
         words = question_norm.split()
-
+    
         filtered = []
         for (eid, tag, content) in all_entries:
             tag_norm = re.sub(r"[^\w\s]", "", tag.lower())
@@ -187,35 +188,41 @@ Entries:
             score = sum(1 for w in set(words) if w in combined)
             if score > 0:
                 filtered.append((eid, tag, content))
-
+    
         if not filtered:
             await channel.send("No relevant info found.")
             return
-
-        # Begrenze auf die Top 5 Einträge
+    
+        # Begrenze auf die Top 5 Einträge für die LLM-Auswertung
         filtered = filtered[:5]
         best_index = await self.pick_best_entry_with_llm(question, filtered, channel)
         if best_index < 0:
             await channel.send("No relevant entry found or question too unclear. Please refine your question.")
             return
-
+    
         eid, best_tag, best_content = filtered[best_index]
-
-        # HTML-Tags entfernen, falls der Inhalt als HTML vorliegt.
+    
+        # Entferne HTML-Tags aus dem Kontext (falls vorhanden)
         def strip_html(raw_html):
             cleanr = re.compile('<.*?>')
-            cleantext = re.sub(cleanr, '', raw_html)
-            return cleantext
-
-        best_content = strip_html(best_content)
-
-        # Kürze den Inhalt, falls er zu lang ist – hier maximal 1000 Zeichen (anpassbar)
-        max_content_length = 1000
-        if len(best_content) > max_content_length:
-            best_content = best_content[:max_content_length] + "\n...[truncated]"
-
-        await channel.send(f"[{best_tag}] (ID: {eid})\n{best_content}")
-
+            return re.sub(cleanr, '', raw_html)
+    
+        context_text = strip_html(best_content)
+        # Optional: Kürze den Kontext, falls er zu lang ist
+        max_context_length = 4000
+        if len(context_text) > max_context_length:
+            context_text = context_text[:max_context_length] + "\n...[truncated]"
+    
+        # Erstelle einen finalen Prompt für die LLM, um eine prägnante Antwort zu generieren.
+        final_prompt = (
+            f"Using the following context:\n{context_text}\n\n"
+            f"Answer the following question concisely and accurately. "
+            f"Include any relevant links as Markdown if they are present in the context.\n\n"
+            f"Question: {question}"
+        )
+    
+        final_answer = await self.query_llm(final_prompt, channel)
+        await channel.send(final_answer)
     
     # --- Commands und Listener ---
     @commands.command()
@@ -315,7 +322,6 @@ Entries:
         if current_chunk != header:
             flush_chunk()
     
-        # Zusätzliche Prüfung, falls ein Chunk versehentlich zu lang ist (sollte aber nicht vorkommen)
         final_chunks = []
         for chunk in chunks:
             if len(chunk) > max_length:
