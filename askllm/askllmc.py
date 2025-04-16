@@ -14,29 +14,35 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 
 class LLMManager(commands.Cog):
+    """Cog to interact with the LLM using a Qdrant-based knowledge storage."""
+    
     def __init__(self, bot):
         self.bot = bot
+        # Registrierung der globalen Konfiguration:
         self.config = Config.get_conf(self, identifier=9999999999)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333"
         )
-        self.collection_name = "fus_wiki"
-        # Hier verwenden wir get_raw, um synchron den konfigurierten Wert zu erhalten.
-        qdrant_url = asyncio.run_coroutine_threadsafe(
-            self.config.get_raw("qdrant_url", default="http://192.168.10.5:6333"),
-            self.bot.loop
-        ).result()
-        self.q_client = QdrantClient(url=qdrant_url)
-        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.collection_name = "fus_wiki"  # Name der Qdrant-Collection
+        # Qdrant-Client wird erst bei Bedarf initialisiert (lazy loading)
+        self.q_client = None
+        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # Erzeugt 384-dim Vektoren
 
-    # --- Wissensbasis: Hinzufügen, Anzeigen, Löschen, Editieren ---
+    async def ensure_qdrant_client(self):
+        """Stellt sicher, dass der Qdrant-Client initialisiert ist."""
+        if not self.q_client:
+            # Abrufen des qdrant_url-Wertes; get_raw ist awaitable.
+            qdrant_url = await self.config.get_raw("qdrant_url", default="http://192.168.10.5:6333")
+            self.q_client = QdrantClient(url=qdrant_url)
+
+    # --- Wissensbasis: Hinzufügen, Anzeigen, Löschen, Editieren über Qdrant ---
     def upsert_knowledge(self, tag, content):
-        """Berechnet ein Embedding für den Inhalt und fügt es in Qdrant ein."""
+        """Berechnet das Embedding für den Inhalt und fügt es in Qdrant ein."""
         vector = self.embedding_model.encode(content).tolist()
         payload = {"tag": tag, "content": content}
-        # Erzeuge eine eindeutige ID anhand der aktuellen Zeit (Millisekunden)
+        # Verwende hier als Dokument-ID die aktuelle Zeit in Millisekunden
         doc_id = int(time.time() * 1000)
         self.q_client.upsert(
             collection_name=self.collection_name,
@@ -46,6 +52,7 @@ class LLMManager(commands.Cog):
     @commands.command()
     async def llmknow(self, ctx, tag: str, *, info: str):
         """Adds new information under the specified tag into Qdrant."""
+        await self.ensure_qdrant_client()
         self.upsert_knowledge(tag.lower(), info)
         await ctx.send(f"Added info under '{tag.lower()}'.")
     
@@ -54,6 +61,7 @@ class LLMManager(commands.Cog):
         return list(self.q_client.scroll_iter(collection_name=self.collection_name, with_payload=True))
     
     async def get_all_knowledge(self):
+        await self.ensure_qdrant_client()
         return await asyncio.get_running_loop().run_in_executor(None, self._get_all_knowledge_sync)
     
     def _delete_knowledge_by_id_sync(self, doc_id):
@@ -61,6 +69,7 @@ class LLMManager(commands.Cog):
     
     async def llmknowdelete(self, ctx, doc_id: int):
         """Deletes a knowledge entry from Qdrant by its ID."""
+        await self.ensure_qdrant_client()
         await asyncio.get_running_loop().run_in_executor(None, self._delete_knowledge_by_id_sync, doc_id)
         await ctx.send(f"Deleted entry with ID {doc_id}.")
     
@@ -72,6 +81,7 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
         """Deletes all knowledge entries with a given tag."""
+        await self.ensure_qdrant_client()
         await asyncio.get_running_loop().run_in_executor(None, self._delete_knowledge_by_tag_sync, tag.lower())
         await ctx.send(f"Deleted all entries with tag '{tag.lower()}'.")
     
@@ -87,23 +97,23 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def llmknowedit(self, ctx, doc_id: int, new_tag: str, *, new_content: str):
         """Edits a knowledge entry by re-upserting it with a new tag and content."""
+        await self.ensure_qdrant_client()
         await asyncio.get_running_loop().run_in_executor(None, self._edit_knowledge_sync, doc_id, new_tag.lower(), new_content)
         await ctx.send(f"Updated entry {doc_id}.")
     
     @commands.command()
     async def llmknowshow(self, ctx):
         """Displays all knowledge entries from Qdrant in chunks of <= 2000 characters."""
+        await self.ensure_qdrant_client()
         points = await self.get_all_knowledge()
         if not points:
             await ctx.send("No knowledge entries stored.")
             return
         
-        # Erstelle einen aggregierten Text, der jeden Eintrag formatiert.
         aggregated = "\n".join([
-            f"[{point.id}] ({point.payload.get('tag', 'NoTag')}): {point.payload.get('content', '')}"
+            f"[{point.id}] ({point.payload.get('tag','NoTag')}): {point.payload.get('content','')}"
             for point in points
         ])
-        # Teile den Text in Chunks, damit keine Nachricht mehr als 2000 Zeichen hat.
         max_length = 2000
         header = "```\n"
         footer = "```"
@@ -120,7 +130,7 @@ class LLMManager(commands.Cog):
         for chunk in chunks:
             await ctx.send(chunk)
     
-    # --- LLM-Abfrage ---
+    # --- LLM-Abfrage (Ollama API) ---
     async def query_llm(self, prompt, channel):
         model = await self.config.model()
         api_url = await self.config.api_url()
@@ -137,8 +147,8 @@ class LLMManager(commands.Cog):
             data = resp.json()
         return data.get("message", {}).get("content", "No valid response received.")
     
-    # --- Frageverarbeitung mit semantischer Suche über Qdrant ---
     async def search_knowledge(self, query, top_k=5):
+        await self.ensure_qdrant_client()
         query_vector = self.embedding_model.encode(query).tolist()
         results = self.q_client.search(
             collection_name=self.collection_name,
@@ -154,13 +164,11 @@ class LLMManager(commands.Cog):
             await channel.send("No relevant information found.")
             return
         
-        # Aggregiere den Kontext aus den top Ergebnissen.
         aggregated_context = "\n\n".join([
             f"[{result.id}] ({result.payload.get('tag', 'NoTag')}): {result.payload.get('content', '')}"
             for result in qdrant_results
         ])
         
-        # Hilfsfunktionen zur Bereinigung:
         def strip_html(raw_html):
             cleanr = re.compile('<.*?>')
             return re.sub(cleanr, '', raw_html)
@@ -232,6 +240,7 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def initcollection(self, ctx):
         """Initializes (or recreates) the Qdrant collection for storing knowledge."""
+        await self.ensure_qdrant_client()
         try:
             self.q_client.recreate_collection(
                 collection_name=self.collection_name,
