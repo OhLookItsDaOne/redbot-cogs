@@ -276,7 +276,7 @@ Entries:
         await ctx.send(f"Added info under '{tag.lower()}'.")
 
 
-    @commands.command()
+        @commands.command()
     async def llmknowshow(self, ctx):
         """Shows the contents of the DB, splitting output into chunks of <= 4000 characters."""
         results = await self.get_all_content()
@@ -296,14 +296,13 @@ Entries:
             chunks.append(current_chunk + footer)
             current_chunk = header
 
-        # Für jeden Eintrag (Zeile) in der DB:
+        # Für jeden Eintrag in der DB:
         for _id, tag, text in results:
             line = f"[{_id}] ({tag}) {text}\n"
-            # Maximale Länge, die eine einzelne Zeile in den Chunk einfügen darf:
-            max_line_length = max_length - len(header) - len(footer)
-            if len(line) > max_line_length:
-                # Falls die Zeile zu lang ist, teilen wir sie in kleinere Stücke:
-                parts = [line[i:i+max_line_length] for i in range(0, len(line), max_line_length)]
+            allowed_line_length = max_length - len(header) - len(footer)
+            if len(line) > allowed_line_length:
+                # Zeile in kleinere Teile aufteilen (basierend auf allowed_line_length)
+                parts = [line[i:i+allowed_line_length] for i in range(0, len(line), allowed_line_length)]
                 for part in parts:
                     if len(current_chunk) + len(part) > max_length - len(footer):
                         flush_chunk()
@@ -316,7 +315,17 @@ Entries:
         if current_chunk != header:
             flush_chunk()
 
+        # Zusätzliche Sicherheitsprüfung: Zerlege jeden Chunk, falls er versehentlich noch länger als max_length ist.
+        final_chunks = []
         for chunk in chunks:
+            if len(chunk) > max_length:
+                # Falls chunk zu lang ist, teilen wir ihn weiter in max_length-Stücke.
+                for i in range(0, len(chunk), max_length):
+                    final_chunks.append(chunk[i:i+max_length])
+            else:
+                final_chunks.append(chunk)
+
+        for chunk in final_chunks:
             await ctx.send(chunk)
 
     @commands.command()
