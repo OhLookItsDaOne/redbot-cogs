@@ -176,50 +176,51 @@ Entries:
             await channel.send("No information stored in the database.")
             return
 
-        # Normalisiere Frage und Einträge (Tag und Content) für den Vergleich.
+        # Normalisiere die Frage für den Vergleich (alles in Kleinbuchstaben, ohne Sonderzeichen)
         question_norm = re.sub(r"[^\w\s]", "", question.lower())
         words = question_norm.split()
 
-        filtered = []
+        # Berechne für jeden DB-Eintrag einen Score, basierend darauf, wie oft Wörter aus der Frage im Inhalt vorkommen.
+        scored_entries = []
         for (eid, tag, content) in all_entries:
             tag_norm = re.sub(r"[^\w\s]", "", tag.lower())
             content_norm = re.sub(r"[^\w\s]", "", content.lower())
             combined = f"{tag_norm} {content_norm}"
-            # Zähle, wie viele Wörter der Frage im kombinierten Text auftauchen.
             score = sum(1 for w in set(words) if w in combined)
-            if score > 0:
-                filtered.append((eid, tag, content))
+            scored_entries.append(((eid, tag, content), score))
 
-        # Fallback: Falls nichts gefiltert wurde, nutze ALLE Einträge als Kontext.
-        if not filtered:
-            filtered = all_entries
+        # Sortiere die Einträge absteigend nach Score
+        scored_entries.sort(key=lambda x: x[1], reverse=True)
+        # Wähle die Top 3 Einträge aus, die einen Score > 0 haben.
+        top_entries = [entry for entry, score in scored_entries if score > 0][:3]
+        if not top_entries:
+            # Fallback: Falls kein Eintrag den Score > 0 hat, nimm die ersten 3 Einträge
+            top_entries = [entry for entry, score in scored_entries][:3]
 
-        # Begrenze auf die Top 5 Einträge für die LLM-Auswertung (falls es mehr gibt).
-        filtered = filtered[:5]
-        best_index = await self.pick_best_entry_with_llm(question, filtered, channel)
-        if best_index < 0:
-            await channel.send("No relevant entry found or question too unclear. Please refine your question.")
-            return
+        # Aggregiere den Kontext: Für jeden Eintrag wird eine Zeile erstellt.
+        aggregated_context = "\n\n".join(
+            [f"[{eid}] ({tag}): {content}" for eid, tag, content in top_entries]
+        )
 
-        eid, best_tag, best_content = filtered[best_index]
-
-        # Entferne HTML-Tags aus dem Kontext, falls vorhanden.
+        # Entferne HTML-Tags aus dem aggregierten Kontext, falls vorhanden.
         def strip_html(raw_html):
             cleanr = re.compile('<.*?>')
             return re.sub(cleanr, '', raw_html)
-
-        context_text = strip_html(best_content)
-        # Optional: Kürze den Kontext, falls er zu lang ist.
+        aggregated_context = strip_html(aggregated_context)
+        
+        # Kürze den Kontext, falls er zu lang ist (hier maximal 4000 Zeichen)
         max_context_length = 4000
-        if len(context_text) > max_context_length:
-            context_text = context_text[:max_context_length] + "\n...[truncated]"
+        if len(aggregated_context) > max_context_length:
+            aggregated_context = aggregated_context[:max_context_length] + "\n...[truncated]"
 
-        # Erstelle einen finalen Prompt für die LLM, der den bereinigten Kontext und die Frage kombiniert.
+        # Erstelle den finalen Prompt: Der Kontext und die Frage werden kombiniert.
         final_prompt = (
-            f"Using the following context:\n{context_text}\n\n"
-            "Answer the following question concisely and accurately. Include any relevant links as Markdown if present.\n\n"
+            f"Using the following context extracted from the documentation:\n{aggregated_context}\n\n"
+            "Please answer the following question concisely and accurately. "
+            "Include any relevant links as Markdown if present.\n\n"
             f"Question: {question}"
         )
+
         final_answer = await self.query_llm(final_prompt, channel)
         await channel.send(final_answer)
 
