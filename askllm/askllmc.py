@@ -23,8 +23,11 @@ class LLMManager(commands.Cog):
             qdrant_url="http://192.168.10.5:6333"
         )
         self.collection_name = "fus_wiki"
-        # Qdrant-URL synchron abfragen
-        qdrant_url = asyncio.run_coroutine_threadsafe(self.config.qdrant_url(), self.bot.loop).result()
+        # Hier verwenden wir get_raw, um synchron den konfigurierten Wert zu erhalten.
+        qdrant_url = asyncio.run_coroutine_threadsafe(
+            self.config.get_raw("qdrant_url", default="http://192.168.10.5:6333"),
+            self.bot.loop
+        ).result()
         self.q_client = QdrantClient(url=qdrant_url)
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
