@@ -172,7 +172,7 @@ Entries:
         return best_index
 
     # Hier wird die Datenbank abgefragt und die Ergebnisse an die LLM übergeben (nur bei einer LLM-Anfrage)
-    async def process_question(self, question, channel, author=None):
+     async def process_question(self, question, channel, author=None):
         all_entries = await self.get_all_content()
         if not all_entries:
             await channel.send("No information stored in the database.")
@@ -204,6 +204,12 @@ Entries:
             return
 
         eid, best_tag, best_content = filtered[best_index]
+
+        # Kürze den Inhalt, falls er zu lang ist – hier maximal 1000 Zeichen (anpassbar)
+        max_length = 1000
+        if len(best_content) > max_length:
+            best_content = best_content[:max_length] + "\n...[truncated]"
+
         await channel.send(f"[{best_tag}] (ID: {eid})\n{best_content}")
 
     # --- Commands und Listener ---
@@ -268,34 +274,50 @@ Entries:
         """Adds new information under a specified tag."""
         await self.add_tag_content(tag.lower(), info)
         await ctx.send(f"Added info under '{tag.lower()}'.")
+
+
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Displays the current knowledge stored in the DB, splitting output into chunks so that no message exceeds 4000 characters."""
+        """Shows the contents of the DB, splitting output into chunks of <= 4000 characters."""
         results = await self.get_all_content()
         if not results:
             await ctx.send("No tags stored.")
             return
 
-        max_length = 4000  # Maximale Zeichenlänge pro Nachricht (inklusive Formatierung)
+        max_length = 4000
+        header = "```\n"
+        footer = "```"
         chunks = []
-        current_chunk = "```\n"
+        current_chunk = header
+
+        # Hilfsfunktion, um den aktuellen Chunk abzuschließen und zu speichern.
+        def flush_chunk():
+            nonlocal current_chunk
+            chunks.append(current_chunk + footer)
+            current_chunk = header
+
+        # Für jeden Eintrag (Zeile) in der DB:
         for _id, tag, text in results:
             line = f"[{_id}] ({tag}) {text}\n"
-            # Wenn das Hinzufügen der nächsten Zeile das Limit überschreitet, schließe den aktuellen Chunk ab
-            if len(current_chunk) + len(line) > max_length - 3:  # -3 für die abschließenden Backticks
-                current_chunk += "```"
-                chunks.append(current_chunk)
-                current_chunk = "```\n" + line
+            # Maximale Länge, die eine einzelne Zeile in den Chunk einfügen darf:
+            max_line_length = max_length - len(header) - len(footer)
+            if len(line) > max_line_length:
+                # Falls die Zeile zu lang ist, teilen wir sie in kleinere Stücke:
+                parts = [line[i:i+max_line_length] for i in range(0, len(line), max_line_length)]
+                for part in parts:
+                    if len(current_chunk) + len(part) > max_length - len(footer):
+                        flush_chunk()
+                    current_chunk += part
             else:
+                if len(current_chunk) + len(line) > max_length - len(footer):
+                    flush_chunk()
                 current_chunk += line
 
-        if current_chunk.strip():
-            current_chunk += "```"
-            chunks.append(current_chunk)
+        if current_chunk != header:
+            flush_chunk()
 
         for chunk in chunks:
             await ctx.send(chunk)
-
 
     @commands.command()
     @commands.has_permissions(administrator=True)
