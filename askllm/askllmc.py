@@ -14,24 +14,20 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 
 class LLMManager(commands.Cog):
-    """Cog to interact with the LLM using a Qdrant-based knowledge storage."""
-    
     def __init__(self, bot):
         self.bot = bot
-        # Konfiguration: API-, Qdrant-URL und Modell
         self.config = Config.get_conf(self, identifier=9999999999)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333"
         )
-        self.collection_name = "fus_wiki"  # Name der Qdrant-Collection
-        
-        # Qdrant-Client und Embedding-Modell initialisieren
-        qdrant_url = self.config.get_raw("qdrant_url", default="http://192.168.10.5:6333")
+        self.collection_name = "fus_wiki"
+        # Qdrant-URL synchron abfragen
+        qdrant_url = asyncio.run_coroutine_threadsafe(self.config.qdrant_url(), self.bot.loop).result()
         self.q_client = QdrantClient(url=qdrant_url)
-        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # erzeugt 384-dim Vektoren
-    
+        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
     # --- Wissensbasis: Hinzufügen, Anzeigen, Löschen, Editieren ---
     def upsert_knowledge(self, tag, content):
         """Berechnet ein Embedding für den Inhalt und fügt es in Qdrant ein."""
