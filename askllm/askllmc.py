@@ -9,6 +9,7 @@ import shutil
 import uuid
 import subprocess
 from typing import List
+
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
 from sentence_transformers import SentenceTransformer
@@ -60,7 +61,7 @@ class LLMManager(commands.Cog):
         self.q_client.upsert(
             collection_name=self.collection,
             points=[{
-                "id": uuid.uuid4().int & ((1 << 64) - 1),  # 64‑bit
+                "id": uuid.uuid4().int & ((1 << 64) - 1),  # 64‑bit random id
                 "vector": self._vec(content),
                 "payload": payload
             }]
@@ -81,18 +82,13 @@ class LLMManager(commands.Cog):
     async def llmknow(self, ctx, tag: str, *, content: str):
         """Add manual knowledge under *tag*."""
         await self.ensure_qdrant()
-        await asyncio.get_running_loop().run_in_executor(
-            None, self._upsert_sync, tag.lower(), content, "manual"
-        )
+        await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tag.lower(), content, "manual")
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
-
-    async def get_all_knowledge(self):
-        await self.ensure_qdrant()
-        return await asyncio.get_running_loop().run_in_executor(None, self._scroll_sync)
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        pts = await self.get_all_knowledge()
+        await self.ensure_qdrant()
+        pts = await asyncio.get_running_loop().run_in_executor(None, self._scroll_sync)
         if not pts:
             return await ctx.send("No knowledge entries stored.")
 
@@ -166,9 +162,7 @@ class LLMManager(commands.Cog):
             soup = bs4.BeautifulSoup(html, "html.parser")
             tags = ", ".join({h.get_text(strip=True) for h in soup.find_all(re.compile("^h[1-3]$"))})
             plain = soup.get_text(" ", strip=True)
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki"
-            )
+            await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki")
         await ctx.send(f"Wiki import done ({len(md_files)} pages).")
 
     # ---------- LLM querying -------------------------------------------
@@ -200,8 +194,14 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def setmodel(self, ctx, model):
-        await self.config.model.set(model); await ctx.send(f"Model set to {model}")
+        await self.config.model.set(model)
+        await ctx.send(f"Model set to {model}")
 
     @commands.command()
     async def setapi(self, ctx, url):
-        await
+        await self.config.api_url.set(url.rstrip("/"))
+        await ctx.send("API URL updated")
+
+    @commands.command()
+    async def setqdrant(self, ctx, url):
+        await self.config.qdrant_url.set
