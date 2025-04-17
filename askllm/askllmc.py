@@ -194,8 +194,10 @@ class LLMManager(commands.Cog):
 
     # ---------- LLM querying ------------------------------------------
 
-    async def _ollama_chat(self, prompt: str) -> str:
-        model = await self.config.model(); api = await self.config.api_url()
+    def _ollama_chat_sync(self, prompt: str) -> str:
+        """Blocking call to local Ollama"""
+        model = asyncio.run_coroutine_threadsafe(self.config.model(), asyncio.get_event_loop()).result()
+        api = asyncio.run_coroutine_threadsafe(self.config.api_url(), asyncio.get_event_loop()).result()
         resp = requests.post(
             f"{api}/api/chat",
             json={"model": model, "messages": [{"role": "user", "content": prompt}]},
@@ -212,11 +214,21 @@ class LLMManager(commands.Cog):
             f"Context:\n{ctx}\n\nQuestion: {question}\n\n"
             "Answer concisely and include Markdown links when relevant."
         )
-        return await asyncio.get_running_loop().run_in_executor(None, self._ollama_chat, prompt)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._ollama_chat_sync, prompt)
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
         await ctx.send(await self.ask_with_context(question))
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if self.bot.user.mentioned_in(message):
+            q = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if q:
+                await message.channel.send(await self.ask_with_context(q))
 
     # ---------- util commands -----------------------------------------
 
