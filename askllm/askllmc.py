@@ -8,6 +8,7 @@ import time
 import asyncio
 import glob
 import os
+import uuid
 import shutil
 
 from redbot.core import commands, Config
@@ -60,7 +61,7 @@ class LLMManager(commands.Cog):
             )
         vector = self.embedding_model.encode(content).tolist()
         payload = {"tag": tag, "content": content, "source": source}
-        doc_id = int(time.time() * 1000)
+        doc_id = uuid.uuid4().int  # garantiert einmalige ID
         self.q_client.upsert(
             collection_name=self.collection_name,
             points=[{"id": doc_id, "vector": vector, "payload": payload}]
@@ -155,7 +156,7 @@ class LLMManager(commands.Cog):
         )
         if not points:
             return await ctx.send("No knowledge entries stored.")
-
+    
         seen = set()
         lines = []
         for pt in points:
@@ -171,26 +172,26 @@ class LLMManager(commands.Cog):
                     raw_id, payload = pt[0], pt[1]
                 except:
                     continue
-
+    
             # Cast ID & Payload zu hashbaren Typen
             id_key = str(raw_id)
             if id_key in seen:
                 continue
             seen.add(id_key)
-
+    
             if not isinstance(payload, dict):
                 try:
                     payload = payload.dict()
                 except:
                     payload = dict(payload)
-
+    
             tag = payload.get("tag", "NoTag")
             source = payload.get("source", "unknown")
             content = payload.get("content", "")
             # Eine einzige Zeile, ohne echte Zeilenumbrüche
             single_line = " ".join(content.splitlines())
             lines.append(f"[{id_key}] ({tag}, src={source}): {single_line}")
-
+    
         # Chunking in Blöcke à 2000 Zeichen
         max_length = 2000
         header, footer = "```\n", "```"
@@ -203,7 +204,7 @@ class LLMManager(commands.Cog):
                 cur += line + "\n"
         if cur != header:
             chunks.append(cur + footer)
-
+    
         for chunk in chunks:
             await ctx.send(chunk)
 
@@ -321,7 +322,63 @@ class LLMManager(commands.Cog):
             await ctx.send(f"Collection '{self.collection_name}' initialized in Qdrant.")
         except Exception as e:
             await ctx.send(f"Error initializing collection: {e}")
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def importwiki(self, ctx, wiki_url: str = None):
+        """
+        Clones or updates a GitHub Wiki into Qdrant.
+        Manual entries remain untouched.
+        """
+        await self.ensure_qdrant_client()
+        wiki_url = wiki_url or "https://github.com/Kvitekvist/FUS.wiki.git"
+        data_path = str(cog_data_path(self))
+        clone_path = os.path.join(data_path, "wiki")
     
+        # 1) lösche alte Wiki-Einträge
+        def _del_sync():
+            filt = {"must":[{"key":"source","match":{"value":"wiki"}}]}
+            self.q_client.delete(collection_name=self.collection_name, filter=filt)
+        await asyncio.get_running_loop().run_in_executor(None, _del_sync)
+    
+        # 2) clone oder pull
+        if os.path.isdir(os.path.join(clone_path, ".git")):
+            subprocess.run(["git","-C",clone_path,"pull"], check=False)
+            await ctx.send("Wiki repo updated.")
+        else:
+            if os.path.exists(clone_path):
+                shutil.rmtree(clone_path)
+            subprocess.run(["git","clone",wiki_url,clone_path], check=True)
+            await ctx.send("Wiki repo cloned.")
+    
+        # 3) verarbeite MD-Dateien
+        import markdown
+        from bs4 import BeautifulSoup
+    
+        def strip_html(h): return re.sub(r"<.*?>","",h)
+        def gen_tags(html):
+            soup = BeautifulSoup(html,"html.parser")
+            hs = soup.find_all(re.compile("^h[1-3]$"))
+            t = [h.get_text().strip() for h in hs if h.get_text().strip()]
+            return ", ".join(dict.fromkeys(t)) or None
+    
+        md_files = glob.glob(os.path.join(clone_path,"*.md"))
+        await ctx.send(f"Found {len(md_files)} wiki pages. Importing…")
+        for fp in md_files:
+            text = open(fp,encoding="utf-8").read()
+            html = markdown.markdown(text)
+            tags = gen_tags(html) or os.path.splitext(os.path.basename(fp))[0]
+            plain = strip_html(html)
+            # upsert mit unique ID
+            import uuid
+            vid = uuid.uuid4().int
+            vec = self.embedding_model.encode(plain).tolist()
+            payload = {"tag":tags,"content":plain,"source":"wiki"}
+            self.q_client.upsert(
+                collection_name=self.collection_name,
+                points=[{"id":vid,"vector":vec,"payload":payload}]
+            )
+        await ctx.send("Wiki import done.")
+
     @commands.Cog.listener()
     async def on_ready(self):
         print("LLMManager cog loaded.")
