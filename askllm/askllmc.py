@@ -65,17 +65,24 @@ class LLMManager(commands.Cog):
         self.upsert_knowledge(tag.lower(), info, source="manual")
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
 
-    def _get_all_knowledge_sync(self):
-        # Direkt alle Knowledge-Punkte als Liste zurückgeben
-        return list(
-            self.q_client.scroll(
+        def _get_all_knowledge_sync(self):
+        """Liefert alle Dokumente aus der Qdrant-Collection als Iterable."""
+        try:
+            points = self.q_client.scroll(
                 collection_name=self.collection_name,
                 with_payload=True,
                 limit=1000
             )
-        )
+            # Wenn None zurückkommt, gib leere Liste
+            return points or []
+        except Exception:
+            return []
 
     async def get_all_knowledge(self):
+        await self.ensure_qdrant_client()
+        # Scroll liefert ein Iterable von Punkten (oder Liste)
+        return await asyncio.get_running_loop().run_in_executor(None, self._get_all_knowledge_sync)
+(self):
         await self.ensure_qdrant_client()
         return await asyncio.get_running_loop().run_in_executor(None, self._get_all_knowledge_sync)
 
@@ -88,11 +95,13 @@ class LLMManager(commands.Cog):
         await asyncio.get_running_loop().run_in_executor(None, self._delete_knowledge_by_id_sync, doc_id)
         await ctx.send(f"Deleted entry with ID {doc_id}.")
 
-    def _delete_knowledge_by_tag_sync(self, tag):
+        def _delete_knowledge_by_tag_sync(self, tag):
+        """Löscht alle Knowledge-Einträge mit dem gegebenen Tag."""
         filt = {"must": [{"key": "tag", "match": {"value": tag}}]}
-        self.q_client.delete(collection_name=self.collection_name, points_selector=[], filter=filt)
+        # Nur Filter, kein points_selector
+        self.q_client.delete(collection_name=self.collection_name, filter=filt)
 
-    @commands.command()
+    @commands.command()()
     @commands.has_permissions(administrator=True)
     async def llmknowdeletetag(self, ctx, tag: str):
         await self.ensure_qdrant_client()
