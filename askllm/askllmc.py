@@ -1,71 +1,74 @@
-import discord
-import re
-import requests
 import asyncio
 import glob
 import os
+import re
 import shutil
-import uuid
 import subprocess
+import uuid
 from typing import List
 
+import discord
+import requests
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 
-# ------------------------------------------------------------
-# helper: ensure that an importable package is available
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Helper – ensure that a PyPI package is available inside the Docker container
+# -----------------------------------------------------------------------------
 
 def _ensure_pkg(module: str, pip_name: str | None = None):
-    """Install *module* with pip if it is missing (works inside Docker)."""
     try:
         __import__(module)
     except ModuleNotFoundError:
         subprocess.check_call(["python", "-m", "pip", "install", pip_name or module])
         __import__(module)
 
-# markdown / beautifulsoup4 are required only for the wiki import
+# Only wiki‑import needs these
 _ensure_pkg("markdown")
 _ensure_pkg("bs4", "beautifulsoup4")
-import markdown, bs4  # noqa: E402 – imported after _ensure_pkg
+import markdown  # noqa: E402 – imported after _ensure_pkg
+import bs4       # noqa: E402 – imported after _ensure_pkg
 
-# ------------------------------------------------------------
-# LLMManager – Qdrant‑backed knowledge base + GitHub‑Wiki importer
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# LLMManager – Qdrant‑backed KB  +  local Ollama chat
+# -----------------------------------------------------------------------------
+
 
 class LLMManager(commands.Cog):
-    """Interact with a local Ollama LLM through a Qdrant knowledge base."""
+    """Interact with a local Ollama LLM via a Qdrant knowledge base."""
 
-    # ---------- initialisation ----------------------------------------
+    # ------------------------------------------------------------------
+    # Init / basic helpers
+    # ------------------------------------------------------------------
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=9999999999)
+        self.config = Config.get_conf(self, identifier=9876543210)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
         )
         self.collection = "fus_wiki"
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")  # 384‑D vectors
         self.q_client: QdrantClient | None = None
-        # small & fast SBERT variant → 384‑D vectors
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
-
-    # ---------- helpers ------------------------------------------------
 
     async def ensure_qdrant(self):
         if self.q_client is None:
             url = await self.config.qdrant_url()
             self.q_client = QdrantClient(url=url)
 
+    # embedding
     def _vec(self, txt: str) -> List[float]:
         return self.embedder.encode(txt).tolist()
 
-    # ---------- low‑level Qdrant ops -----------------------------------
+    # ------------------------------------------------------------------
+    # Low‑level Qdrant helpers (sync – run in executor)
+    # ------------------------------------------------------------------
 
-    def _ensure_collection_sync(self):
+    def _ensure_collection(self):
         try:
             self.q_client.get_collection(self.collection)
         except Exception:
@@ -75,7 +78,7 @@ class LLMManager(commands.Cog):
             )
 
     def _upsert_sync(self, tag: str, content: str, source: str):
-        self._ensure_collection_sync()
+        self._ensure_collection()
         self.q_client.upsert(
             self.collection,
             [
@@ -87,7 +90,7 @@ class LLMManager(commands.Cog):
             ],
         )
 
-    def _delete_by_filter_sync(self, filt: dict):
+    def _collect_ids_sync(self, filt: dict) -> List[int]:
         ids: list[int] = []
         offset = None
         while True:
@@ -101,96 +104,110 @@ class LLMManager(commands.Cog):
             ids.extend(p.id for p in pts)
             if offset is None:
                 break
-        if ids:
-            self.q_client.delete(self.collection, ids)
+        return ids
 
-    # ---------- commands: knowledge management ------------------------
+    # ------------------------------------------------------------------
+    # Commands – knowledge management
+    # ------------------------------------------------------------------
 
     @commands.command()
     async def llmknow(self, ctx, tag: str, *, content: str):
         """Add manual knowledge under **tag**."""
         await self.ensure_qdrant()
-        await asyncio.get_running_loop().run_in_executor(
-            None, self._upsert_sync, tag.lower(), content, "manual"
-        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._upsert_sync, tag.lower(), content, "manual")
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """List all knowledge entries (chunks ≤ 2000 chars)."""
+        """List every stored entry (chunked ≤ 2000 chars)."""
         await self.ensure_qdrant()
-        points, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
-        if not points:
+        pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
+        if not pts:
             return await ctx.send("No knowledge entries stored.")
 
-        header, footer, max_len = "```\n", "```", 2000
-        chunk, out = header, []
-        for pt in points:
-            pl = pt.payload or {}
-            snippet = pl.get("content", "")[:300].replace("\n", " ")
-            line = f"[{pt.id}] ({pl.get('tag','NoTag')},src={pl.get('source','?')}): {snippet}\n"
-            if len(chunk) + len(line) > max_len - len(footer):
-                out.append(chunk + footer)
-                chunk = header + line
+        chunks, cur = [], "```\n"
+        for p in pts:
+            pl = p.payload or {}
+            snippet = pl.get("content", "")[:280].replace("\n", " ")
+            line = f"[{p.id}] ({pl.get('tag','NoTag')}, {pl.get('source','?')}): {snippet}\n"
+            if len(cur) + len(line) > 1990:
+                chunks.append(cur + "```")
+                cur = "```\n" + line
             else:
-                chunk += line
-        if chunk != header:
-            out.append(chunk + footer)
-        for ch in out:
+                cur += line
+        chunks.append(cur + "```")
+        for ch in chunks:
             await ctx.send(ch)
 
     @commands.command()
     async def llmknowdelete(self, ctx, doc_id: int):
         await self.ensure_qdrant()
-        await asyncio.get_running_loop().run_in_executor(None, lambda: self.q_client.delete(self.collection, [doc_id]))
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: self.q_client.delete(self.collection, [doc_id]))
         await ctx.send(f"Deleted entry {doc_id}.")
 
     @commands.command()
     async def llmknowdeletetag(self, ctx, tag: str):
         await self.ensure_qdrant()
+        loop = asyncio.get_running_loop()
         filt = {"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
-        await asyncio.get_running_loop().run_in_executor(None, self._delete_by_filter_sync, filt)
+        ids = await loop.run_in_executor(None, self._collect_ids_sync, filt)
+        if ids:
+            await loop.run_in_executor(None, lambda: self.q_client.delete(self.collection, ids))
         await ctx.send(f"Deleted entries with tag '{tag.lower()}'.")
 
-    # ---------- GitHub Wiki import ------------------------------------
+    # ------------------------------------------------------------------
+    # GitHub‑Wiki import (clone / pull)
+    # ------------------------------------------------------------------
 
     @commands.command()
     async def importwiki(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
         await self.ensure_qdrant()
+        loop = asyncio.get_running_loop()
         data_dir = str(cog_data_path(self)); os.makedirs(data_dir, exist_ok=True)
         clone_dir = os.path.join(data_dir, "wiki")
 
+        # purge previous wiki docs
         filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
-        await asyncio.get_running_loop().run_in_executor(None, self._delete_by_filter_sync, filt)
+        ids = await loop.run_in_executor(None, self._collect_ids_sync, filt)
+        if ids:
+            await loop.run_in_executor(None, lambda: self.q_client.delete(self.collection, ids))
 
+        # git clone / pull
         if os.path.isdir(os.path.join(clone_dir, ".git")):
             subprocess.run(["git", "-C", clone_dir, "pull"], check=False)
         else:
             shutil.rmtree(clone_dir, ignore_errors=True)
             subprocess.run(["git", "clone", repo, clone_dir], check=True)
-        await ctx.send("Wiki repo updated. Importing …")
+        await ctx.send("Wiki repo updated – importing …")
 
         md_files = glob.glob(os.path.join(clone_dir, "*.md"))
-        count = 0
-        for path in md_files:
+        if not md_files:
+            return await ctx.send("No markdown pages found – aborting.")
+
+        def _import_page(path: str):
             text = open(path, encoding="utf-8").read()
             html = markdown.markdown(text)
             soup = bs4.BeautifulSoup(html, "html.parser")
             tags = ", ".join({h.get_text(strip=True) for h in soup.find_all(re.compile("^h[1-3]$"))})
             plain = soup.get_text(" ", strip=True)
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki"
-            )
-            count += 1
-        await ctx.send(f"Wiki import done ({count} pages).")
+            self._upsert_sync(tags or os.path.basename(path), plain, "wiki")
 
-    # ---------- collection init --------------------------------------
+        for fp in md_files:
+            await loop.run_in_executor(None, _import_page, fp)
+        await ctx.send(f"Wiki import done ({len(md_files)} pages).")
+
+    # ------------------------------------------------------------------
+    # Init / reset collection
+    # ------------------------------------------------------------------
 
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def initcollection(self, ctx):
         await self.ensure_qdrant()
-        await asyncio.get_running_loop().run_in_executor(
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
             None,
             lambda: self.q_client.recreate_collection(
                 collection_name=self.collection,
@@ -199,7 +216,9 @@ class LLMManager(commands.Cog):
         )
         await ctx.send(f"Collection **{self.collection}** recreated.")
 
-    # ---------- LLM querying ------------------------------------------
+    # ------------------------------------------------------------------
+    # Ollama chat helper (sync –> run_in_executor)
+    # ------------------------------------------------------------------
 
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
         resp = requests.post(
@@ -212,19 +231,81 @@ class LLMManager(commands.Cog):
             timeout=120,
         )
         resp.raise_for_status()
-        try:
-            return resp.json()["message"]["content"]
-        except Exception:
-            return f"(LLM error) Raw response:\n{resp.text[:400]}…"
+        return resp.json().get("message", {}).get("content", "(empty response)")
 
-    async def ask_with_context(self, question: str) -> str:
+    # ------------------------------------------------------------------
+    # Main Q&A logic
+    # ------------------------------------------------------------------
+
+    async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
+        # simple heuristic: if GPU型号 mentioned but "resolution" missing → add it
         gpu_words = ("3060", "3070", "3080", "3090", "4060", "4070", "4080", "4090")
-        search_query = question + " resolution" if any(w in question for w in gpu_words) and "resolution" not in question.lower() else question
+        if any(w in question for w in gpu_words) and "resolution" not in question.lower():
+            question += " resolution"
 
-        hits = self.q_client.search(self.collection, query_vector=self._vec(search_query), limit=5)
+        hits = self.q_client.search(self.collection, query_vector=self._vec(question), limit=5)
         if not hits:
             return "No relevant information found."
         ctx_txt = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:600]}" for h in hits)
         prompt = (
-            f"Context:\n{ctx_txt}\
+            f"Context:\n{ctx_txt}\n\n"
+            f"Question: {question}\n\n"
+            "Answer concisely and include Markdown links when relevant."
+        )
+        api, model = await self.config.api_url(), await self.config.model()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
+
+    # ------------------------------------------------------------------
+    # Public commands / event hooks
+    # ------------------------------------------------------------------
+
+    @commands.command(name="askllm")
+    async def askllm_cmd(self, ctx, *, question: str):
+        async with ctx.typing():
+            answer = await self._answer(question)
+        await ctx.send(answer)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if self.bot.user.mentioned_in(message):
+            q = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if q:
+                async with message.channel.typing():
+                    ans = await self._answer(q)
+                await message.channel.send(ans)
+
+    # ------------------------------------------------------------------
+    # Simple config setters
+    # ------------------------------------------------------------------
+
+    @commands.command()
+    async def setmodel(self, ctx, model):
+        await self.config.model.set(model)
+        await ctx.send(f"Model set to {model}")
+
+    @commands.command()
+    async def setapi(self, ctx, url):
+        await self.config.api_url.set(url.rstrip("/"))
+        await ctx.send("API URL updated")
+
+    @commands.command()
+    async def setqdrant(self, ctx, url):
+        await self.config.qdrant_url.set(url.rstrip("/"))
+        self.q_client = None  # reconnect next time
+        await ctx.send("Qdrant URL updated")
+
+    # ------------------------------------------------------------------
+    # on_ready log
+    # ------------------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print("LLMManager cog loaded.")
+
+
+async def setup(bot):
+    await bot.add_cog(LLMManager
