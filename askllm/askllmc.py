@@ -9,7 +9,6 @@ import shutil
 import uuid
 import subprocess
 from typing import List
-
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
 from sentence_transformers import SentenceTransformer
@@ -32,9 +31,9 @@ class LLMManager(commands.Cog):
         )
         self.collection = "fus_wiki"
         self.q_client: QdrantClient | None = None
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")  # 384‑dim
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")  # 384‑dim vectors
 
-    # ---------- helpers ---------------------------------------------------
+    # ---------- helpers -------------------------------------------------
 
     async def ensure_qdrant(self):
         if self.q_client is None:
@@ -44,7 +43,7 @@ class LLMManager(commands.Cog):
     def _vec(self, text: str) -> List[float]:
         return self.embedder.encode(text).tolist()
 
-    # ---------- low‑level Qdrant ops --------------------------------------
+    # ---------- low‑level Qdrant ops ------------------------------------
 
     def _ensure_collection_sync(self):
         try:
@@ -61,28 +60,30 @@ class LLMManager(commands.Cog):
         self.q_client.upsert(
             collection_name=self.collection,
             points=[{
-                "id": uuid.uuid4().int & ((1 << 64) - 1),
+                "id": uuid.uuid4().int & ((1 << 64) - 1),  # 64‑bit
                 "vector": self._vec(content),
                 "payload": payload
             }]
         )
 
     def _scroll_sync(self):
-        """Return **only** the list of `Record` objects (scroll returns `(points, next)` tuple)."""
+        """Return only the list of Records; scroll gives (points, next_offset)."""
         points, _ = self.q_client.scroll(
             collection_name=self.collection,
             with_payload=True,
-            limit=1000  # plenty; paging not needed for our size
+            limit=1000
         )
-        return points)
+        return points
 
-    # ---------- commands: knowledge management ---------------------------
+    # ---------- commands: knowledge management -------------------------
 
     @commands.command()
     async def llmknow(self, ctx, tag: str, *, content: str):
         """Add manual knowledge under *tag*."""
         await self.ensure_qdrant()
-        await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tag.lower(), content, "manual")
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._upsert_sync, tag.lower(), content, "manual"
+        )
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
 
     async def get_all_knowledge(self):
@@ -102,7 +103,8 @@ class LLMManager(commands.Cog):
             payload = getattr(pt, "payload", {})
             if not pid or not payload:
                 continue
-            line = f"[{pid}] ({payload.get('tag','NoTag')},src={payload.get('source','?')}): {payload.get('content','')[:300]}\n"
+            snippet = payload.get("content", "")[:300].replace("\n", " ")
+            line = f"[{pid}] ({payload.get('tag','NoTag')},src={payload.get('source','?')}): {snippet}\n"
             if len(cur) + len(line) > max_len - len(footer):
                 chunks.append(cur + footer)
                 cur = header + line
@@ -118,7 +120,7 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant()
         await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self.q_client.delete(self.collection, [doc_id])
+            lambda: self.q_client.delete(collection_name=self.collection, points=[doc_id])
         )
         await ctx.send(f"Deleted entry {doc_id}.")
 
@@ -132,18 +134,21 @@ class LLMManager(commands.Cog):
         )
         await ctx.send(f"Deleted entries with tag '{tag.lower()}'.")
 
-    # ---------- GitHub wiki import ---------------------------------------
+    # ---------- GitHub wiki import -------------------------------------
 
     @commands.command()
     async def importwiki(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
-        """Clone / pull a GitHub wiki and store pages in Qdrant (source=wiki)."""
+        """Clone / pull GitHub wiki and store pages in Qdrant (source=wiki)."""
         await self.ensure_qdrant()
         base = str(cog_data_path(self)); os.makedirs(base, exist_ok=True)
         clone_dir = os.path.join(base, "wiki")
 
         # purge old wiki entries
         filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
-        await asyncio.get_running_loop().run_in_executor(None, lambda: self.q_client.delete(self.collection, {"filter": filt}))
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: self.q_client.delete(collection_name=self.collection, filter=filt)
+        )
 
         # clone/pull repo
         if os.path.isdir(os.path.join(clone_dir, ".git")):
@@ -161,10 +166,12 @@ class LLMManager(commands.Cog):
             soup = bs4.BeautifulSoup(html, "html.parser")
             tags = ", ".join({h.get_text(strip=True) for h in soup.find_all(re.compile("^h[1-3]$"))})
             plain = soup.get_text(" ", strip=True)
-            await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki")
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki"
+            )
         await ctx.send(f"Wiki import done ({len(md_files)} pages).")
 
-    # ---------- LLM querying ---------------------------------------------
+    # ---------- LLM querying -------------------------------------------
 
     async def _ollama_chat(self, prompt: str):
         model = await self.config.model(); api = await self.config.api_url()
@@ -180,7 +187,7 @@ class LLMManager(commands.Cog):
         ctx = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:500]}" for h in hits)
         prompt = (
             f"Context:\n{ctx}\n\nQuestion: {question}\n\n"
-            "Answer concisely and include Markdown links when available."
+            "Answer concisely and include Markdown links when relevant."
         )
         return await asyncio.get_running_loop().run_in_executor(None, self._ollama_chat, prompt)
 
@@ -189,22 +196,12 @@ class LLMManager(commands.Cog):
         ans = await self.ask_with_context(question)
         await ctx.send(ans)
 
-    # ---------- util commands --------------------------------------------
+    # ---------- util commands -----------------------------------------
 
     @commands.command()
-    async def setmodel(self, ctx, model): await self.config.model.set(model); await ctx.send(f"Model set to {model}")
-    @commands.command()
-    async def setapi(self, ctx, url): await self.config.api_url.set(url.rstrip('/')); await ctx.send("API URL updated")
-    @commands.command()
-    async def setqdrant(self, ctx, url): await self.config.qdrant_url.set(url.rstrip('/')); self.q_client = None; await ctx.send("Qdrant URL updated")
+    async def setmodel(self, ctx, model):
+        await self.config.model.set(model); await ctx.send(f"Model set to {model}")
 
     @commands.command()
-    async def initcollection(self, ctx):
-        await self.ensure_qdrant();
-        self.q_client.recreate_collection(self.collection, vectors_config={"size":384,"distance":"Cosine"})
-        await ctx.send("Collection recreated.")
-
-    @commands.Cog.listener()
-    async def on_ready(self): print("LLMManager loaded.")
-
-def setup(bot): bot.add_cog(LLMManager(bot))
+    async def setapi(self, ctx, url):
+        await
