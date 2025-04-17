@@ -85,7 +85,11 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant_client()
         await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self.q_client.delete(collection_name=self.collection_name, points_selector=[doc_id])
+            lambda: self.q_client.delete(
+                self.collection_name,
+                None,
+                filter={"must":[{"key":"source","match":{"value":"wiki"}}]}
+            )
         )
         await ctx.send(f"Deleted entry with ID {doc_id}.")
 
@@ -120,8 +124,11 @@ class LLMManager(commands.Cog):
     async def llmknowshow(self, ctx):
         await self.ensure_qdrant_client()
         points = await self.get_all_knowledge()
+        # Debug: Anzahl geladener Punkte
+        print(f"[LLMManager] llmknowshow retrieved {len(points)} points")
         if not points:
-            return await ctx.send("No knowledge entries stored.")
+            await ctx.send(f"No knowledge entries stored. (retrieved {len(points)} points)")
+            return
         seen, lines = set(), []
         for pt in points:
             raw_id = getattr(pt, 'id', None) or (pt.get('id') if isinstance(pt, dict) else None)
@@ -140,17 +147,21 @@ class LLMManager(commands.Cog):
             content = payload.get("content", "")
             single = " ".join(content.splitlines())
             lines.append(f"[{id_key}] ({tag},src={src}): {single}")
-        header, footer, max_len = "```\n", "```", 2000
+        header, footer, max_len = "```
+", "```", 2000
         chunks, cur = [], header
         for l in lines:
             if len(cur) + len(l) + 1 > max_len - len(footer):
                 chunks.append(cur + footer)
-                cur = header + l + "\n"
+                cur = header + l + "
+"
             else:
-                cur += l + "\n"
+                cur += l + "
+"
         if cur != header:
             chunks.append(cur + footer)
         for c in chunks:
+            await ctx.send(c)
             await ctx.send(c)
 
     @commands.command()
