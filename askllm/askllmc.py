@@ -77,13 +77,14 @@ class LLMManager(commands.Cog):
             )
 
     def _upsert_sync(self, tag: str, content: str, source: str):
+        """Insert/update one document.  Vector now built from *tag + content* → better recall."""
         self._ensure_collection_sync()
         self.q_client.upsert(
             self.collection,
             [
                 {
                     "id": uuid.uuid4().int & ((1 << 64) - 1),
-                    "vector": self._vec(content),
+                    "vector": self._vec(f"{tag}. {content}"),
                     "payload": {"tag": tag, "content": content, "source": source},
                 }
             ],
@@ -205,59 +206,28 @@ class LLMManager(commands.Cog):
             },
             timeout=120,
         )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        resp.raise_for_status(); return resp.json()["message"]["content"]
 
     async def ask_with_context(self, question: str) -> str:
         await self.ensure_qdrant()
         hits = self.q_client.search(self.collection, query_vector=self._vec(question), limit=5)
         if not hits:
             return "No relevant information found."
-        ctx = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:500]}" for h in hits)
-        prompt = (
-            f"Context:\n{ctx}\n\nQuestion: {question}\n\n"
-            "Answer concisely and include Markdown links when relevant."
+        ctx_txt = "\n\n".join(
+            f"[{h.id}] {h.payload.get('content','')[:600]}" for h in hits
         )
-        model = await self.config.model()
-        api = await self.config.api_url()
-        loop = asyncio.get_running_loop()
+        prompt = (
+            f"Context:\n{ctx_txt}\n\n"
+            f"Question: {question}\n\n"
+            "Give a short, specific answer. If advice depends on GPU tier, pick the one that matches best."
+        )
+        model = await self.config.model(); api = await self.config.api_url(); loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
-        await ctx.send(await self.ask_with_context(question))
+        async with ctx.typing():
+            await ctx.send(await self.ask_with_context(question))
 
     @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
-            return
-        if self.bot.user.mentioned_in(message):
-            q = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            if q:
-                await message.channel.send(await self.ask_with_context(q))
-
-    # ---------- util commands -----------------------------------------
-
-    @commands.command()
-    async def setmodel(self, ctx, model):
-        await self.config.model.set(model); await ctx.send(f"Model set to {model}")
-
-    @commands.command()
-    async def setapi(self, ctx, url):
-        await self.config.api_url.set(url.rstrip("/")); await ctx.send("API URL updated")
-
-    @commands.command()
-    async def setqdrant(self, ctx, url):
-        await self.config.qdrant_url.set(url.rstrip("/"))
-        self.q_client = None  # force reconnect
-        await ctx.send("Qdrant URL updated")
-
-    # ---------- ready event -------------------------------------------
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print("LLMManager cog loaded.")
-
-
-async def setup(bot):
-    await bot.add_cog(LLMManager(bot))
+    async def on_message(self, message:
