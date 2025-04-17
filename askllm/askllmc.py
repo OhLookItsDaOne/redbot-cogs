@@ -142,42 +142,42 @@ class LLMManager(commands.Cog):
     async def llmknowshow(self, ctx):
         """Displays all knowledge entries from Qdrant in chunks of <= 2000 characters."""
         await self.ensure_qdrant_client()
-        # Ziehe bis zu 1000 Einträge auf einmal
+        # Lade bis zu 1000 Einträge auf einmal
         points = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: list(
                 self.q_client.scroll(
                     collection_name=self.collection_name,
                     with_payload=True,
-                    limit=1000  # zieh alle auf einmal
+                    limit=1000
                 )
             )
         )
         if not points:
             return await ctx.send("No knowledge entries stored.")
 
-        # Dedup by ID
         seen = set()
         lines = []
         for pt in points:
-            # Extrahiere ID
-            if hasattr(pt, "id"):
-                id_val = pt.id
+            # Extrahiere id und payload
+            if hasattr(pt, "id") and hasattr(pt, "payload"):
+                raw_id = pt.id
                 payload = pt.payload
             elif isinstance(pt, dict):
-                id_val = pt.get("id")
+                raw_id = pt.get("id")
                 payload = pt.get("payload", {})
             else:
                 try:
-                    id_val, payload = pt[0], pt[1]
+                    raw_id, payload = pt[0], pt[1]
                 except:
                     continue
 
-            if id_val in seen:
+            # Cast ID & Payload zu hashbaren Typen
+            id_key = str(raw_id)
+            if id_key in seen:
                 continue
-            seen.add(id_val)
+            seen.add(id_key)
 
-            # payload to dict
             if not isinstance(payload, dict):
                 try:
                     payload = payload.dict()
@@ -187,11 +187,11 @@ class LLMManager(commands.Cog):
             tag = payload.get("tag", "NoTag")
             source = payload.get("source", "unknown")
             content = payload.get("content", "")
-            # entferne Zeilenumbrüche, damit die Ausgabe flüssig bleibt
+            # Eine einzige Zeile, ohne echte Zeilenumbrüche
             single_line = " ".join(content.splitlines())
-            lines.append(f"[{id_val}] ({tag}, src={source}): {single_line}")
+            lines.append(f"[{id_key}] ({tag}, src={source}): {single_line}")
 
-        # Jetzt die lines in 2000‑Zeichen‑Blöcke aufteilen und senden
+        # Chunking in Blöcke à 2000 Zeichen
         max_length = 2000
         header, footer = "```\n", "```"
         chunks, cur = [], header
