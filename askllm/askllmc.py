@@ -25,7 +25,7 @@ def _ensure_pkg(module: str, pip_name: str | None = None):
         subprocess.check_call(["python", "-m", "pip", "install", pip_name or module])
         __import__(module)
 
-# Only wiki‑import needs these
+# Only wiki‑import & chat‑learning need these
 _ensure_pkg("markdown")
 _ensure_pkg("bs4", "beautifulsoup4")
 import markdown  # noqa: E402 – imported after _ensure_pkg
@@ -158,6 +158,51 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Deleted entries with tag '{tag.lower()}'.")
 
     # ------------------------------------------------------------------
+    # NEW – Learn from recent chat messages
+    # ------------------------------------------------------------------
+
+    async def _summarise_chunks(self, text: str) -> List[str]:
+        """Ask the local LLM to split large text into <= 300‑char bullets."""
+        api, model = await self.config.api_url(), await self.config.model()
+        prompt = (
+            "Split the following text into self‑contained bullet points (each ≤ 300 characters).\n"
+            "Return one bullet per line without any numbering.\n\n" + text
+        )
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
+        bullets = [b.strip("•- ") for b in raw.split("\n") if b.strip()]
+        return bullets[:20]  # safety cap
+
+    @commands.command()
+    async def learn(self, ctx, limit: int = 50, tag: str = "chat"):
+        """Add recent **limit** messages in this channel to the KB (source=learn).
+
+        • Messages from bots are ignored.
+        • Large chunks are summarised into ≤ 300‑char bullets via the LLM so the KB stays compact.
+        """
+        await self.ensure_qdrant()
+        limit = max(5, min(200, limit))
+        msgs = []
+        async for m in ctx.channel.history(limit=limit, oldest_first=False):
+            if not m.author.bot and m.content:
+                msgs.append(m.content)
+        if not msgs:
+            return await ctx.send("No user messages found to learn from.")
+
+        # Combine & summarise if too long
+        combined = "\n".join(reversed(msgs))
+        bullets: List[str]
+        if len(combined) > 1200:
+            bullets = await self._summarise_chunks(combined)
+        else:
+            bullets = [combined]
+
+        loop = asyncio.get_running_loop()
+        for bl in bullets:
+            await loop.run_in_executor(None, self._upsert_sync, tag.lower(), bl, "learn")
+        await ctx.send(f"Learned {len(bullets)} snippet(s) from the last {limit} messages under tag '{tag}'.")
+
+    # ------------------------------------------------------------------
     # GitHub‑Wiki import (clone / pull)
     # ------------------------------------------------------------------
 
@@ -239,11 +284,6 @@ class LLMManager(commands.Cog):
 
     async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
-        # simple heuristic: if GPU型号 mentioned but "resolution" missing → add it
-        gpu_words = ("3060", "3070", "3080", "3090", "4060", "4070", "4080", "4090")
-        if any(w in question for w in gpu_words) and "resolution" not in question.lower():
-            question += " resolution"
-
         hits = self.q_client.search(self.collection, query_vector=self._vec(question), limit=5)
         if not hits:
             return "No relevant information found."
@@ -309,4 +349,4 @@ class LLMManager(commands.Cog):
 
 async def setup(bot):
     """Red‑DiscordBot loading hook"""
-    await bot.add_cog(LLMManager(bot))
+    await bot.add_cog
