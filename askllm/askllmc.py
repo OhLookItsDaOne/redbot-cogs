@@ -116,7 +116,7 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant()
         await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self.q_client.delete(collection_name=self.collection, points=[doc_id])
+            lambda: self.q_client.delete(self.collection, [doc_id])
         )
         await ctx.send(f"Deleted entry {doc_id}.")
 
@@ -126,7 +126,7 @@ class LLMManager(commands.Cog):
         filt = {"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
         await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self.q_client.delete(collection_name=self.collection, filter=filt)
+            lambda: self.q_client.delete(self.collection, {"filter": filt})
         )
         await ctx.send(f"Deleted entries with tag '{tag.lower()}'.")
 
@@ -143,7 +143,7 @@ class LLMManager(commands.Cog):
         filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
         await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self.q_client.delete(collection_name=self.collection, filter=filt)
+            lambda: self.q_client.delete(self.collection, {"filter": filt})
         )
 
         # clone/pull repo
@@ -204,4 +204,16 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def setqdrant(self, ctx, url):
-        await self.config.qdrant_url.set
+        await self.config.qdrant_url.set(url.rstrip("/"))
+        self.q_client = None  # force re‑connect
+        await ctx.send("Qdrant URL updated")
+
+    # ---------- bot events -------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print("LLMManager cog loaded.")
+
+
+def setup(bot):
+    bot.add_cog(LLMManager(bot))
