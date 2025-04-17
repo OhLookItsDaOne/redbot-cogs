@@ -121,19 +121,73 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Deleted entry {doc_id}.")
 
     @commands.command()
+        @commands.command()
     async def llmknowdeletetag(self, ctx, tag: str):
+        """Delete every entry whose payload.tag == *tag*."""
         await self.ensure_qdrant()
-        filt = {"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
-        await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: self.q_client.delete(self.collection, None, filter=filt)
-        )
-        await ctx.send(f"Deleted entries with tag '{tag.lower()}'.")
+        tag = tag.lower()
+
+        def _del_tag_sync():
+            ids = [pt.id for pt, _ in [self.q_client.scroll(
+                collection_name=self.collection,
+                with_payload=True,
+                limit=1000,
+                scroll_filter={"must": [{"key": "tag", "match": {"value": tag}}]}
+            )][0]]
+            if ids:
+                self.q_client.delete(self.collection, ids)
+        await asyncio.get_running_loop().run_in_executor(None, _del_tag_sync)
+        await ctx.send(f"Deleted entries with tag '{tag}'.")
 
     # ---------- GitHub wiki import -------------------------------------
 
     @commands.command()
     async def importwiki(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
+        """Clone / pull GitHub wiki and store pages in Qdrant (source=wiki)."""
+        await self.ensure_qdrant()
+        base = str(cog_data_path(self)); os.makedirs(base, exist_ok=True)
+        clone_dir = os.path.join(base, "wiki")
+
+        # --- purging old wiki docs (scroll + id list) -------------------
+        def _purge_wiki_sync():
+            ids = []
+            off = None
+            while True:
+                pts, off = self.q_client.scroll(
+                    collection_name=self.collection,
+                    with_payload=True,
+                    limit=1000,
+                    scroll_filter={"must": [{"key": "source", "match": {"value": "wiki"}}]},
+                    offset=off
+                )
+                ids.extend(p.id for p in pts)
+                if off is None:
+                    break
+            if ids:
+                self.q_client.delete(self.collection, ids)
+        await asyncio.get_running_loop().run_in_executor(None, _purge_wiki_sync)
+
+        # --- clone/pull -------------------------------------------------
+        if os.path.isdir(os.path.join(clone_dir, ".git")):
+            subprocess.run(["git", "-C", clone_dir, "pull"], check=False)
+        else:
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            subprocess.run(["git", "clone", repo, clone_dir], check=True)
+        await ctx.send("Wiki repo updated. Importing …")
+
+        import markdown, bs4
+        md_files = glob.glob(os.path.join(clone_dir, "*.md"))
+        for path in md_files:
+            text = open(path, encoding="utf-8").read()
+            html = markdown.markdown(text)
+            soup = bs4.BeautifulSoup(html, "html.parser")
+            tags = ", ".join({h.get_text(strip=True) for h in soup.find_all(re.compile("^h[1-3]$"))})
+            plain = soup.get_text(" ", strip=True)
+            await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki")
+        await ctx.send(f"Wiki import done ({len(md_files)} pages).")
+
+    # ---------- LLM querying -------------------------------------------
+(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
         """Clone / pull GitHub wiki and store pages in Qdrant (source=wiki)."""
         await self.ensure_qdrant()
         base = str(cog_data_path(self)); os.makedirs(base, exist_ok=True)
