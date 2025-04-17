@@ -1,3 +1,5 @@
+# askllmc.py  –  hybrid Qdrant + local‑Ollama   (Red‑DiscordBot cog)
+
 import asyncio, glob, os, re, shutil, subprocess, uuid, json
 from typing import List
 
@@ -5,7 +7,7 @@ import discord, requests
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
 from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, http
 
 # ---------------------------------------------------------------------------
 # helper – install missing PyPI packages on‑the‑fly (safe in Docker)
@@ -16,25 +18,25 @@ def _ensure_pkg(mod: str, pip_name: str | None = None):
     except ModuleNotFoundError:
         subprocess.check_call(
             ["python", "-m", "pip", "install", pip_name or mod],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         __import__(mod)
 
-# only the wiki‑import needs these
+
 _ensure_pkg("markdown")
 _ensure_pkg("bs4", "beautifulsoup4")
-from markdown import markdown                    # noqa:  E402
-from bs4 import BeautifulSoup                    # noqa:  E402
+from markdown import markdown              # noqa:  E402 (imported after _ensure_pkg)
+from bs4 import BeautifulSoup              # noqa:  E402
 
-# ---------------------------------------------------------------------------
-# LLMManager – Qdrant KB  +  local Ollama chat
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# LLMManager
+# ----------------------------------------------------------------------------
 class LLMManager(commands.Cog):
     """Interact with a local Ollama LLM through a Qdrant knowledge base."""
 
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     # init
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210123)
@@ -46,16 +48,16 @@ class LLMManager(commands.Cog):
 
         self.collection = "fus_wiki"
 
-        # 1⃣  stronger embeddings
-        self.embedder = SentenceTransformer("all-mpnet-base-v2")   # 768‑D
-        self.vec_dim  = self.embedder.get_sentence_embedding_dimension()
+        # stronger model (768‑Dim)
+        self.embedder = SentenceTransformer("all-mpnet-base-v2")
+        self.vec_dim = self.embedder.get_sentence_embedding_dimension()
 
         self.q_client: QdrantClient | None = None
-        self._last_manual_id: int | None = None   # last !llmknow id (session)
+        self._last_manual_id: int | None = None  # last !llmknow id (session)
 
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     # basic helpers
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     async def ensure_qdrant(self):
         if self.q_client is None:
             self.q_client = QdrantClient(url=await self.config.qdrant_url())
@@ -63,12 +65,16 @@ class LLMManager(commands.Cog):
     def _vec(self, txt: str) -> List[float]:
         return self.embedder.encode(txt).tolist()
 
-    # -------------------------------------------------------------------
-    # low‑level Qdrant helpers (sync –> executor)
-    # -------------------------------------------------------------------
-    def _ensure_collection(self):
+    # --------------------------------------------------------------------
+    # low‑level Qdrant helpers (sync → executor)
+    # --------------------------------------------------------------------
+    def _ensure_collection(self, force: bool = False):
+        """Create / recreate collection so its vector‑dim matches the embedder."""
         try:
-            self.q_client.get_collection(self.collection)
+            info = self.q_client.get_collection(self.collection)
+            size = info.config.params.vectors.size  # type: ignore
+            if size != self.vec_dim or force:
+                raise ValueError("dim mismatch → recreate")
         except Exception:
             self.q_client.recreate_collection(
                 collection_name=self.collection,
@@ -78,13 +84,12 @@ class LLMManager(commands.Cog):
     def _upsert_sync(self, tag: str, content: str, source: str) -> int:
         self._ensure_collection()
         pid = uuid.uuid4().int & ((1 << 64) - 1)
+        vec = self._vec(f"{tag}. {tag}. {content}")  # tag doppelt → mehr Gewicht
         self.q_client.upsert(
             self.collection,
-            [{
-                "id": pid,
-                "vector": self._vec(f"{tag}. {content}"),
-                "payload": {"tag": tag, "content": content, "source": source},
-            }],
+            [{"id": pid,
+              "vector": vec,
+              "payload": {"tag": tag, "content": content, "source": source}}],
         )
         return pid
 
@@ -92,17 +97,20 @@ class LLMManager(commands.Cog):
         ids, offset = [], None
         while True:
             pts, offset = self.q_client.scroll(
-                self.collection, limit=1000,
-                with_payload=False, scroll_filter=filt, offset=offset
+                self.collection,
+                limit=1000,
+                with_payload=False,
+                scroll_filter=filt,
+                offset=offset,
             )
             ids.extend(p.id for p in pts)
             if offset is None:
                 break
         return ids
 
-    # -------------------------------------------------------------------
-    # knowledge‑management commands (llmknow …)
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
+    # knowledge‑management commands
+    # --------------------------------------------------------------------
     @commands.command()
     async def llmknow(self, ctx, tag: str, *, content: str):
         """Add manual knowledge under **tag**."""
@@ -114,22 +122,21 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Show stored entries (chunked ≤ 2 000 chars)."""
+        """Show stored entries (chunked ≤ 2000 chars)."""
         await self.ensure_qdrant()
         pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
         if not pts:
             return await ctx.send("No knowledge entries stored.")
-
         hdr, ftr, maxlen = "```\n", "```", 2000
         cur, chunks = hdr, []
         for p in pts:
             pl = p.payload or {}
-            snippet = pl.get("content", "")[:280].replace("\n", " ")
-            ln = f"[{p.id}] ({pl.get('tag','NoTag')}, {pl.get('source','?')}): {snippet}\n"
-            if len(cur) + len(ln) > maxlen - len(ftr):
-                chunks.append(cur + ftr); cur = hdr + ln
+            snip = pl.get("content", "")[:280].replace("\n", " ")
+            line = f"[{p.id}] ({pl.get('tag','NoTag')},{pl.get('source','?')}): {snip}\n"
+            if len(cur) + len(line) > maxlen - len(ftr):
+                chunks.append(cur + ftr); cur = hdr + line
             else:
-                cur += ln
+                cur += line
         chunks.append(cur + ftr)
         for c in chunks:
             await ctx.send(c)
@@ -160,9 +167,9 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Deleted last manual entry (ID {self._last_manual_id}).")
         self._last_manual_id = None
 
-    # -------------------------------------------------------------------
-    # GitHub‑Wiki import
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
+    # GitHub‑Wiki import  (unchanged)
+    # --------------------------------------------------------------------
     @commands.command()
     async def importwiki(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
         await self.ensure_qdrant()
@@ -175,7 +182,7 @@ class LLMManager(commands.Cog):
         if ids:
             await asyncio.get_running_loop().run_in_executor(None, lambda: self.q_client.delete(self.collection, ids))
 
-        # clone / pull
+        # git clone / pull
         if os.path.isdir(os.path.join(clone_dir, ".git")):
             subprocess.run(["git", "-C", clone_dir, "pull"], check=False)
         else:
@@ -199,9 +206,9 @@ class LLMManager(commands.Cog):
             await loop.run_in_executor(None, _import, fp)
         await ctx.send(f"Wiki import done ({len(md_files)} pages).")
 
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     # collection reset
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def initcollection(self, ctx):
@@ -215,9 +222,9 @@ class LLMManager(commands.Cog):
         )
         await ctx.send(f"Collection **{self.collection}** recreated.")
 
-    # -------------------------------------------------------------------
-    # Ollama helper (blocking → executor)
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
+    # Ollama helper (blocking → executor)
+    # --------------------------------------------------------------------
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
         r = requests.post(
             f"{api}/api/chat",
@@ -227,57 +234,83 @@ class LLMManager(commands.Cog):
         r.raise_for_status()
         return r.json().get("message", {}).get("content", "")
 
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
+    # safe search (handles dim‑errors)
+    # --------------------------------------------------------------------
+    def _safe_search(self, *args, **kwargs):
+        try:
+            return self.q_client.search(*args, **kwargs)
+        except http.exceptions.UnexpectedResponse as e:
+            if "Vector dimension error" in str(e):
+                # recreate collection & try again
+                self._ensure_collection(force=True)
+                return self.q_client.search(*args, **kwargs)
+            raise
+
+    # --------------------------------------------------------------------
     # main Q&A
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
+        loop = asyncio.get_running_loop()
 
-        # 2⃣  hybrid keyword + vector search
-        kw = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 2]
-        filt = {"must": [{"key": "content", "match": {"value": k}} for k in kw]} if kw else None
+        # --- 1) Tag/keyword filter ------------------------------------
+        kws = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 2]
+        tag_filter = {"should": [{"key": "tag", "match": {"value": k}} for k in kws]} if kws else None
 
-        raw_hits = self.q_client.search(
+        tag_hits = self._safe_search(
+            self.collection,
+            query_vector=None,           # filter‑only search
+            query_filter=tag_filter,
+            limit=5,
+        ) if tag_filter else []
+
+        # --- 2) Vector search ----------------------------------------
+        vec_hits = self._safe_search(
             self.collection,
             query_vector=self._vec(question),
             limit=20,
-            search_filter=filt,
         )
-        if not raw_hits:
+
+        # --- 3) combine ------------------------------------------------
+        hit_dict = {h.id: h for h in vec_hits}
+        for h in tag_hits:
+            hit_dict.setdefault(h.id, h)
+        hits = list(hit_dict.values())
+        if not hits:
             return "No relevant information found."
 
-        # 3⃣  LLM rerank
-        numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')[:600]}" for i, h in enumerate(raw_hits))
+        # --- 4) LLM re‑rank ------------------------------------------
+        numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')[:600]}" for i, h in enumerate(hits))
         rank_prompt = (
             f"User question: {question}\n\n"
-            "Below are snippets (#0 …). Rate relevance 0‑10.\n"
+            "Below are context snippets (#0 …). Rate relevance 0‑10.\n"
             "Return EXACT JSON: {\"scores\":[...]}\n\n"
             f"{numbered}"
         )
         api, model = await self.config.api_url(), await self.config.model()
-        loop = asyncio.get_running_loop()
-        rank_resp = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, rank_prompt)
+        rank = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, rank_prompt)
         try:
-            scores = json.loads(rank_resp)["scores"]
+            scores = json.loads(rank)["scores"]
         except Exception:
-            scores = [10] * len(raw_hits)
+            scores = [10] * len(hits)
 
-        ranked = sorted(zip(raw_hits, scores), key=lambda x: x[1], reverse=True)[:5]
+        ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)[:5]
         ctx = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:700]}" for h, _ in ranked)
 
-        # 4⃣  safe prompt
-        prompt = (
+        # --- 5) final answer -----------------------------------------
+        final_prompt = (
             "Use **only** the facts below to answer. "
             "If the facts are insufficient, say so.\n\n"
             f"### Facts ###\n{ctx}\n\n"
             f"### Question ###\n{question}\n\n"
             "### Answer ###"
         )
-        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
+        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, final_prompt)
 
-    # -------------------------------------------------------------------
-    # Public commands / events
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
+    # public command + mention hook
+    # --------------------------------------------------------------------
     @commands.command(name="askllm")
     async def askllm_cmd(self, ctx, *, question: str):
         async with ctx.typing():
@@ -295,9 +328,9 @@ class LLMManager(commands.Cog):
                     ans = await self._answer(q)
                 await m.channel.send(ans)
 
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     # simple setters
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     @commands.command()
     async def setmodel(self, ctx, model):
         await self.config.model.set(model); await ctx.send(f"Model set to {model}")
@@ -311,9 +344,9 @@ class LLMManager(commands.Cog):
         await self.config.qdrant_url.set(url.rstrip("/"))
         self.q_client = None; await ctx.send("Qdrant URL updated")  # reconnect next time
 
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     # on_ready
-    # -------------------------------------------------------------------
+    # --------------------------------------------------------------------
     @commands.Cog.listener()
     async def on_ready(self):
         print("LLMManager cog loaded.")
