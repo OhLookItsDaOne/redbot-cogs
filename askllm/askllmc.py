@@ -195,12 +195,18 @@ class LLMManager(commands.Cog):
     # ---------- LLM querying ------------------------------------------
 
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
-        """Blocking call to local Ollama."""
+        """Blocking call to local Ollama (non‑stream)."""
         resp = requests.post(
             f"{api}/api/chat",
-            json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,  # crucial → single JSON object, no SSE‑chunks
+            },
+            timeout=120,
         )
-        resp.raise_for_status(); return resp.json()["message"]["content"]
+        resp.raise_for_status()
+        return resp.json()["message"]["content"]
 
     async def ask_with_context(self, question: str) -> str:
         await self.ensure_qdrant()
@@ -242,4 +248,16 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def setqdrant(self, ctx, url):
-        await self.config
+        await self.config.qdrant_url.set(url.rstrip("/"))
+        self.q_client = None  # force reconnect
+        await ctx.send("Qdrant URL updated")
+
+    # ---------- ready event -------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print("LLMManager cog loaded.")
+
+
+async def setup(bot):
+    await bot.add_cog(LLMManager(bot))
