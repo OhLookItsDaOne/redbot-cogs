@@ -194,10 +194,8 @@ class LLMManager(commands.Cog):
 
     # ---------- LLM querying ------------------------------------------
 
-    def _ollama_chat_sync(self, prompt: str) -> str:
-        """Blocking call to local Ollama"""
-        model = asyncio.run_coroutine_threadsafe(self.config.model(), asyncio.get_event_loop()).result()
-        api = asyncio.run_coroutine_threadsafe(self.config.api_url(), asyncio.get_event_loop()).result()
+    def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
+        """Blocking call to local Ollama."""
         resp = requests.post(
             f"{api}/api/chat",
             json={"model": model, "messages": [{"role": "user", "content": prompt}]},
@@ -214,8 +212,10 @@ class LLMManager(commands.Cog):
             f"Context:\n{ctx}\n\nQuestion: {question}\n\n"
             "Answer concisely and include Markdown links when relevant."
         )
+        model = await self.config.model()
+        api = await self.config.api_url()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._ollama_chat_sync, prompt)
+        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
@@ -242,14 +242,4 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def setqdrant(self, ctx, url):
-        await self.config.qdrant_url.set(url.rstrip("/")); self.q_client = None; await ctx.send("Qdrant URL updated")
-
-    # ---------- bot events -------------------------------------------
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print("LLMManager cog loaded.")
-
-
-def setup(bot):
-    bot.add_cog(LLMManager(bot))
+        await self.config
