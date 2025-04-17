@@ -20,29 +20,28 @@ from qdrant_client import QdrantClient
 # ------------------------------------------------------------
 
 def _ensure_pkg(module: str, pip_name: str | None = None):
+    """Install *module* via pip if import fails (works inside Docker)."""
     try:
         __import__(module)
     except ModuleNotFoundError:
-        subprocess.check_call([
-            "python", "-m", "pip", "install", pip_name or module,
-        ])
+        subprocess.check_call(["python", "-m", "pip", "install", pip_name or module])
         __import__(module)
 
 # markdown / beautifulsoup4 are only needed for the wiki‑import
 _ensure_pkg("markdown")
 _ensure_pkg("bs4", "beautifulsoup4")
-import markdown, bs4  # type: ignore  # noqa: E402 – after ensure_pkg
+import markdown, bs4  # noqa: E402 – after ensure_pkg
 
 # ------------------------------------------------------------
 # LLMManager – Qdrant‑backed knowledge + GitHub‑Wiki importer
 # ------------------------------------------------------------
 
 class LLMManager(commands.Cog):
-    """Interact with a local Ollama LLM through a Qdrant knowledge base."""
+    """Interact with a local Ollama LLM through a Qdrant knowledge base."""
 
     # ---------- initialisation ----------------------------------------
 
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9999999999)
         self.config.register_global(
@@ -63,11 +62,13 @@ class LLMManager(commands.Cog):
             self.q_client = QdrantClient(url=url)
 
     def _vec(self, txt: str) -> List[float]:
+        """Return embedding for *txt* (384‑D list)."""
         return self.embedder.encode(txt).tolist()
 
     # ---------- low‑level Qdrant ops -----------------------------------
 
     def _ensure_collection_sync(self):
+        """Create collection if missing (idempotent)."""
         try:
             self.q_client.get_collection(self.collection)
         except Exception:
@@ -77,13 +78,13 @@ class LLMManager(commands.Cog):
             )
 
     def _upsert_sync(self, tag: str, content: str, source: str):
-        """Insert/update one document.  Vector now built from *tag + content* → better recall."""
+        """Insert/update one document. Vector built from *tag + content*."""
         self._ensure_collection_sync()
         self.q_client.upsert(
             self.collection,
             [
                 {
-                    "id": uuid.uuid4().int & ((1 << 64) - 1),
+                    "id": uuid.uuid4().int & ((1 << 64) - 1),  # 64‑bit UUID
                     "vector": self._vec(f"{tag}. {content}"),
                     "payload": {"tag": tag, "content": content, "source": source},
                 }
@@ -121,7 +122,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """List all knowledge entries (chunks ≤ 2000 chars)."""
+        """List all knowledge entries (chunks ≤ 2000 chars)."""
         await self.ensure_qdrant()
         points, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
         if not points:
@@ -162,12 +163,12 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def importwiki(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
-        """Clone / pull GitHub Wiki and (re‑)import into Qdrant (source=wiki)."""
+        """Clone/ pull GitHub Wiki and (re‑)import into Qdrant (source=wiki)."""
         await self.ensure_qdrant()
         data_dir = str(cog_data_path(self)); os.makedirs(data_dir, exist_ok=True)
         clone_dir = os.path.join(data_dir, "wiki")
 
-        # 1) purge old wiki docs
+        # 1) purge old wiki docs (collect‑then‑delete)
         filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
         await asyncio.get_running_loop().run_in_executor(None, self._delete_by_filter_sync, filt)
 
@@ -196,17 +197,22 @@ class LLMManager(commands.Cog):
     # ---------- LLM querying ------------------------------------------
 
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
-        """Blocking call to local Ollama (non‑stream)."""
+        """Blocking call to local Ollama (non‑stream).
+        Raises requests.HTTPError on failure."""
         resp = requests.post(
             f"{api}/api/chat",
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
-                "stream": False,  # crucial → single JSON object, no SSE‑chunks
+                "stream": False,
             },
             timeout=120,
         )
-        resp.raise_for_status(); return resp.json()["message"]["content"]
+        resp.raise_for_status()
+        try:
+            return resp.json()["message"]["content"]
+        except Exception:
+            return f"(LLM error) Raw response:\n{resp.text[:400]}…"
 
     async def ask_with_context(self, question: str) -> str:
         await self.ensure_qdrant()
@@ -219,7 +225,7 @@ class LLMManager(commands.Cog):
         prompt = (
             f"Context:\n{ctx_txt}\n\n"
             f"Question: {question}\n\n"
-            "Give a short, specific answer. If advice depends on GPU tier, pick the one that matches best."
+            "Provide a concise, concrete answer. If advice depends on GPU tier, choose the recommendation for the closest tier."
         )
         model = await self.config.model(); api = await self.config.api_url(); loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
@@ -230,4 +236,39 @@ class LLMManager(commands.Cog):
             await ctx.send(await self.ask_with_context(question))
 
     @commands.Cog.listener()
-    async def on_message(self, message:
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if self.bot.user.mentioned_in(message):
+            q = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
+            if q:
+                async with message.channel.typing():
+                    await message.channel.send(await self.ask_with_context(q))
+
+    # ---------- util commands -----------------------------------------
+
+    @commands.command()
+    async def setmodel(self, ctx, model: str):
+        await self.config.model.set(model)
+        await ctx.send(f"Model set to {model}")
+
+    @commands.command()
+    async def setapi(self, ctx, url: str):
+        await self.config.api_url.set(url.rstrip("/"))
+        await ctx.send("API URL updated")
+
+    @commands.command()
+    async def setqdrant(self, ctx, url: str):
+        await self.config.qdrant_url.set(url.rstrip("/"))
+        self.q_client = None  # force reconnect
+        await ctx.send("Qdrant URL updated")
+
+    # ---------- ready event -------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print("LLMManager cog loaded.")
+
+
+async def setup(bot):
+    await bot.add_cog(LLMManager(bot))
