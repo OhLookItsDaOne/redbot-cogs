@@ -66,11 +66,14 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
 
     def _get_all_knowledge_sync(self):
-        # Flatten all pages of scroll into one list
-        all_points = []
-        for batch in self.q_client.scroll(collection_name=self.collection_name, with_payload=True, limit=1000):
-            all_points.extend(batch)
-        return all_points
+        # Direkt alle Knowledge-Punkte als Liste zurückgeben
+        return list(
+            self.q_client.scroll(
+                collection_name=self.collection_name,
+                with_payload=True,
+                limit=1000
+            )
+        )
 
     async def get_all_knowledge(self):
         await self.ensure_qdrant_client()
@@ -87,7 +90,7 @@ class LLMManager(commands.Cog):
 
     def _delete_knowledge_by_tag_sync(self, tag):
         filt = {"must": [{"key": "tag", "match": {"value": tag}}]}
-        self.q_client.delete(collection_name=self.collection_name, filter=filt)
+        self.q_client.delete(collection_name=self.collection_name, points_selector=[], filter=filt)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -166,7 +169,7 @@ class LLMManager(commands.Cog):
         # Lösche alte Wiki-Einträge über Filter
         def _del_sync():
             filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
-            self.q_client.delete(collection_name=self.collection_name, filter=filt)
+            self.q_client.delete(collection_name=self.collection_name, points_selector=[], filter=filt)
         await asyncio.get_running_loop().run_in_executor(None, _del_sync)
         # Clone oder Pull
         if os.path.isdir(os.path.join(clone_path, ".git")):
