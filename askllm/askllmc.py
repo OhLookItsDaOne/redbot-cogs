@@ -52,6 +52,7 @@ class LLMManager(commands.Cog):
             )
         vector = self.embedding_model.encode(content).tolist()
         payload = {"tag": tag, "content": content, "source": source}
+        # 64-bit unique ID
         doc_id = uuid.uuid4().int & ((1 << 64) - 1)
         self.q_client.upsert(
             collection_name=self.collection_name,
@@ -65,7 +66,11 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Added manual info under '{tag.lower()}'.")
 
     def _get_all_knowledge_sync(self):
-        return list(self.q_client.scroll(collection_name=self.collection_name, with_payload=True, limit=1000))
+        # Flatten all pages of scroll into one list
+        all_points = []
+        for batch in self.q_client.scroll(collection_name=self.collection_name, with_payload=True, limit=1000):
+            all_points.extend(batch)
+        return all_points
 
     async def get_all_knowledge(self):
         await self.ensure_qdrant_client()
@@ -82,7 +87,7 @@ class LLMManager(commands.Cog):
 
     def _delete_knowledge_by_tag_sync(self, tag):
         filt = {"must": [{"key": "tag", "match": {"value": tag}}]}
-        self.q_client.delete(collection_name=self.collection_name, points_selector=[], filter=filt)
+        self.q_client.delete(collection_name=self.collection_name, filter=filt)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -135,8 +140,8 @@ class LLMManager(commands.Cog):
             tag = payload.get("tag", "NoTag")
             src = payload.get("source", "unknown")
             content = payload.get("content", "")
-            line = f"[{id_key}] ({tag}, src={src}): {' '.join(content.splitlines())}"
-            lines.append(line)
+            single_line = " ".join(content.splitlines())
+            lines.append(f"[{id_key}] ({tag}, src={src}): {single_line}")
         max_len, header, footer = 2000, "```\n", "```"
         chunks, cur = [], header
         for l in lines:
@@ -158,10 +163,12 @@ class LLMManager(commands.Cog):
         base = str(cog_data_path(self))
         os.makedirs(base, exist_ok=True)
         clone_path = os.path.join(base, "wiki")
+        # Lösche alte Wiki-Einträge über Filter
         def _del_sync():
             filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
-            self.q_client.delete(collection_name=self.collection_name, points_selector=[], filter=filt)
+            self.q_client.delete(collection_name=self.collection_name, filter=filt)
         await asyncio.get_running_loop().run_in_executor(None, _del_sync)
+        # Clone oder Pull
         if os.path.isdir(os.path.join(clone_path, ".git")):
             subprocess.run(["git", "-C", clone_path, "pull"], check=False)
             await ctx.send("Wiki repo updated.")
@@ -169,14 +176,14 @@ class LLMManager(commands.Cog):
             if os.path.exists(clone_path): shutil.rmtree(clone_path)
             subprocess.run(["git", "clone", wiki_url, clone_path], check=True)
             await ctx.send("Wiki repo cloned.")
+        # Verarbeite Markdown
         import markdown
         from bs4 import BeautifulSoup
         def strip_html(h): return re.sub(r"<.*?>", "", h)
         def gen_tags(html):
             soup = BeautifulSoup(html, "html.parser")
             hs = soup.find_all(re.compile("^h[1-3]$"))
-            tags = [h.get_text().strip() for h in hs if h.get_text().strip()]
-            return ", ".join(dict.fromkeys(tags)) or None
+            return ", ".join(dict.fromkeys(h.get_text().strip() for h in hs if h.get_text().strip())) or None
         md_files = glob.glob(os.path.join(clone_path, "*.md"))
         await ctx.send(f"Found {len(md_files)} wiki pages. Importing…")
         for fp in md_files:
@@ -193,8 +200,8 @@ class LLMManager(commands.Cog):
     async def query_llm(self, prompt, channel):
         model = await self.config.model()
         api_url = await self.config.api_url()
-        data = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False, "options": {"num_ctx": 14000, "temperature": 0}}
         headers = {"Content-Type": "application/json"}
+        data = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False, "options": {"num_ctx": 14000, "temperature": 0}}
         async with channel.typing():
             resp = requests.post(f"{api_url}/api/chat", json=data, headers=headers)
             resp.raise_for_status()
@@ -209,26 +216,19 @@ class LLMManager(commands.Cog):
         results = await self.search_knowledge(question, top_k=5)
         if not results:
             return await channel.send("No relevant information found.")
-        ctx = "\n\n".join([f"[{r.id}] ({r.payload.get('tag','NoTag')}): {r.payload.get('content','')}" for r in results])
+        context = "\n\n".join(f"[{r.id}] ({r.payload.get('tag','NoTag')}): {r.payload.get('content','')}" for r in results)
         def strip(raw): return re.sub(r'<.*?>', '', raw)
         def validate(text):
-            urls = re.findall(r'https?://[^\s]+', text)
-            for url in urls:
-                if 'example.com' in url:
+            for url in re.findall(r'https?://[^\s]+', text):
+                if 'example.com' in url or requests.head(url, timeout=5).status_code >= 400:
                     text = text.replace(url, '')
-                else:
-                    try:
-                        if requests.head(url, timeout=5).status_code >= 400:
-                            text = text.replace(url, '')
-                    except:
-                        text = text.replace(url, '')
             return re.sub(r'\s+', ' ', text)
-        context = validate(strip(ctx))[:4000]
-        prompt = (f"Using the following context extracted from the documentation:\n{context}\n\n"
+        ctxt = validate(strip(context))[:4000]
+        prompt = (f"Using the following context extracted from the documentation:\n{ctxt}\n\n"
                   "Please answer concisely and accurately. Include relevant links as Markdown.\n\n"
                   f"Question: {question}")
-        answer = await self.query_llm(prompt, channel)
-        await channel.send(answer)
+        ans = await self.query_llm(prompt, channel)
+        await channel.send(ans)
 
     @commands.command()
     async def askllm(self, ctx, *, question: str):
@@ -243,23 +243,19 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def setmodel(self, ctx, model: str):
-        await self.config.model.set(model); await ctx.send(f"LLM model set to '{model}'.")
+    async def setmodel(self, ctx, model: str): await self.config.model.set(model); await ctx.send(f"LLM model set to '{model}'.")
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def setapi(self, ctx, url: str):
-        await self.config.api_url.set(url.rstrip("/")); await ctx.send(f"Ollama URL set to '{url}'.")
+    async def setapi(self, ctx, url: str):  await self.config.api_url.set(url.rstrip("/")); await ctx.send(f"Ollama URL set to '{url}'.")
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def setqdrant(self, ctx, url: str):
-        await self.config.qdrant_url.set(url.rstrip("/")); self.q_client = QdrantClient(url=url.rstrip("/")); await ctx.send(f"Qdrant URL set to '{url}'.")
-
+    async def setqdrant(self, ctx, url: str): await self.config.qdrant_url.set(url.rstrip("/")); self.q_client = QdrantClient(url=url.rstrip("/")); await ctx.send(f"Qdrant URL set to '{url}'.")
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def initcollection(self, ctx):
         await self.ensure_qdrant_client()
         try:
-            self.q_client.recreate_collection(collection_name=self.collection_name, vectors_config={"size":384,"distance":"Cosine"});
+            self.q_client.recreate_collection(collection_name=self.collection_name, vectors_config={"size":384,"distance":"Cosine"})
             await ctx.send(f"Collection '{self.collection_name}' initialized.")
         except Exception as e:
             await ctx.send(f"Error initializing: {e}")
