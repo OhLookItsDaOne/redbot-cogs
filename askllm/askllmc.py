@@ -129,7 +129,7 @@ class LLMManager(commands.Cog):
         await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: self.q_client.delete(
-                self.collection_name, None,
+                self.collection_name, [],
                 filter={"must":[{"key":"tag","match":{"value":tag.lower()}}]}
             )
         )
