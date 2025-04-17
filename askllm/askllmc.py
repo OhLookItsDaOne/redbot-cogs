@@ -96,9 +96,10 @@ class LLMManager(commands.Cog):
         await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: self.q_client.delete(
-                collection_name=self.collection_name,
-                filter={"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
-            )
+                    self.collection_name,
+                    None,
+                    filter={"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
+                )
         )
         await ctx.send(f"Deleted all entries with tag '{tag.lower()}'.")
 
