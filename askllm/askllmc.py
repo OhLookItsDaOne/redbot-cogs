@@ -140,25 +140,51 @@ class LLMManager(commands.Cog):
         if not points:
             await ctx.send("No knowledge entries stored.")
             return
-        aggregated = "\n".join([
-            f"[{point.id}] ({point.payload.get('tag','NoTag')}, source: {point.payload.get('source','unknown')}): {point.payload.get('content','')}"
-            for point in points
-        ])
+
+        # Baue eine Liste von Zeilen, dabei prüfen wir, ob point ein dict, Objekt oder Liste ist:
+        lines = []
+        for point in points:
+            # 1) Dict-Fall
+            if isinstance(point, dict):
+                id_val = point.get("id")
+                payload = point.get("payload", {})
+            # 2) DataClass- oder Objekt-Fall
+            elif hasattr(point, "payload") and hasattr(point, "id"):
+                id_val = getattr(point, "id")
+                payload = getattr(point, "payload")
+            # 3) Tuple-/Liste-Fall als Fallback
+            else:
+                try:
+                    id_val = point[0]
+                    payload = point[1]
+                except Exception:
+                    continue
+
+            tag = payload.get("tag", "NoTag")
+            source = payload.get("source", "unknown")
+            content = payload.get("content", "")
+            lines.append(f"[{id_val}] ({tag}, source: {source}): {content}")
+
+        # Jetzt chunken wir die Zeilen in 2000‑Zeichen-Blöcke
         max_length = 2000
         header = "```\n"
         footer = "```"
         chunks = []
-        current_chunk = header
-        for line in aggregated.split("\n"):
-            if len(current_chunk) + len(line) + 1 > max_length - len(footer):
-                chunks.append(current_chunk + footer)
-                current_chunk = header + line + "\n"
+        current = header
+        for line in lines:
+            # +1 für den Zeilenumbruch
+            if len(current) + len(line) + 1 > max_length - len(footer):
+                chunks.append(current + footer)
+                current = header + line + "\n"
             else:
-                current_chunk += line + "\n"
-        if current_chunk != header:
-            chunks.append(current_chunk + footer)
+                current += line + "\n"
+
+        if current != header:
+            chunks.append(current + footer)
+
         for chunk in chunks:
             await ctx.send(chunk)
+
     
     # --- LLM-Abfrage (z. B. via Ollama API) ---
     async def query_llm(self, prompt, channel):
