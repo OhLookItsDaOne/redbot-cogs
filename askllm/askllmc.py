@@ -138,32 +138,53 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant_client()
         points = await self.get_all_knowledge()
         if not points:
-            await ctx.send("No knowledge entries stored.")
-            return
+            return await ctx.send("No knowledge entries stored.")
 
-        # Baue eine Liste von Zeilen, dabei prüfen wir, ob point ein dict, Objekt oder Liste ist:
         lines = []
         for point in points:
-            # 1) Dict-Fall
+            # Extrahiere id und payload (unabhängig vom Typ)
             if isinstance(point, dict):
                 id_val = point.get("id")
                 payload = point.get("payload", {})
-            # 2) DataClass- oder Objekt-Fall
-            elif hasattr(point, "payload") and hasattr(point, "id"):
-                id_val = getattr(point, "id")
-                payload = getattr(point, "payload")
-            # 3) Tuple-/Liste-Fall als Fallback
+            elif hasattr(point, "id") and hasattr(point, "payload"):
+                id_val = point.id
+                payload = point.payload
             else:
+                # Fallback für List/Tuple
                 try:
-                    id_val = point[0]
-                    payload = point[1]
-                except Exception:
+                    id_val, payload = point[0], point[1]
+                except:
                     continue
+
+            # Wenn payload kein dict ist, in dict konvertieren
+            if not isinstance(payload, dict):
+                try:
+                    payload = payload.dict()
+                except:
+                    payload = dict(payload)
 
             tag = payload.get("tag", "NoTag")
             source = payload.get("source", "unknown")
             content = payload.get("content", "")
             lines.append(f"[{id_val}] ({tag}, source: {source}): {content}")
+
+        # Chunking auf 2000 Zeichen
+        max_length = 2000
+        header, footer = "```\n", "```"
+        chunks, current = [], header
+        for line in lines:
+            # +1 für Zeilenumbruch
+            if len(current) + len(line) + 1 > max_length - len(footer):
+                chunks.append(current + footer)
+                current = header + line + "\n"
+            else:
+                current += line + "\n"
+        if current != header:
+            chunks.append(current + footer)
+
+        for chunk in chunks:
+            await ctx.send(chunk)
+
 
         # Jetzt chunken wir die Zeilen in 2000‑Zeichen-Blöcke
         max_length = 2000
