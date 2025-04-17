@@ -84,6 +84,8 @@ class LLMManager(commands.Cog):
     @commands.command()
     async def llmknowshow(self, ctx):
         pts = await self.get_all_knowledge()
+        # Debug-Ausgabe der Anzahl der Einträge
+        await ctx.send(f"DEBUG: retrieved {len(pts)} entries.")
         if not pts:
             return await ctx.send("No knowledge entries stored.")
         seen, lines = set(), []
@@ -100,16 +102,21 @@ class LLMManager(commands.Cog):
             text = payload.get('content','')
             single = ' '.join(text.splitlines())
             lines.append(f"[{key}] ({tag},src={src}): {single}")
-        header, footer, max_len = "```\n", "```", 2000
+        header, footer, max_len = "```
+", "```", 2000
         chunks, cur = [], header
         for line in lines:
             if len(cur) + len(line) + 1 > max_len - len(footer):
                 chunks.append(cur + footer)
-                cur = header + line + "\n"
+                cur = header + line + "
+"
             else:
-                cur += line + "\n"
-        if cur != header: chunks.append(cur + footer)
-        for c in chunks: await ctx.send(c)
+                cur += line + "
+"
+        if cur != header:
+            chunks.append(cur + footer)
+        for c in chunks:
+            await ctx.send(c) await ctx.send(c)
 
     @commands.command()
     async def llmknowdelete(self, ctx, doc_id: int):
