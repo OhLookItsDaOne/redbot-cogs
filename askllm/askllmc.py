@@ -1,7 +1,6 @@
 import discord
 import re
 import requests
-import time
 import asyncio
 import glob
 import os
@@ -20,24 +19,24 @@ from qdrant_client import QdrantClient
 # ------------------------------------------------------------
 
 def _ensure_pkg(module: str, pip_name: str | None = None):
-    """Install *module* via pip if import fails (works inside Docker)."""
+    """Install *module* with pip if it is missing (works inside Docker)."""
     try:
         __import__(module)
     except ModuleNotFoundError:
         subprocess.check_call(["python", "-m", "pip", "install", pip_name or module])
         __import__(module)
 
-# markdown / beautifulsoup4 are only needed for the wiki‑import
+# markdown / beautifulsoup4 are required only for the wiki import
 _ensure_pkg("markdown")
 _ensure_pkg("bs4", "beautifulsoup4")
-import markdown, bs4  # noqa: E402 – after ensure_pkg
+import markdown, bs4  # noqa: E402 – imported after _ensure_pkg
 
 # ------------------------------------------------------------
-# LLMManager – Qdrant‑backed knowledge + GitHub‑Wiki importer
+# LLMManager – Qdrant‑backed knowledge base + GitHub‑Wiki importer
 # ------------------------------------------------------------
 
 class LLMManager(commands.Cog):
-    """Interact with a local Ollama LLM through a Qdrant knowledge base."""
+    """Interact with a local Ollama LLM through a Qdrant knowledge base."""
 
     # ---------- initialisation ----------------------------------------
 
@@ -62,13 +61,11 @@ class LLMManager(commands.Cog):
             self.q_client = QdrantClient(url=url)
 
     def _vec(self, txt: str) -> List[float]:
-        """Return embedding for *txt* (384‑D list)."""
         return self.embedder.encode(txt).tolist()
 
     # ---------- low‑level Qdrant ops -----------------------------------
 
     def _ensure_collection_sync(self):
-        """Create collection if missing (idempotent)."""
         try:
             self.q_client.get_collection(self.collection)
         except Exception:
@@ -78,20 +75,18 @@ class LLMManager(commands.Cog):
             )
 
     def _upsert_sync(self, tag: str, content: str, source: str):
-        """Insert/update one document. Vector built from *tag + content*."""
         self._ensure_collection_sync()
         self.q_client.upsert(
             self.collection,
             [
                 {
-                    "id": uuid.uuid4().int & ((1 << 64) - 1),  # 64‑bit UUID
+                    "id": uuid.uuid4().int & ((1 << 64) - 1),
                     "vector": self._vec(f"{tag}. {content}"),
                     "payload": {"tag": tag, "content": content, "source": source},
                 }
             ],
         )
 
-    # helper: delete by FILTER (collect ids → delete)
     def _delete_by_filter_sync(self, filt: dict):
         ids: list[int] = []
         offset = None
@@ -122,7 +117,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """List all knowledge entries (chunks ≤ 2000 chars)."""
+        """List all knowledge entries (chunks ≤ 2000 chars)."""
         await self.ensure_qdrant()
         points, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
         if not points:
@@ -146,14 +141,12 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowdelete(self, ctx, doc_id: int):
-        """Delete entry by **ID**."""
         await self.ensure_qdrant()
         await asyncio.get_running_loop().run_in_executor(None, lambda: self.q_client.delete(self.collection, [doc_id]))
         await ctx.send(f"Deleted entry {doc_id}.")
 
     @commands.command()
     async def llmknowdeletetag(self, ctx, tag: str):
-        """Delete every entry whose *tag* matches."""
         await self.ensure_qdrant()
         filt = {"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
         await asyncio.get_running_loop().run_in_executor(None, self._delete_by_filter_sync, filt)
@@ -163,16 +156,13 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def importwiki(self, ctx, repo: str = "https://github.com/Kvitekvist/FUS.wiki.git"):
-        """Clone/ pull GitHub Wiki and (re‑)import into Qdrant (source=wiki)."""
         await self.ensure_qdrant()
         data_dir = str(cog_data_path(self)); os.makedirs(data_dir, exist_ok=True)
         clone_dir = os.path.join(data_dir, "wiki")
 
-        # 1) purge old wiki docs (collect‑then‑delete)
         filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
         await asyncio.get_running_loop().run_in_executor(None, self._delete_by_filter_sync, filt)
 
-        # 2) clone or pull
         if os.path.isdir(os.path.join(clone_dir, ".git")):
             subprocess.run(["git", "-C", clone_dir, "pull"], check=False)
         else:
@@ -194,11 +184,24 @@ class LLMManager(commands.Cog):
             count += 1
         await ctx.send(f"Wiki import done ({count} pages).")
 
+    # ---------- collection init --------------------------------------
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def initcollection(self, ctx):
+        await self.ensure_qdrant()
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: self.q_client.recreate_collection(
+                collection_name=self.collection,
+                vectors_config={"size": 384, "distance": "Cosine"},
+            ),
+        )
+        await ctx.send(f"Collection **{self.collection}** recreated.")
+
     # ---------- LLM querying ------------------------------------------
 
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
-        """Blocking call to local Ollama (non‑stream).
-        Raises requests.HTTPError on failure."""
         resp = requests.post(
             f"{api}/api/chat",
             json={
@@ -216,59 +219,12 @@ class LLMManager(commands.Cog):
 
     async def ask_with_context(self, question: str) -> str:
         await self.ensure_qdrant()
-        hits = self.q_client.search(self.collection, query_vector=self._vec(question), limit=5)
+        gpu_words = ("3060", "3070", "3080", "3090", "4060", "4070", "4080", "4090")
+        search_query = question + " resolution" if any(w in question for w in gpu_words) and "resolution" not in question.lower() else question
+
+        hits = self.q_client.search(self.collection, query_vector=self._vec(search_query), limit=5)
         if not hits:
             return "No relevant information found."
-        ctx_txt = "\n\n".join(
-            f"[{h.id}] {h.payload.get('content','')[:600]}" for h in hits
-        )
+        ctx_txt = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:600]}" for h in hits)
         prompt = (
-            f"Context:\n{ctx_txt}\n\n"
-            f"Question: {question}\n\n"
-            "Provide a concise, concrete answer. If advice depends on GPU tier, choose the recommendation for the closest tier."
-        )
-        model = await self.config.model(); api = await self.config.api_url(); loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
-
-    @commands.command()
-    async def askllm(self, ctx, *, question: str):
-        async with ctx.typing():
-            await ctx.send(await self.ask_with_context(question))
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
-            return
-        if self.bot.user.mentioned_in(message):
-            q = message.content.replace(f"<@{self.bot.user.id}>", "").strip()
-            if q:
-                async with message.channel.typing():
-                    await message.channel.send(await self.ask_with_context(q))
-
-    # ---------- util commands -----------------------------------------
-
-    @commands.command()
-    async def setmodel(self, ctx, model: str):
-        await self.config.model.set(model)
-        await ctx.send(f"Model set to {model}")
-
-    @commands.command()
-    async def setapi(self, ctx, url: str):
-        await self.config.api_url.set(url.rstrip("/"))
-        await ctx.send("API URL updated")
-
-    @commands.command()
-    async def setqdrant(self, ctx, url: str):
-        await self.config.qdrant_url.set(url.rstrip("/"))
-        self.q_client = None  # force reconnect
-        await ctx.send("Qdrant URL updated")
-
-    # ---------- ready event -------------------------------------------
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print("LLMManager cog loaded.")
-
-
-async def setup(bot):
-    await bot.add_cog(LLMManager(bot))
+            f"Context:\n{ctx_txt}\
