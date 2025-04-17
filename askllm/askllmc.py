@@ -68,7 +68,13 @@ class LLMManager(commands.Cog):
         )
 
     def _scroll_sync(self):
-        return list(self.q_client.scroll(collection_name=self.collection, with_payload=True))
+        """Return **only** the list of `Record` objects (scroll returns `(points, next)` tuple)."""
+        points, _ = self.q_client.scroll(
+            collection_name=self.collection,
+            with_payload=True,
+            limit=1000  # plenty; paging not needed for our size
+        )
+        return points)
 
     # ---------- commands: knowledge management ---------------------------
 
@@ -122,7 +128,7 @@ class LLMManager(commands.Cog):
         filt = {"must": [{"key": "tag", "match": {"value": tag.lower()}}]}
         await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self.q_client.delete(self.collection, {"filter": filt})
+            lambda: self.q_client.delete(collection_name=self.collection, filter=filt)
         )
         await ctx.send(f"Deleted entries with tag '{tag.lower()}'.")
 
