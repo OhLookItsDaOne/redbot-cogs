@@ -82,14 +82,20 @@ class LLMManager(commands.Cog):
         return await asyncio.get_running_loop().run_in_executor(None, self._get_all_knowledge_sync)
     
     def _delete_knowledge_by_id_sync(self, doc_id):
-        self.q_client.delete(collection_name=self.collection_name, points=[doc_id])
-    
+        self.q_client.delete(
+            collection_name=self.collection_name,
+            points_selector=[doc_id]
+        )
+
     @commands.command()
     async def llmknowdelete(self, ctx, doc_id: int):
         """Deletes a knowledge entry from Qdrant by its ID."""
         await self.ensure_qdrant_client()
-        await asyncio.get_running_loop().run_in_executor(None, self._delete_knowledge_by_id_sync, doc_id)
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._delete_knowledge_by_id_sync, doc_id
+        )
         await ctx.send(f"Deleted entry with ID {doc_id}.")
+
     
     def _delete_knowledge_by_tag_sync(self, tag):
         filt = {"must": [{"key": "tag", "match": {"value": tag}}]}
