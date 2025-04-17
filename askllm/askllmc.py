@@ -142,27 +142,42 @@ class LLMManager(commands.Cog):
     async def llmknowshow(self, ctx):
         """Displays all knowledge entries from Qdrant in chunks of <= 2000 characters."""
         await self.ensure_qdrant_client()
-        points = await self.get_all_knowledge()
+        # Ziehe bis zu 1000 Einträge auf einmal
+        points = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: list(
+                self.q_client.scroll(
+                    collection_name=self.collection_name,
+                    with_payload=True,
+                    limit=1000  # zieh alle auf einmal
+                )
+            )
+        )
         if not points:
             return await ctx.send("No knowledge entries stored.")
 
+        # Dedup by ID
+        seen = set()
         lines = []
-        for point in points:
-            # Extrahiere id und payload (unabhängig vom Typ)
-            if isinstance(point, dict):
-                id_val = point.get("id")
-                payload = point.get("payload", {})
-            elif hasattr(point, "id") and hasattr(point, "payload"):
-                id_val = point.id
-                payload = point.payload
+        for pt in points:
+            # Extrahiere ID
+            if hasattr(pt, "id"):
+                id_val = pt.id
+                payload = pt.payload
+            elif isinstance(pt, dict):
+                id_val = pt.get("id")
+                payload = pt.get("payload", {})
             else:
-                # Fallback für List/Tuple
                 try:
-                    id_val, payload = point[0], point[1]
+                    id_val, payload = pt[0], pt[1]
                 except:
                     continue
 
-            # Wenn payload kein dict ist, in dict konvertieren
+            if id_val in seen:
+                continue
+            seen.add(id_val)
+
+            # payload to dict
             if not isinstance(payload, dict):
                 try:
                     payload = payload.dict()
@@ -172,42 +187,22 @@ class LLMManager(commands.Cog):
             tag = payload.get("tag", "NoTag")
             source = payload.get("source", "unknown")
             content = payload.get("content", "")
-            lines.append(f"[{id_val}] ({tag}, source: {source}): {content}")
+            # entferne Zeilenumbrüche, damit die Ausgabe flüssig bleibt
+            single_line = " ".join(content.splitlines())
+            lines.append(f"[{id_val}] ({tag}, src={source}): {single_line}")
 
-        # Chunking auf 2000 Zeichen
+        # Jetzt die lines in 2000‑Zeichen‑Blöcke aufteilen und senden
         max_length = 2000
         header, footer = "```\n", "```"
-        chunks, current = [], header
+        chunks, cur = [], header
         for line in lines:
-            # +1 für Zeilenumbruch
-            if len(current) + len(line) + 1 > max_length - len(footer):
-                chunks.append(current + footer)
-                current = header + line + "\n"
+            if len(cur) + len(line) + 1 > max_length - len(footer):
+                chunks.append(cur + footer)
+                cur = header + line + "\n"
             else:
-                current += line + "\n"
-        if current != header:
-            chunks.append(current + footer)
-
-        for chunk in chunks:
-            await ctx.send(chunk)
-
-
-        # Jetzt chunken wir die Zeilen in 2000‑Zeichen-Blöcke
-        max_length = 2000
-        header = "```\n"
-        footer = "```"
-        chunks = []
-        current = header
-        for line in lines:
-            # +1 für den Zeilenumbruch
-            if len(current) + len(line) + 1 > max_length - len(footer):
-                chunks.append(current + footer)
-                current = header + line + "\n"
-            else:
-                current += line + "\n"
-
-        if current != header:
-            chunks.append(current + footer)
+                cur += line + "\n"
+        if cur != header:
+            chunks.append(cur + footer)
 
         for chunk in chunks:
             await ctx.send(chunk)
