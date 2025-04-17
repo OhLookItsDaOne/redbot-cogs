@@ -308,4 +308,5 @@ class LLMManager(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(LLMManager
+    """Red‑DiscordBot loading hook"""
+    await bot.add_cog(LLMManager(bot))
