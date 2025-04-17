@@ -16,6 +16,24 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 
 # ------------------------------------------------------------
+# helper: ensure that an importable package is available
+# ------------------------------------------------------------
+
+def _ensure_pkg(module: str, pip_name: str | None = None):
+    try:
+        __import__(module)
+    except ModuleNotFoundError:
+        subprocess.check_call([
+            "python", "-m", "pip", "install", pip_name or module,
+        ])
+        __import__(module)
+
+# markdown / beautifulsoup4 are only needed for the wiki‑import
+_ensure_pkg("markdown")
+_ensure_pkg("bs4", "beautifulsoup4")
+import markdown, bs4  # type: ignore  # noqa: E402 – after ensure_pkg
+
+# ------------------------------------------------------------
 # LLMManager – Qdrant‑backed knowledge + GitHub‑Wiki importer
 # ------------------------------------------------------------
 
@@ -160,7 +178,6 @@ class LLMManager(commands.Cog):
             subprocess.run(["git", "clone", repo, clone_dir], check=True)
         await ctx.send("Wiki repo updated. Importing …")
 
-        import markdown, bs4
         md_files = glob.glob(os.path.join(clone_dir, "*.md"))
         count = 0
         for path in md_files:
@@ -169,7 +186,9 @@ class LLMManager(commands.Cog):
             soup = bs4.BeautifulSoup(html, "html.parser")
             tags = ", ".join({h.get_text(strip=True) for h in soup.find_all(re.compile("^h[1-3]$"))})
             plain = soup.get_text(" ", strip=True)
-            await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki")
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._upsert_sync, tags or os.path.basename(path), plain, "wiki"
+            )
             count += 1
         await ctx.send(f"Wiki import done ({count} pages).")
 
@@ -177,7 +196,10 @@ class LLMManager(commands.Cog):
 
     async def _ollama_chat(self, prompt: str) -> str:
         model = await self.config.model(); api = await self.config.api_url()
-        resp = requests.post(f"{api}/api/chat", json={"model": model, "messages": [{"role": "user", "content": prompt}]})
+        resp = requests.post(
+            f"{api}/api/chat",
+            json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+        )
         resp.raise_for_status(); return resp.json()["message"]["content"]
 
     async def ask_with_context(self, question: str) -> str:
