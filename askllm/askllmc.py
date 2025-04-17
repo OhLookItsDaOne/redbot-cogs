@@ -253,17 +253,23 @@ class LLMManager(commands.Cog):
     async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
-
-           # --- 1) Tag / keyword filter  -------------------------------
-        kws = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 2]
+        # --- 1) Keyword‑Filter ----------------------------------------
+        clean_q = re.sub(r"[^\w\s]", " ", question.lower())     # z. B. „Virtual‑Desktop“ → "virtual desktop"
+        kws = [w for w in clean_q.split() if len(w) > 2]
+        
         tag_filter = (
-            {"should": [{"key": "tag", "match": {"value": k}} for k in kws]}
-            if kws else
-            None
+            {
+                "should": (
+                    [{"key": "tag",     "match": {"value": k}} for k in kws] +
+                    [{"key": "content", "match": {"value": k}} for k in kws]
+                )
+            }
+            if kws else None
         )
-
+        
+        # --- 2) Treffer über reines Keyword‑Filtering -----------------
         if tag_filter:
-            # scroll benötigt KEINEN query_vector  ->  umgeht Pydantic‑Fehler
+            # scroll benötigt KEINEN query_vector  →  umgeht Vector‑/Pydantic‑Fehler
             tag_hits, _ = self.q_client.scroll(
                 self.collection,
                 with_payload=True,
