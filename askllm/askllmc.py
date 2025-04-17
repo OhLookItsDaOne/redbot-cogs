@@ -246,17 +246,27 @@ class LLMManager(commands.Cog):
                 self._ensure_collection(force=True)
                 return self.q_client.search(*args, **kwargs)
             raise
-
     # --------------------------------------------------------------------
     # main Q&A
     # --------------------------------------------------------------------
     async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
-        # --- 1) Keyword‑Filter ----------------------------------------
-        clean_q = re.sub(r"[^\w\s]", " ", question.lower())     # z. B. „Virtual‑Desktop“ → "virtual desktop"
+
+        # ---------- (A) Heuristische Query‑Erweiterung -----------------
+        aug_q = question
+        ql = question.lower()
+
+        # Wenn der User Virtual‑Desktop erwähnt, aber nicht ausdrücklich
+        # nach „resolution“ fragt, erweitern wir die Such‑Query.
+        if "virtual" in ql and "desktop" in ql and "resolution" not in ql:
+            aug_q += " resolution"
+        # --------------------------------------------------------------
+
+        # ---------- (B) Keyword‑ / Tag‑Filter -------------------------
+        clean_q = re.sub(r"[^\w\s]", " ", aug_q.lower())          # z. B. „Virtual‑Desktop“ → "virtual desktop"
         kws = [w for w in clean_q.split() if len(w) > 2]
-        
+
         tag_filter = (
             {
                 "should": (
@@ -266,40 +276,39 @@ class LLMManager(commands.Cog):
             }
             if kws else None
         )
-        
-        # --- 2) Treffer über reines Keyword‑Filtering -----------------
+
+        # Suche ausschließlich über das Filter (kein Vektor nötig)
+        tag_hits = []
         if tag_filter:
-            # scroll benötigt KEINEN query_vector  →  umgeht Vector‑/Pydantic‑Fehler
             tag_hits, _ = self.q_client.scroll(
                 self.collection,
                 with_payload=True,
                 limit=20,
                 scroll_filter=tag_filter,
             )
-        else:
-            tag_hits = []
+        # --------------------------------------------------------------
 
-        # --- 2) Vector search ----------------------------------------
+        # ---------- (C) Vektor‑Suche ----------------------------------
         vec_hits = self._safe_search(
             self.collection,
-            query_vector=self._vec(question),
+            query_vector=self._vec(aug_q),         #  <-  aug_q statt question
             limit=20,
         )
+        # --------------------------------------------------------------
 
-        # --- 3) combine ------------------------------------------------
+        # ---------- (D) Kombinieren & Re‑Rank -------------------------
         hit_dict = {h.id: h for h in vec_hits}
-        for h in tag_hits or []:          #  <-- kleines "or []" verhindert None‑Iterationen
+        for h in tag_hits:
             hit_dict.setdefault(h.id, h)
         hits = list(hit_dict.values())
         if not hits:
             return "No relevant information found."
 
-        # --- 4) LLM re‑rank ------------------------------------------
         numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')[:600]}" for i, h in enumerate(hits))
         rank_prompt = (
-            f"User question: {question}\n\n"
+            f"User question: {question}\n\n"          # ORIGINAL QUESTION
             "Below are context snippets (#0 …). Rate relevance 0‑10.\n"
-            "Return EXACT JSON: {\"scores\":[...]}\n\n"
+            "Return EXACT JSON: {\"scores\":[…]}\n\n"
             f"{numbered}"
         )
         api, model = await self.config.api_url(), await self.config.model()
@@ -311,13 +320,14 @@ class LLMManager(commands.Cog):
 
         ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)[:5]
         ctx = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:700]}" for h, _ in ranked)
+        # --------------------------------------------------------------
 
-        # --- 5) final answer -----------------------------------------
+        # ---------- (E) Finale Antwort‑Generierung --------------------
         final_prompt = (
             "Use **only** the facts below to answer. "
             "If the facts are insufficient, say so.\n\n"
             f"### Facts ###\n{ctx}\n\n"
-            f"### Question ###\n{question}\n\n"
+            f"### Question ###\n{question}\n\n"      # ORIGINAL QUESTION
             "### Answer ###"
         )
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, final_prompt)
