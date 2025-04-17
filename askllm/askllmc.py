@@ -254,16 +254,24 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
 
-        # --- 1) Tag/keyword filter ------------------------------------
+           # --- 1) Tag / keyword filter  -------------------------------
         kws = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 2]
-        tag_filter = {"should": [{"key": "tag", "match": {"value": k}} for k in kws]} if kws else None
+        tag_filter = (
+            {"should": [{"key": "tag", "match": {"value": k}} for k in kws]}
+            if kws else
+            None
+        )
 
-        tag_hits = self._safe_search(
-            self.collection,
-            query_vector=None,           # filter‑only search
-            query_filter=tag_filter,
-            limit=5,
-        ) if tag_filter else []
+        if tag_filter:
+            # scroll benötigt KEINEN query_vector  ->  umgeht Pydantic‑Fehler
+            tag_hits, _ = self.q_client.scroll(
+                self.collection,
+                with_payload=True,
+                limit=20,
+                scroll_filter=tag_filter,
+            )
+        else:
+            tag_hits = []
 
         # --- 2) Vector search ----------------------------------------
         vec_hits = self._safe_search(
@@ -274,7 +282,7 @@ class LLMManager(commands.Cog):
 
         # --- 3) combine ------------------------------------------------
         hit_dict = {h.id: h for h in vec_hits}
-        for h in tag_hits:
+        for h in tag_hits or []:          #  <-- kleines "or []" verhindert None‑Iterationen
             hit_dict.setdefault(h.id, h)
         hits = list(hit_dict.values())
         if not hits:
