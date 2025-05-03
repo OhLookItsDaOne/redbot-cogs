@@ -22,11 +22,12 @@ def _ensure_pkg(mod: str, pip_name: str | None = None):
         )
         __import__(mod)
 
-
 _ensure_pkg("markdown")
 _ensure_pkg("bs4", "beautifulsoup4")
-from markdown import markdown              # noqa:  E402 (imported after _ensure_pkg)
-from bs4 import BeautifulSoup              # noqa:  E402
+_ensure_pkg("rank_bm25")            # <- hier
+from markdown import markdown       # noqa: E402
+from bs4 import BeautifulSoup       # noqa: E402
+from rank_bm25 import BM25Okapi     # <- und hier
 
 # ----------------------------------------------------------------------------
 # LLMManager
@@ -54,7 +55,9 @@ class LLMManager(commands.Cog):
 
         self.q_client: QdrantClient | None = None
         self._last_manual_id: int | None = None  # last !llmknow id (session)
-
+        # BM25-Retriever (auf Bedarf initialisiert)
+        self.bm25: BM25Okapi | None = None
+        self._bm25_pts: List = []
     # --------------------------------------------------------------------
     # basic helpers
     # --------------------------------------------------------------------
@@ -69,7 +72,7 @@ class LLMManager(commands.Cog):
     # low‑level Qdrant helpers (sync → executor)
     # --------------------------------------------------------------------
     def _ensure_collection(self, force: bool = False):
-        """Create / recreate collection so its vector‑dim matches the embedder."""
+        """Create / recreate collection so its vector-dim matches the embedder."""
         try:
             info = self.q_client.get_collection(self.collection)
             size = info.config.params.vectors.size  # type: ignore
@@ -78,8 +81,67 @@ class LLMManager(commands.Cog):
         except Exception:
             self.q_client.recreate_collection(
                 collection_name=self.collection,
-                vectors_config={"size": self.vec_dim, "distance": "Cosine"},
+                vectors_config={
+                    "size": self.vec_dim,
+                    "distance": "Cosine",
+                    "hnsw_config": {"m": 16, "ef_construct": 200},
+                },
+                optimizers_config={
+                    "default_segment_number": 4,
+                    "indexing_threshold": 256,
+                },
+                wal_config={
+                    "wal_capacity_mb": 1024,
+                },
+                payload_indexing_config={
+                    "enable": True,
+                    "field_schema": {
+                        "tag": {"type": "keyword"},
+                        "source": {"type": "keyword"},
+                    },
+                },
+                compression_config={
+                    "type": "ProductQuantization",
+                    "params": {"segments": 8, "subvector_size": 2},
+                },
             )
+    # --------------------------------------------------------------------
+    # collection reset
+    # --------------------------------------------------------------------
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def initcollection(self, ctx):
+        await self.ensure_qdrant()
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: self.q_client.recreate_collection(
+                collection_name=self.collection,
+                vectors_config={
+                    "size": self.vec_dim,
+                    "distance": "Cosine",
+                    "hnsw_config": {"m": 16, "ef_construct": 200},
+                },
+                optimizers_config={
+                    "default_segment_number": 4,
+                    "indexing_threshold": 256,
+                },
+                wal_config={
+                    "wal_capacity_mb": 1024,
+                },
+                payload_indexing_config={
+                    "enable": True,
+                    "field_schema": {
+                        "tag": {"type": "keyword"},
+                        "source": {"type": "keyword"},
+                    },
+                },
+                compression_config={
+                    "type": "ProductQuantization",
+                    "params": {"segments": 8, "subvector_size": 2},
+                },
+            ),
+        )
+        await ctx.send(f"Collection **{self.collection}** recreated.")
 
     def _upsert_sync(self, tag: str, content: str, source: str) -> int:
         self._ensure_collection()
@@ -207,22 +269,6 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Wiki import done ({len(md_files)} pages).")
 
     # --------------------------------------------------------------------
-    # collection reset
-    # --------------------------------------------------------------------
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def initcollection(self, ctx):
-        await self.ensure_qdrant()
-        await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: self.q_client.recreate_collection(
-                collection_name=self.collection,
-                vectors_config={"size": self.vec_dim, "distance": "Cosine"},
-            ),
-        )
-        await ctx.send(f"Collection **{self.collection}** recreated.")
-
-    # --------------------------------------------------------------------
     # Ollama helper (blocking → executor)
     # --------------------------------------------------------------------
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
@@ -252,6 +298,19 @@ class LLMManager(commands.Cog):
     async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
+
+        # --- BM25-Retrieval aufbauen (einmal) und ausführen ---
+        if self.bm25 is None:
+            pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=10000)
+            docs = [p.payload.get("content", "") for p in pts]
+            tokenized = [doc.lower().split() for doc in docs]
+            self.bm25 = BM25Okapi(tokenized)
+            self._bm25_pts = pts
+
+        tokenized_q = question.lower().split()
+        bm25_scores = self.bm25.get_scores(tokenized_q)
+        top_bm25 = sorted(zip(self._bm25_pts, bm25_scores), key=lambda x: x[1], reverse=True)[:20]
+        bm25_hits = [p for p, _ in top_bm25]
 
         # ---------- (A) Heuristische Query‑Erweiterung -----------------
         aug_q = question
@@ -296,9 +355,9 @@ class LLMManager(commands.Cog):
         )
         # --------------------------------------------------------------
 
-        # ---------- (D) Kombinieren & Re‑Rank -------------------------
+                # ---------- (D) Kombinieren & Re-Rank -------------------------
         hit_dict = {h.id: h for h in vec_hits}
-        for h in tag_hits:
+        for h in tag_hits + bm25_hits:
             hit_dict.setdefault(h.id, h)
         hits = list(hit_dict.values())
         if not hits:
@@ -306,8 +365,8 @@ class LLMManager(commands.Cog):
 
         numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')[:600]}" for i, h in enumerate(hits))
         rank_prompt = (
-            f"User question: {question}\n\n"          # ORIGINAL QUESTION
-            "Below are context snippets (#0 …). Rate relevance 0‑10.\n"
+            f"User question: {question}\n\n"
+            "Below are context snippets (#0 …). Rate relevance 0-10.\n"
             "Return EXACT JSON: {\"scores\":[…]}\n\n"
             f"{numbered}"
         )
@@ -319,15 +378,17 @@ class LLMManager(commands.Cog):
             scores = [10] * len(hits)
 
         ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)[:5]
-        ctx = "\n\n".join(f"[{h.id}] {h.payload.get('content','')[:700]}" for h, _ in ranked)
-        # --------------------------------------------------------------
 
-        # ---------- (E) Finale Antwort‑Generierung --------------------
+        # ---------- (E) Token-Budget schonen: nur Top 5 & max. 200 Wörter ----------
+        ctx = "\n\n".join(
+            " ".join(h.payload.get("content", "").split()[:200])
+            for h, _ in ranked
+        )
+
         final_prompt = (
-            "Use **only** the facts below to answer. "
-            "If the facts are insufficient, say so.\n\n"
+            "Use **only** the facts below to answer. If the facts are insufficient, say so.\n\n"
             f"### Facts ###\n{ctx}\n\n"
-            f"### Question ###\n{question}\n\n"      # ORIGINAL QUESTION
+            f"### Question ###\n{question}\n\n"
             "### Answer ###"
         )
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, final_prompt)
