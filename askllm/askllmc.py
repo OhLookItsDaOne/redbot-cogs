@@ -346,6 +346,30 @@ class LLMManager(commands.Cog):
 # =========================================================
 # 2)  Completely replace the current _answer method with:
 # =========================================================
+# ==========================================================
+# 1)  NEW helper – put anywhere inside LLMManager, e.g. below _vec
+# ==========================================================
+    _TAG_STOPWORDS = {
+        "the", "a", "an", "to", "in", "on", "with", "for", "of", "and", "or",
+        "i", "you", "we", "they", "it", "my", "your", "our",
+    }
+
+    def _guess_tags(self, text: str) -> list[str]:
+        """
+        Pull potential one‑word tags out of the user question.
+        Returns at most five tokens suitable for a Qdrant tag filter.
+        """
+        words = re.findall(r"\w+", text.lower())
+        good = [w for w in words if w not in self._TAG_STOPWORDS and len(w) > 2]
+        # remove duplicates but preserve order
+        seen: set[str] = set()
+        uniq = [w for w in good if not (w in seen or seen.add(w))]
+        return uniq[:5]
+
+
+# ==========================================================
+# 2)  COMPLETELY REPLACE _answer with the code below
+# ==========================================================
     async def _answer(self, question: str, context: str | None = None) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
@@ -353,40 +377,56 @@ class LLMManager(commands.Cog):
         query_text = f"{context}\n{question}" if context else question
         q_vec = await loop.run_in_executor(None, self._vec, query_text)
 
-        # ---- 1) initial vector search (broad) ------------------------------
+        # ---------- 1) TAG‑FIRST search -------------------------------------
+        tags = self._guess_tags(question)
+        filt = (
+            {"must": [{"key": "tag", "match_any": {"any": tags}}]}
+            if tags
+            else None
+        )
+
         hits = await loop.run_in_executor(
             None,
             lambda: self.q_client.search(
                 collection_name=self.collection,
                 query_vector=q_vec,
-                limit=40,                      # broad initial pool
+                limit=40,
                 with_payload=True,
+                query_filter=filt,
             ),
         )
 
-        # ---- 2) preliminary ranking (cosine + manual bonus) ----------------
+        # fallback to plain vector search if tag filter returned nothing
+        if not hits and filt:
+            hits = await loop.run_in_executor(
+                None,
+                lambda: self.q_client.search(
+                    collection_name=self.collection,
+                    query_vector=q_vec,
+                    limit=40,
+                    with_payload=True,
+                ),
+            )
+
+        # ---------- 2) base ranking (cosine + manual bonus) -----------------
         hits.sort(
             key=lambda h: (h.score or 0.0)
             + (0.1 if h.payload.get("source") == "manual" else 0.0),
             reverse=True,
         )
 
-        # ---- 3) LLM relevance filtering ------------------------------------
+        # ---------- 3) LLM relevance check ----------------------------------
         relevant: list = []
-        max_checks = 15                       # avoid spamming the model
-        for h in hits:
-            if len(relevant) >= 8:            # we only need a handful
+        for h in hits[:15]:   # check at most 15 snippets
+            if len(relevant) >= 8:
                 break
-            if max_checks <= 0:
-                break
-            max_checks -= 1
             if await self._is_relevant_llm(question, h.payload.get("content", "")):
                 relevant.append(h)
 
         if not relevant:
-            return "No relevant information found in the knowledge base."
+            return "I couldn't find anything relevant in the knowledge base."
 
-        self._last_ranked_hits = relevant[:5]   # cache for image lookup etc.
+        self._last_ranked_hits = relevant[:5]
         facts = "\n\n".join(
             f"#{i}\n{h.payload['content']}" for i, h in enumerate(self._last_ranked_hits)
         )
@@ -394,33 +434,9 @@ class LLMManager(commands.Cog):
         prompt = (
             "Below are numbered facts from the knowledge base. "
             "Answer the **question** using **only** these facts. "
-            "After your answer, list which fact numbers you used "
-            "exactly like this: Used: [#0,#3].\n\n"
-            f"### Facts ###\n{facts}\n\n"
-            f"### Question ###\n{question}\n\n"
-            "### Answer ###"
-        )
-
-        api, model = await self.config.api_url(), await self.config.model()
-        return await loop.run_in_executor(
-            None, self._ollama_chat_sync, api, model, prompt
-        )
-
-        def _rank(hit):
-            base = hit.score or 0.0
-            overlap = self._token_overlap(query_text, hit.payload.get("content", ""))
-            bonus = 0.1 if hit.payload.get("source") == "manual" else 0.0
-            return base + overlap * self.overlap_weight + bonus
-
-        chosen = sorted(raw_hits, key=_rank, reverse=True)[:5]
-        self._last_ranked_hits = chosen
-        if not chosen:
-            return "No relevant information found."
-
-        facts = "\n\n".join(f"#{i}\n{h.payload['content']}" for i, h in enumerate(chosen))
-        prompt = (
-            "Below are numbered facts. Answer the question using ONLY these facts.\n"
-            "At the end, list which fact indices you used, e.g. Used: [#0,#2].\n\n"
+            "If none of them actually answer the question, reply "
+            "\"I don't know based on the provided facts.\" "
+            "After your answer, list which fact numbers you used, like: Used: [#0,#2].\n\n"
             f"### Facts ###\n{facts}\n\n"
             f"### Question ###\n{question}\n\n"
             "### Answer ###"
