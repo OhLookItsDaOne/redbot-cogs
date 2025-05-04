@@ -248,6 +248,102 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Bild von Position {from_pos} nach {to_pos} verschoben.")
 
     # --------------------------------------------------------------------
+    # learn command
+    # --------------------------------------------------------------------
+    @commands.command(name="learn")
+    @commands.has_permissions(administrator=True)
+    async def learn(self, ctx, num: int):
+        """Create a knowledge entry from the last `num` chat messages."""
+        await self.ensure_qdrant()
+        loop = asyncio.get_running_loop()
+
+        # 1) Fetch last messages (excluding bot messages)
+        msgs = await ctx.channel.history(limit=num+20).flatten()
+        user_msgs = [m.content for m in msgs if not m.author.bot]
+        content = "\n".join(reversed(user_msgs[-num:]))
+
+        # 2) Generate initial draft via LLM
+        api, model = await self.config.api_url(), await self.config.model()
+        draft_prompt = (
+            "Please create a concise knowledge entry from the following chat messages:\n"
+            f"{content}\n\nEntry:"
+        )
+        draft = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, draft_prompt)
+
+        # 3) Interactive loop: yes / no / edit
+        while True:
+            await ctx.send(f"**Draft:**\n```{draft}```\nReply with `yes`, `no`, or `edit`.")
+            try:
+                reply = await self.bot.wait_for(
+                    "message",
+                    check=lambda m: m.author == ctx.author and m.channel == ctx.channel and m.content.lower() in ["yes", "no", "edit"],
+                    timeout=300
+                )
+            except asyncio.TimeoutError:
+                return await ctx.send("⏱️ Timeout – learn process aborted.")
+            cmd = reply.content.lower()
+            if cmd == "no":
+                return await ctx.send("❌ Entry discarded.")
+            if cmd == "edit":
+                await ctx.send("✏️ Please provide your feedback:")
+                try:
+                    feedback = await self.bot.wait_for(
+                        "message",
+                        check=lambda m: m.author == ctx.author and m.channel == ctx.channel,
+                        timeout=300
+                    )
+                except asyncio.TimeoutError:
+                    return await ctx.send("⏱️ Timeout – learn process aborted.")
+                edit_prompt = (
+                    "Please revise the following entry based on this feedback:\n"
+                    f"Entry: {draft}\nFeedback: {feedback.content}\n\nRevised entry:"
+                )
+                draft = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, edit_prompt)
+                continue
+            # cmd == "yes"
+            break
+
+        # 4) Generate tags
+        tag_prompt = (
+            "Generate relevant tags (comma-separated) for this entry:\n"
+            f"{draft}\n\nTags:"
+        )
+        tags = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, tag_prompt)
+
+        # 5) Tags confirmation loop
+        while True:
+            await ctx.send(f"**Proposed tags:** {tags}\nReply with `yes`, `no`, or `edit`.")
+            try:
+                reply = await self.bot.wait_for(
+                    "message",
+                    check=lambda m: m.author == ctx.author and m.channel == ctx.channel and m.content.lower() in ["yes", "no", "edit"],
+                    timeout=300
+                )
+            except asyncio.TimeoutError:
+                return await ctx.send("⏱️ Timeout – learn process aborted.")
+            cmd = reply.content.lower()
+            if cmd == "no":
+                return await ctx.send("❌ Learn process cancelled.")
+            if cmd == "edit":
+                await ctx.send("📝 Please enter new tags (comma-separated):")
+                try:
+                    tag_reply = await self.bot.wait_for(
+                        "message",
+                        check=lambda m: m.author == ctx.author and m.channel == ctx.channel,
+                        timeout=300
+                    )
+                except asyncio.TimeoutError:
+                    return await ctx.send("⏱️ Timeout – learn process aborted.")
+                tags = tag_reply.content
+                continue
+            # cmd == "yes"
+            break
+
+        # 6) Save entry
+        await loop.run_in_executor(None, self._upsert_sync, tags, draft, "manual")
+        await ctx.send(f"✅ Entry saved with tags: {tags}")
+
+    # --------------------------------------------------------------------
     # knowledge‑management commands
     # --------------------------------------------------------------------
     @commands.command()
