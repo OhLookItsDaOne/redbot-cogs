@@ -388,15 +388,30 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Auto-reply active in: {mentions}")
 
     def _ollama_chat_sync(self, api: str, model: str, prompt: str) -> str:
-        """Sync call to Ollama's chat endpoint."""
+        """Sync call to Ollama's chat endpoint, with robust JSON parsing."""
         r = requests.post(
             f"{api.rstrip('/')}/api/chat",
-            json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,  # ensure single‐object JSON
+            },
             timeout=120,
         )
         r.raise_for_status()
-        return r.json().get("message", {}).get("content", "")
-
+        try:
+            return r.json().get("message", {}).get("content", "")
+        except (ValueError, json.JSONDecodeError):
+            # fallback: try parsing the last valid JSON object in the response
+            for line in r.text.strip().splitlines()[::-1]:
+                try:
+                    obj = json.loads(line)
+                    return obj.get("message", {}).get("content", "")
+                except json.JSONDecodeError:
+                    continue
+            # if all else fails, return raw text
+            return r.text
+        
     def _safe_search(self, **kwargs):
         """Perform a Qdrant search, auto-creating collection on dimension errors."""
         kwargs.setdefault("with_payload", True)
