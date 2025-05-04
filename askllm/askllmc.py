@@ -39,15 +39,13 @@ class LLMManager(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210123)
-        self.config.register_global(vector_threshold=0.2)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
             auto_channels=[],
             threshold=0.6,  # default token‐overlap threshold
-            vector_threshold=0.3,
-
+            vector_threshold=0.2,
         )
 
         self.collection = "fus_wiki"
@@ -58,6 +56,7 @@ class LLMManager(commands.Cog):
         self.bm25: BM25Okapi | None = None
         self._bm25_pts: List = []
         self._last_ranked_hits: List = []
+        self._last_manual_id: int | None = None
 
     async def ensure_qdrant(self):
         if self.q_client is None:
@@ -287,10 +286,8 @@ class LLMManager(commands.Cog):
         await loop.run_in_executor(None, self._upsert_sync, tags, draft, "manual")
         await ctx.send(f"✅ Saved with tags: {tags}")
 
-
     @commands.command(name="setvectorthreshold")
-
-    @commands.command(name="setvectorthreshold")
+    @commands.has_permissions(administrator=True)
     async def setvectorthreshold(self, ctx, value: float):
         if not 0.0 <= value <= 1.0:
             return await ctx.send("⚠️ Threshold must be between 0.0 and 1.0")
@@ -321,6 +318,7 @@ class LLMManager(commands.Cog):
 
         # 3) Keep top-5 *regardless* of threshold for answering
         chosen = boosted[:5]
+        self._last_ranked_hits = chosen
         if not chosen:
             return "No relevant information found."
 
@@ -343,6 +341,7 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant()
         new_id = await asyncio.get_running_loop().run_in_executor(None, self._upsert_sync, tag.lower(), content, "manual")
         await ctx.send(f"Added entry under '{tag}' (ID {new_id}).")
+        self._last_manual_id = new_id
 
     @commands.command(name="llmknowshow")
     async def llmknowshow(self, ctx: commands.Context):
@@ -485,54 +484,14 @@ class LLMManager(commands.Cog):
                 return self.q_client.search(**kwargs)
             raise
 
-    async def _answer(self, question: str) -> str:
-        await self.ensure_qdrant()
-        loop = asyncio.get_running_loop()
-        q_vec = self._vec(question)
-
-        # 1) fetch manual entries first
-        manual = await loop.run_in_executor(None, lambda:
-            self.q_client.search(
-                collection_name=self.collection,
-                query_vector=q_vec,
-                query_filter={"must":[{"key":"source","match":{"value":"manual"}}]},
-                limit=10, with_payload=True
-            )
-        )
-        hits = manual if manual else await loop.run_in_executor(None, lambda:
-            self.q_client.search(
-                collection_name=self.collection,
-                query_vector=q_vec,
-                limit=10, with_payload=True
-            )
-        )
-
-        # 2) apply cosine cutoff
-        vec_thr = await self.config.vector_threshold()
-        filtered = [h for h in hits if (h.score or 0.0) >= vec_thr]
-
-        # 3) if nothing passes threshold, fall back to unfiltered hits
-        chosen = filtered or hits
-
-        if not chosen:
-            return "No relevant information found."
-
-        # remember for image-sending
-        self._last_ranked_hits = chosen
-
-        # 4) build prompt with top 5 snippets
-        snippet = "\n\n".join(
-            " ".join(h.payload["content"].split()[:200])
-            for h in chosen[:5]
-        )
-        prompt = (
-            "Use **only** the facts below to answer. If insufficient, say so.\n\n"
-            f"### Facts ###\n{snippet}\n\n"
-            f"### Question ###\n{question}\n\n"
-            "### Answer ###"
-        )
-        api, model = await self.config.api_url(), await self.config.model()
-        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
+    def _token_overlap(self, a: str, b: str) -> float:
+        """Prozentuale Token‑Überschneidung von *b* in *a* (0.0 – 1.0)."""
+        import re
+        ta = set(re.findall(r"\w+", a.lower()))
+        tb = set(re.findall(r"\w+", b.lower()))
+        if not tb:
+            return 0.0
+        return len(ta & tb) / len(tb)
 
     @commands.command(name="askllm")
     async def askllm_cmd(self, ctx, *, question: str):
@@ -545,6 +504,8 @@ class LLMManager(commands.Cog):
         thr = await self.config.vector_threshold()
         for idx_str in used:
             idx = int(idx_str.lstrip("#"))
+            if idx >= len(self._last_ranked_hits):
+                continue
             hit = self._last_ranked_hits[idx]
             if hit.payload.get("source")=="manual" and (hit.score or 0.0) >= thr:
                 for url in hit.payload.get("images", []):
