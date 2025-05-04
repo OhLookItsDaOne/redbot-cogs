@@ -318,7 +318,6 @@ class LLMManager(commands.Cog):
         if self.bm25 is None:
             pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=10000)
             if not pts:
-                # Keine Dokumente in der DB → BM25 überspringen
                 bm25_hits = []
             else:
                 docs = [p.payload.get("content", "") for p in pts]
@@ -327,7 +326,6 @@ class LLMManager(commands.Cog):
                     self.bm25 = BM25Okapi(tokenized)
                     self._bm25_pts = pts
                 except ZeroDivisionError:
-                    # Corpus war leer oder fehlerhaft
                     self.bm25 = None
                     bm25_hits = []
                 else:
@@ -339,59 +337,72 @@ class LLMManager(commands.Cog):
                         reverse=True
                     )[:20]
                     bm25_hits = [p for p, _ in top_bm25]
+        else:
+            tokenized_q = question.lower().split()
+            bm25_scores = self.bm25.get_scores(tokenized_q)
+            top_bm25 = sorted(
+                zip(self._bm25_pts, bm25_scores),
+                key=lambda x: x[1],
+                reverse=True
+            )[:20]
+            bm25_hits = [p for p, _ in top_bm25]
 
-        # ---------- (A) Heuristische Query‑Erweiterung -----------------
+        # ---------- (A) Heuristische Query-Erweiterung -----------------
         aug_q = question
         ql = question.lower()
-
-        # Wenn der User Virtual‑Desktop erwähnt, aber nicht ausdrücklich
-        # nach „resolution“ fragt, erweitern wir die Such‑Query.
         if "virtual" in ql and "desktop" in ql and "resolution" not in ql:
             aug_q += " resolution"
         # --------------------------------------------------------------
 
-        # ---------- (B) Keyword‑ / Tag‑Filter -------------------------
-        clean_q = re.sub(r"[^\w\s]", " ", aug_q.lower())          # z. B. „Virtual‑Desktop“ → "virtual desktop"
+        # ---------- (B) Keyword- / Tag-Filter -------------------------
+        clean_q = re.sub(r"[^\w\s]", " ", aug_q.lower())
         kws = [w for w in clean_q.split() if len(w) > 2]
-
         tag_filter = (
-            {
-                "should": (
-                    [{"key": "tag",     "match": {"value": k}} for k in kws] +
-                    [{"key": "content", "match": {"value": k}} for k in kws]
-                )
-            }
+            {"should": (
+                [{"key": "tag",     "match": {"value": k}} for k in kws] +
+                [{"key": "content", "match": {"value": k}} for k in kws]
+            )}
             if kws else None
         )
-
-        # Suche ausschließlich über das Filter (kein Vektor nötig)
-        tag_hits = []
-        if tag_filter:
-            tag_hits, _ = self.q_client.scroll(
-                self.collection,
-                with_payload=True,
-                limit=20,
-                scroll_filter=tag_filter,
-            )
         # --------------------------------------------------------------
 
-        # ---------- (C) Vektor‑Suche ----------------------------------
-        vec_hits = self._safe_search(
+        # ---------- (C) Manual-Vektor-Suche ---------------------------
+        manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
+        manual_vec_hits = self._safe_search(
             self.collection,
-            query_vector=self._vec(aug_q),         #  <-  aug_q statt question
+            query_vector=self._vec(aug_q),
             limit=20,
+            query_filter=manual_filter,
         )
-        # --------------------------------------------------------------
+        if manual_vec_hits:
+            hits = manual_vec_hits
+        else:
+            # Wiki-Fallback: Keyword-Filter
+            tag_hits = []
+            if tag_filter:
+                tag_hits, _ = self.q_client.scroll(
+                    self.collection,
+                    with_payload=True,
+                    limit=20,
+                    scroll_filter=tag_filter,
+                )
+            # Wiki-Fallback: Vector-Suche
+            vec_hits = self._safe_search(
+                self.collection,
+                query_vector=self._vec(aug_q),
+                limit=20,
+            )
+            # Merge Wiki-Treffer
+            hit_dict = {h.id: h for h in vec_hits}
+            for h in tag_hits + bm25_hits:
+                hit_dict.setdefault(h.id, h)
+            hits = list(hit_dict.values())
 
-                # ---------- (D) Kombinieren & Re-Rank -------------------------
-        hit_dict = {h.id: h for h in vec_hits}
-        for h in tag_hits + bm25_hits:
-            hit_dict.setdefault(h.id, h)
-        hits = list(hit_dict.values())
         if not hits:
             return "No relevant information found."
 
-        numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')[:600]}" for i, h in enumerate(hits))
+        # ---------- (D) Kombinieren & Re-Rank -------------------------
+        numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')}" for i, h in enumerate(hits))
         rank_prompt = (
             f"User question: {question}\n\n"
             "Below are context snippets (#0 …). Rate relevance 0-10.\n"
@@ -404,7 +415,6 @@ class LLMManager(commands.Cog):
             scores = json.loads(rank)["scores"]
         except Exception:
             scores = [10] * len(hits)
-
         ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)[:5]
 
         # ---------- (E) Token-Budget schonen: nur Top 5 & max. 200 Wörter ----------
@@ -420,6 +430,7 @@ class LLMManager(commands.Cog):
             "### Answer ###"
         )
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, final_prompt)
+
 
     # --------------------------------------------------------------------
     # public command + mention hook
