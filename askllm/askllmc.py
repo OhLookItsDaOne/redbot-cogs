@@ -68,23 +68,32 @@ class LLMManager(commands.Cog):
 
     def _vec(self, txt: str) -> List[float]:
         return self.embedder.encode(txt).tolist()
+    
 
-     # --------------------------------------------------------------------
-    # embedded images for qdrant entry (ersetzt deine zweite _upsert_sync)
+    # --------------------------------------------------------------------
+    # embedded images for qdrant entry (only true image URLs)
     # --------------------------------------------------------------------
     def _upsert_sync(self, tag: str, content: str, source: str) -> int:
         self._ensure_collection()
         # 1) Alle Markdown-Links extrahieren
-        image_urls = re.findall(r'\[.*?\]\((https?://[^\s\)]+)\)', content)
-        # 2) Text ohne Link-Markup
-        text_only = re.sub(r'\[.*?\]\((https?://[^\s\)]+)\)', '', content).strip()
-        # 3) Vektor & Payload zusammenbauen
+        all_urls = re.findall(r'\[.*?\]\((https?://[^\s\)]+)\)', content)
+        # 2) Filter nur echte Bild-URLs
+        image_urls = [
+            u for u in all_urls
+            if re.search(r'\.(?:jpe?g|png|gif|webp)(?:\?|$)', u, re.IGNORECASE)
+        ]
+        # 3) Markdown entfernen und Inline-Links belassen
+        #    – Bilder-Markup löschen
+        txt = re.sub(r'!\[.*?\]\((https?://[^\s\)]+)\)', '', content)
+        #    – normale Links durch URL ersetzen
+        txt = re.sub(r'\[.*?\]\((https?://[^\s\)]+)\)', r'\1', txt).strip()
+        # 4) Vektor & Payload zusammenbauen
         pid = uuid.uuid4().int & ((1 << 64) - 1)
-        vec = self._vec(f"{tag}. {tag}. {text_only}")
-        payload = {"tag": tag, "content": text_only, "source": source}
+        vec = self._vec(f"{tag}. {tag}. {txt}")
+        payload = {"tag": tag, "content": txt, "source": source}
         if image_urls:
             payload["images"] = image_urls
-        # 4) Upsert
+        # 5) Upsert
         self.q_client.upsert(
             self.collection,
             [{"id": pid, "vector": vec, "payload": payload}],
@@ -364,36 +373,25 @@ class LLMManager(commands.Cog):
         new_id = await loop.run_in_executor(None, self._upsert_sync, tag.lower(), content, "manual")
         self._last_manual_id = new_id
         await ctx.send(f"Added manual info under '{tag.lower()}' (ID {new_id}).")
-
-    @commands.command()
+    @commands.command(name="llmknowshow")
     async def llmknowshow(self, ctx):
-        """Show stored entries (chunked ≤2000 chars), including any image URLs."""
+        """Show entries with clearly visible image lists."""
         await self.ensure_qdrant()
-        try:
-            pts, _ = self.q_client.scroll(
-                self.collection,
-                with_payload=True,
-                limit=1000
-            )
-        except http.exceptions.ResponseHandlingException as e:
-            await ctx.send(f"⚠️ Error: Connection to database failed!: {e}")
-            return
+        pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
         if not pts:
             return await ctx.send("No knowledge entries stored.")
         hdr, ftr, maxlen = "```\n", "```", 2000
         cur, chunks = hdr, []
         for p in pts:
             pl = p.payload or {}
-            snip = pl.get("content", "")[:200].replace("\n", " ")
-            line = f"[{p.id}] ({pl.get('tag','NoTag')},{pl.get('source','?')}): {snip}"
+            line = f"[{p.id}] ({pl.get('tag','NoTag')},{pl.get('source','?')}): "
+            line += pl.get("content","")[:200].replace('\n',' ') 
             images = pl.get("images", [])
             if images:
-                # make images clearly visible
-                line += "\n  → Images: " + ", ".join(images)
+                line += "\n  → Images:\n" + "\n".join(f"    • {u}" for u in images)
             line += "\n"
             if len(cur) + len(line) > maxlen - len(ftr):
-                chunks.append(cur + ftr)
-                cur = hdr + line
+                chunks.append(cur + ftr); cur = hdr + line
             else:
                 cur += line
         chunks.append(cur + ftr)
@@ -404,34 +402,31 @@ class LLMManager(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def llmknowclearimgs(self, ctx, doc_id: int = None):
         """
-        Clears all image URLs from a specific entry or from all entries if no ID given.
-        Usage: !llmknowclearimgs [doc_id]
+        Clears all image URLs from a specific entry (or all entries if no ID).
         """
         await self.ensure_qdrant()
         if doc_id:
             pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
             if not pts:
                 return await ctx.send(f"Entry {doc_id} not found.")
-            # remove images field
             self.q_client.set_payload(
                 collection_name=self.collection,
                 payload={"images": []},
                 points=[doc_id],
             )
-            await ctx.send(f"🔄 removed all pictures from {doc_id}.")
+            await ctx.send(f"🔄 Cleared images from entry {doc_id}.")
         else:
-            # find all points with images
-            all_pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
-            ids_to_clear = [p.id for p in all_pts if p.payload and p.payload.get("images")]
-            if not ids_to_clear:
+            pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
+            to_clear = [p.id for p in pts if p.payload and p.payload.get("images")]
+            if not to_clear:
                 return await ctx.send("No entries with images found.")
-            for pid in ids_to_clear:
+            for pid in to_clear:
                 self.q_client.set_payload(
                     collection_name=self.collection,
                     payload={"images": []},
                     points=[pid],
                 )
-            await ctx.send(f"🔄 Images from {len(ids_to_clear)} removed.")
+            await ctx.send(f"🔄 Cleared images from {len(to_clear)} entries.")
 
 
     @commands.command()
