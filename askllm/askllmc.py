@@ -285,7 +285,7 @@ class LLMManager(commands.Cog):
         await loop.run_in_executor(None, self._upsert_sync, tags, draft, "manual")
         await ctx.send(f"✅ Saved with tags: {tags}")
 
-        
+
     @commands.command(name="setvectorthreshold")
     @commands.has_permissions(administrator=True)
     async def setvectorthreshold(self, ctx: commands.Context, value: float):
@@ -446,62 +446,54 @@ class LLMManager(commands.Cog):
                 return self.q_client.search(**kwargs)
             raise
 
-
     async def _answer(self, question: str) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
-
-        # 1) Embed the user question
         q_vec = self._vec(question)
 
-        # 2) Try manual entries first (no forced keyword match)
-        manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
-        manual_hits = await loop.run_in_executor(None, lambda:
+        # 1) fetch manual entries first
+        manual = await loop.run_in_executor(None, lambda:
             self.q_client.search(
                 collection_name=self.collection,
                 query_vector=q_vec,
-                query_filter=manual_filter,
-                limit=10,
-                with_payload=True,
+                query_filter={"must":[{"key":"source","match":{"value":"manual"}}]},
+                limit=10, with_payload=True
+            )
+        )
+        hits = manual if manual else await loop.run_in_executor(None, lambda:
+            self.q_client.search(
+                collection_name=self.collection,
+                query_vector=q_vec,
+                limit=10, with_payload=True
             )
         )
 
-        # 3) If none, fall back to everything
-        if manual_hits:
-            hits = manual_hits
-        else:
-            hits = await loop.run_in_executor(None, lambda:
-                self.q_client.search(
-                    collection_name=self.collection,
-                    query_vector=q_vec,
-                    limit=10,
-                    with_payload=True,
-                )
-            )
-
-        # 4) Apply a cosine‐similarity cutoff
+        # 2) apply cosine cutoff
         vec_thr = await self.config.vector_threshold()
-        hits = [h for h in hits if (h.score or 0) >= vec_thr]
+        filtered = [h for h in hits if (h.score or 0.0) >= vec_thr]
 
-        if not hits:
+        # 3) if nothing passes threshold, fall back to unfiltered hits
+        chosen = filtered or hits
+
+        if not chosen:
             return "No relevant information found."
 
-        # 5) Remember for image‐sending
-        self._last_ranked_hits = hits
+        # remember for image-sending
+        self._last_ranked_hits = chosen
 
-        # 6) Build the LLM prompt
-        ctx = "\n\n".join(
-            " ".join(h.payload["content"].split()[:200]) for h in hits[:5]
+        # 4) build prompt with top 5 snippets
+        snippet = "\n\n".join(
+            " ".join(h.payload["content"].split()[:200])
+            for h in chosen[:5]
         )
         prompt = (
             "Use **only** the facts below to answer. If insufficient, say so.\n\n"
-            f"### Facts ###\n{ctx}\n\n"
+            f"### Facts ###\n{snippet}\n\n"
             f"### Question ###\n{question}\n\n"
             "### Answer ###"
         )
         api, model = await self.config.api_url(), await self.config.model()
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
-
 
     @commands.command(name="askllm")
     async def askllm_cmd(self, ctx, *, question: str):
@@ -509,22 +501,17 @@ class LLMManager(commands.Cog):
             ans = await self._answer(question)
         await ctx.send(ans)
 
-        # only send images whose entries overlap sufficiently
-        thr = await self.config.threshold()
+        # only send images for manual entries that were actually used
+        thr = await self.config.vector_threshold()
         for h in self._last_ranked_hits:
             if h.payload.get("source") != "manual":
                 continue
-            content = h.payload["content"]
-            # compute token overlap
-            ans_tokens = set(re.findall(r"\w+", ans.lower()))
-            ent_tokens = set(re.findall(r"\w+", content.lower()))
-            overlap = len(ans_tokens & ent_tokens) / (len(ent_tokens) or 1)
-            if overlap >= thr:
+            # Qdrant score already reflects cosine similarity
+            if (h.score or 0.0) >= thr:
                 for url in h.payload.get("images", []):
                     emb = discord.Embed()
                     emb.set_image(url=url)
                     await ctx.send(embed=emb)
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Auto-respond when mentioned or in configured channels."""
