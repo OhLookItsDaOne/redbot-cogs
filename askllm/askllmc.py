@@ -2,7 +2,7 @@
 
 import asyncio, glob, os, re, shutil, subprocess, uuid, json
 from typing import List
-
+import re
 import discord, requests
 from redbot.core import commands, Config
 from redbot.core.data_manager import cog_data_path
@@ -68,6 +68,29 @@ class LLMManager(commands.Cog):
 
     def _vec(self, txt: str) -> List[float]:
         return self.embedder.encode(txt).tolist()
+
+     # --------------------------------------------------------------------
+    # embedded images for qdrant entry (ersetzt deine zweite _upsert_sync)
+    # --------------------------------------------------------------------
+    def _upsert_sync(self, tag: str, content: str, source: str) -> int:
+        self._ensure_collection()
+        # 1) Alle Markdown-Links extrahieren
+        image_urls = re.findall(r'\[.*?\]\((https?://[^\s\)]+)\)', content)
+        # 2) Text ohne Link-Markup
+        text_only = re.sub(r'\[.*?\]\((https?://[^\s\)]+)\)', '', content).strip()
+        # 3) Vektor & Payload zusammenbauen
+        pid = uuid.uuid4().int & ((1 << 64) - 1)
+        vec = self._vec(f"{tag}. {tag}. {text_only}")
+        payload = {"tag": tag, "content": text_only, "source": source}
+        if image_urls:
+            payload["images"] = image_urls
+        # 4) Upsert
+        self.q_client.upsert(
+            self.collection,
+            [{"id": pid, "vector": vec, "payload": payload}],
+        )
+        return pid
+
 
     # --------------------------------------------------------------------
     # low‑level Qdrant helpers (sync → executor)
@@ -144,18 +167,6 @@ class LLMManager(commands.Cog):
         )
         await ctx.send(f"Collection **{self.collection}** recreated.")
 
-    def _upsert_sync(self, tag: str, content: str, source: str) -> int:
-        self._ensure_collection()
-        pid = uuid.uuid4().int & ((1 << 64) - 1)
-        vec = self._vec(f"{tag}. {tag}. {content}")  # tag doppelt → mehr Gewicht
-        self.q_client.upsert(
-            self.collection,
-            [{"id": pid,
-              "vector": vec,
-              "payload": {"tag": tag, "content": content, "source": source}}],
-        )
-        return pid
-
     def _collect_ids_sync(self, filt: dict) -> List[int]:
         ids, offset = [], None
         while True:
@@ -170,6 +181,71 @@ class LLMManager(commands.Cog):
             if offset is None:
                 break
         return ids
+
+    # --------------------------------------------------------------------
+    # Commands zum Hinzufügen/Entfernen/Bewegen von Bild-URLs
+    # --------------------------------------------------------------------
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowaddimg(self, ctx, doc_id: int, url: str):
+        """Fügt eine Bild-URL zum Payload eines Eintrags hinzu."""
+        await self.ensure_qdrant()
+        pts, _ = self.q_client.scroll(
+            self.collection,
+            with_payload=True,
+            scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]},
+            limit=1
+        )
+        if not pts:
+            return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
+        images = (pts[0].payload or {}).get("images", [])
+        if url in images:
+            return await ctx.send("URL ist bereits hinterlegt.")
+        images.append(url)
+        self.q_client.upsert(self.collection, [{"id": doc_id, "payload": {"images": images}}])
+        await ctx.send(f"Bild-URL hinzugefügt zu Eintrag {doc_id}.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def llmknowrmimg(self, ctx, doc_id: int, url: str):
+        """Entfernt eine Bild-URL aus einem bestehenden Eintrag."""
+        await self.ensure_qdrant()
+        pts, _ = self.q_client.scroll(
+            self.collection,
+            with_payload=True,
+            scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]},
+            limit=1
+        )
+        if not pts:
+            return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
+        images = (pts[0].payload or {}).get("images", [])
+        if url not in images:
+            return await ctx.send("URL nicht vorhanden.")
+        images.remove(url)
+        self.q_client.upsert(self.collection, [{"id": doc_id, "payload": {"images": images}}])
+        await ctx.send(f"Bild-URL entfernt von Eintrag {doc_id}.")
+
+    @commands.command(name="llmknowmvimg")
+    @commands.has_permissions(administrator=True)
+    async def llmknow_move_image(self, ctx, doc_id: int, from_pos: int, to_pos: int):
+        """Verschiebt eine Bild-URL innerhalb des Payloads eines Eintrags."""
+        await self.ensure_qdrant()
+        pts, _ = self.q_client.scroll(
+            self.collection,
+            with_payload=True,
+            scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]},
+            limit=1
+        )
+        if not pts:
+            return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
+        images = (pts[0].payload or {}).get("images", [])
+        if not (1 <= from_pos <= len(images)):
+            return await ctx.send(f"Ungültige from_pos: {from_pos}. Es gibt nur {len(images)} Bilder.")
+        url = images.pop(from_pos - 1)
+        to_pos = max(1, min(to_pos, len(images) + 1))
+        images.insert(to_pos - 1, url)
+        self.q_client.upsert(self.collection, [{"id": doc_id, "payload": {"images": images}}])
+        await ctx.send(f"Bild von Position {from_pos} nach {to_pos} verschoben.")
 
     # --------------------------------------------------------------------
     # knowledge‑management commands
@@ -452,6 +528,9 @@ class LLMManager(commands.Cog):
         except Exception:
             scores = [10] * len(hits)
         ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)[:5]
+        # Treffer merken, damit wir später die images holen können
+        self._last_ranked_hits = [h for h, _ in ranked]
+
 
         # ---------- (E) Token-Budget schonen: nur Top 5 & max. 200 Wörter ----------
         ctx = "\n\n".join(
@@ -476,31 +555,39 @@ class LLMManager(commands.Cog):
         async with ctx.typing():
             ans = await self._answer(question)
         await ctx.send(ans)
+        # Bilder aus den zuletzt gerankten Treffern
+        for h in getattr(self, "_last_ranked_hits", []):
+            for url in h.payload.get("images", []):
+                embed = discord.Embed()
+                embed.set_image(url=url)
+                await ctx.send(embed=embed)
+
 
     @commands.Cog.listener()
     async def on_message(self, m: discord.Message):
         if m.author.bot or not m.guild:
             return
-
         autolist = await self.config.auto_channels()
-        # 1) Erwähnung oder !askllm wie gehabt
         if self.bot.user.mentioned_in(m) or m.content.startswith("!askllm"):
             q = m.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
-        # 2) Auto-Reply-Kanäle: jede Nachricht als Frage
         elif m.channel.id in autolist:
             q = m.content.strip()
         else:
             return
-
         if not q:
             return
-
         try:
             async with m.channel.typing():
                 ans = await self._answer(q)
         except http.exceptions.ResponseHandlingException as e:
-            return await m.channel.send(f"⚠️ Could not connect to the specified Database: {e}")
+            return await m.channel.send(f"⚠️ Could not connect: {e}")
         await m.channel.send(ans)
+        # Bilder senden
+        for h in getattr(self, "_last_ranked_hits", []):
+            for url in h.payload.get("images", []):
+                embed = discord.Embed()
+                embed.set_image(url=url)
+                await m.channel.send(embed=embed)
 
     # --------------------------------------------------------------------
     # simple setters
