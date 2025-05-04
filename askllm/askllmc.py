@@ -184,24 +184,21 @@ class LLMManager(commands.Cog):
 
     # --------------------------------------------------------------------
     # Commands zum Hinzufügen/Entfernen/Bewegen von Bild-URLs
-    # --------------------------------------------------------------------
-    @commands.command()
+    # --------------------------------------------------------------------    @commands.command()
     @commands.has_permissions(administrator=True)
     async def llmknowaddimg(self, ctx, doc_id: int, url: str):
         """Fügt eine Bild-URL zum Payload eines Eintrags hinzu."""
         await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll(
-            self.collection,
-            with_payload=True,
-            scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]},
-            limit=1
-        )
+        # Punkt direkt per ID laden
+        pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
         if not pts:
             return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
-        images = (pts[0].payload or {}).get("images", [])
+        payload = pts[0].payload or {}
+        images = payload.get("images", [])
         if url in images:
             return await ctx.send("URL ist bereits hinterlegt.")
         images.append(url)
+        # Nur das images-Feld aktualisieren
         self.q_client.upsert(self.collection, [{"id": doc_id, "payload": {"images": images}}])
         await ctx.send(f"Bild-URL hinzugefügt zu Eintrag {doc_id}.")
 
@@ -210,15 +207,11 @@ class LLMManager(commands.Cog):
     async def llmknowrmimg(self, ctx, doc_id: int, url: str):
         """Entfernt eine Bild-URL aus einem bestehenden Eintrag."""
         await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll(
-            self.collection,
-            with_payload=True,
-            scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]},
-            limit=1
-        )
+        pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
         if not pts:
             return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
-        images = (pts[0].payload or {}).get("images", [])
+        payload = pts[0].payload or {}
+        images = payload.get("images", [])
         if url not in images:
             return await ctx.send("URL nicht vorhanden.")
         images.remove(url)
@@ -230,15 +223,11 @@ class LLMManager(commands.Cog):
     async def llmknow_move_image(self, ctx, doc_id: int, from_pos: int, to_pos: int):
         """Verschiebt eine Bild-URL innerhalb des Payloads eines Eintrags."""
         await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll(
-            self.collection,
-            with_payload=True,
-            scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]},
-            limit=1
-        )
+        pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
         if not pts:
             return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
-        images = (pts[0].payload or {}).get("images", [])
+        payload = pts[0].payload or {}
+        images = payload.get("images", [])
         if not (1 <= from_pos <= len(images)):
             return await ctx.send(f"Ungültige from_pos: {from_pos}. Es gibt nur {len(images)} Bilder.")
         url = images.pop(from_pos - 1)
