@@ -97,11 +97,9 @@ class LLMManager(commands.Cog):
         )
         return pid
 
-
-
-    # --------------------------------------------------------------------
-    # low‑level Qdrant helpers (sync → executor)
-    # --------------------------------------------------------------------
+# --------------------------------------------------------------------
+# low-level Qdrant helpers (sync → executor)
+# --------------------------------------------------------------------
     def _ensure_collection(self, force: bool = False):
         """Create / recreate collection so its vector-dim matches the embedder."""
         try:
@@ -129,6 +127,7 @@ class LLMManager(commands.Cog):
                     "field_schema": {
                         "tag": {"type": "keyword"},
                         "source": {"type": "keyword"},
+                        "content": {"type": "text"},   # jetzt auch Volltextsuche auf content
                     },
                 },
                 compression_config={
@@ -136,6 +135,7 @@ class LLMManager(commands.Cog):
                     "params": {"segments": 8, "subvector_size": 2},
                 },
             )
+
     # --------------------------------------------------------------------
     # collection reset
     # --------------------------------------------------------------------
@@ -550,15 +550,16 @@ class LLMManager(commands.Cog):
     # safe search (handles dim‑errors)
     # --------------------------------------------------------------------
     def _safe_search(self, *args, **kwargs):
+    # erzwinge immer payload!
+        kwargs.setdefault("with_payload", True)
         try:
             return self.q_client.search(*args, **kwargs)
         except http.exceptions.UnexpectedResponse as e:
             if "Vector dimension error" in str(e):
-                # recreate collection & try again
                 self._ensure_collection(force=True)
                 return self.q_client.search(*args, **kwargs)
             raise
-        
+
     # --------------------------------------------------------------------
     # main Q&A
     # --------------------------------------------------------------------
@@ -617,25 +618,44 @@ class LLMManager(commands.Cog):
         )
         # --------------------------------------------------------------
 
-        # ---------- (C) Manual-Vektor-Suche nur in passenden Manual-Einträgen-------
+        # ---------- (C)  Manual Retrieval (Vector + Tag) -----------------
         # Basisfilter: nur source="manual"
         manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
-        # Wenn wir Keywords haben, füge die Schlagwort-Bedingungen hinzu
-        if tag_filter:
-            manual_filter["should"] = tag_filter["should"]
 
+        # (1) Vector-Suche innerhalb der manuellen Einträge
         manual_vec_hits = self._safe_search(
             self.collection,
             query_vector=self._vec(aug_q),
             limit=20,
             query_filter=manual_filter,
         )
-        if manual_vec_hits:
-            hits = manual_vec_hits
-        else:
-            # Wiki-Fallback wie gehabt …
 
-            # Wiki-Fallback: Keyword-Filter
+        # (2) Tag-/Keyword-Filter auf dieselben manuellen Einträge
+        manual_tag_hits = []
+        if tag_filter:
+            # wir fügen die Schlagwort-Bedingungen als "should" hinzu, bleiben aber in source=manual
+            combined_filter = {
+                "must": manual_filter["must"],
+                "should": tag_filter["should"],
+            }
+            manual_tag_hits, _ = self.q_client.scroll(
+                self.collection,
+                with_payload=True,
+                limit=20,
+                scroll_filter=combined_filter,
+            )
+
+        # (3) Beide Ergebnisse zusammenführen (ohne Duplikate)
+        manual_dict: dict[int, Any] = {h.id: h for h in manual_vec_hits}
+        for h in manual_tag_hits:
+            manual_dict.setdefault(h.id, h)
+        manual_hits = list(manual_dict.values())
+
+        # Wenn wir manuelle Ergebnisse haben, nehmen wir nur diese
+        if manual_hits:
+            hits = manual_hits
+        else:
+            # Wiki-Fallback: wie gehabt…
             tag_hits = []
             if tag_filter:
                 tag_hits, _ = self.q_client.scroll(
@@ -644,17 +664,16 @@ class LLMManager(commands.Cog):
                     limit=20,
                     scroll_filter=tag_filter,
                 )
-            # Wiki-Fallback: Vector-Suche
             vec_hits = self._safe_search(
                 self.collection,
                 query_vector=self._vec(aug_q),
                 limit=20,
             )
-            # Merge Wiki-Treffer
             hit_dict = {h.id: h for h in vec_hits}
             for h in tag_hits + bm25_hits:
                 hit_dict.setdefault(h.id, h)
             hits = list(hit_dict.values())
+        # --------------------------------------------------------------
 
         if not hits:
             return "No relevant information found."
