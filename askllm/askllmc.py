@@ -197,10 +197,11 @@ class LLMManager(commands.Cog):
         if url in images:
             return await ctx.send("URL ist bereits hinterlegt.")
         images.append(url)
-        # Nur das images-Feld updaten (nicht upsert, da Vector fehlt)
-        self.q_client.update(
-            self.collection,
-            points=[{"id": doc_id, "payload": {"images": images}}],
+        # Nur das images-Feld aktualisieren
+        self.q_client.set_payload(
+            collection_name=self.collection,
+            payload={"images": images},
+            points=[doc_id],
         )
         await ctx.send(f"Bild-URL hinzugefügt zu Eintrag {doc_id}.")
 
@@ -217,9 +218,10 @@ class LLMManager(commands.Cog):
         if url not in images:
             return await ctx.send("URL nicht vorhanden.")
         images.remove(url)
-        self.q_client.update(
-            self.collection,
-            points=[{"id": doc_id, "payload": {"images": images}}],
+        self.q_client.set_payload(
+            collection_name=self.collection,
+            payload={"images": images},
+            points=[doc_id],
         )
         await ctx.send(f"Bild-URL entfernt von Eintrag {doc_id}.")
 
@@ -238,9 +240,10 @@ class LLMManager(commands.Cog):
         url = images.pop(from_pos - 1)
         to_pos = max(1, min(to_pos, len(images) + 1))
         images.insert(to_pos - 1, url)
-        self.q_client.update(
-            self.collection,
-            points=[{"id": doc_id, "payload": {"images": images}}],
+        self.q_client.set_payload(
+            collection_name=self.collection,
+            payload={"images": images},
+            points=[doc_id],
         )
         await ctx.send(f"Bild von Position {from_pos} nach {to_pos} verschoben.")
 
