@@ -184,9 +184,17 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Show stored entries (chunked ≤ 2000 chars)."""
+        """Show stored entries (chunked ≤2000 chars)."""
         await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
+        try:
+            pts, _ = self.q_client.scroll(
+                self.collection,
+                with_payload=True,
+                limit=1000
+            )
+        except http.exceptions.ResponseHandlingException as e:
+            await ctx.send(f"⚠️ Fehler: Verbindung zu Qdrant fehlgeschlagen: {e}")
+            return
         if not pts:
             return await ctx.send("No knowledge entries stored.")
         hdr, ftr, maxlen = "```\n", "```", 2000
@@ -196,12 +204,14 @@ class LLMManager(commands.Cog):
             snip = pl.get("content", "")[:280].replace("\n", " ")
             line = f"[{p.id}] ({pl.get('tag','NoTag')},{pl.get('source','?')}): {snip}\n"
             if len(cur) + len(line) > maxlen - len(ftr):
-                chunks.append(cur + ftr); cur = hdr + line
+                chunks.append(cur + ftr)
+                cur = hdr + line
             else:
                 cur += line
         chunks.append(cur + ftr)
         for c in chunks:
             await ctx.send(c)
+
 
     @commands.command()
     async def llmknowdelete(self, ctx, doc_id: int):
@@ -409,9 +419,14 @@ class LLMManager(commands.Cog):
         if self.bot.user.mentioned_in(m):
             q = m.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
             if q:
-                async with m.channel.typing():
-                    ans = await self._answer(q)
+                try:
+                    async with m.channel.typing():
+                        ans = await self._answer(q)
+                except http.exceptions.ResponseHandlingException as e:
+                    await m.channel.send(f"⚠️ Couldnt connect to DB: {e}")
+                    return
                 await m.channel.send(ans)
+
 
     # --------------------------------------------------------------------
     # simple setters
