@@ -96,7 +96,6 @@ class LLMManager(commands.Cog):
             [{"id": pid, "vector": vec, "payload": payload}],
         )
         return pid
-
 # --------------------------------------------------------------------
 # low-level Qdrant helpers (sync → executor)
 # --------------------------------------------------------------------
@@ -135,6 +134,7 @@ class LLMManager(commands.Cog):
                     "params": {"segments": 8, "subvector_size": 2},
                 },
             )
+
 
     # --------------------------------------------------------------------
     # collection reset
