@@ -317,15 +317,28 @@ class LLMManager(commands.Cog):
         # --- BM25-Retrieval aufbauen (einmal) und ausführen ---
         if self.bm25 is None:
             pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=10000)
-            docs = [p.payload.get("content", "") for p in pts]
-            tokenized = [doc.lower().split() for doc in docs]
-            self.bm25 = BM25Okapi(tokenized)
-            self._bm25_pts = pts
-
-        tokenized_q = question.lower().split()
-        bm25_scores = self.bm25.get_scores(tokenized_q)
-        top_bm25 = sorted(zip(self._bm25_pts, bm25_scores), key=lambda x: x[1], reverse=True)[:20]
-        bm25_hits = [p for p, _ in top_bm25]
+            if not pts:
+                # Keine Dokumente in der DB → BM25 überspringen
+                bm25_hits = []
+            else:
+                docs = [p.payload.get("content", "") for p in pts]
+                tokenized = [doc.lower().split() for doc in docs]
+                try:
+                    self.bm25 = BM25Okapi(tokenized)
+                    self._bm25_pts = pts
+                except ZeroDivisionError:
+                    # Corpus war leer oder fehlerhaft
+                    self.bm25 = None
+                    bm25_hits = []
+                else:
+                    tokenized_q = question.lower().split()
+                    bm25_scores = self.bm25.get_scores(tokenized_q)
+                    top_bm25 = sorted(
+                        zip(self._bm25_pts, bm25_scores),
+                        key=lambda x: x[1],
+                        reverse=True
+                    )[:20]
+                    bm25_hits = [p for p, _ in top_bm25]
 
         # ---------- (A) Heuristische Query‑Erweiterung -----------------
         aug_q = question
