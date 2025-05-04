@@ -605,7 +605,6 @@ class LLMManager(commands.Cog):
         if "virtual" in ql and "desktop" in ql and "resolution" not in ql:
             aug_q += " resolution"
         # --------------------------------------------------------------
-
         # ---------- (B) Keyword- / Tag-Filter -------------------------
         clean_q = re.sub(r"[^\w\s]", " ", aug_q.lower())
         kws = [w for w in clean_q.split() if len(w) > 2]
@@ -618,8 +617,13 @@ class LLMManager(commands.Cog):
         )
         # --------------------------------------------------------------
 
-        # ---------- (C) Manual-Vektor-Suche ---------------------------
+        # ---------- (C) Manual-Vektor-Suche nur in passenden Manual-Einträgen-------
+        # Basisfilter: nur source="manual"
         manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
+        # Wenn wir Keywords haben, füge die Schlagwort-Bedingungen hinzu
+        if tag_filter:
+            manual_filter["should"] = tag_filter["should"]
+
         manual_vec_hits = self._safe_search(
             self.collection,
             query_vector=self._vec(aug_q),
@@ -629,6 +633,8 @@ class LLMManager(commands.Cog):
         if manual_vec_hits:
             hits = manual_vec_hits
         else:
+            # Wiki-Fallback wie gehabt …
+
             # Wiki-Fallback: Keyword-Filter
             tag_hits = []
             if tag_filter:
