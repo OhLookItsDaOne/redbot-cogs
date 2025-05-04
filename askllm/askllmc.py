@@ -51,7 +51,7 @@ class LLMManager(commands.Cog):
         self.collection = "fus_wiki"
         self.embedder = SentenceTransformer("all-mpnet-base-v2")
         self.vec_dim = self.embedder.get_sentence_embedding_dimension()
-
+        self.overlap_weight = 0.4  # Anteil, den Wort‑Überlappung am Gesamtscore hat
         self.q_client: QdrantClient | None = None
         self.bm25: BM25Okapi | None = None
         self._bm25_pts: List = []
@@ -313,12 +313,10 @@ class LLMManager(commands.Cog):
         await self.config.vector_threshold.set(value)
         await ctx.send(f"✅ Vector threshold set to {value:.0%}")
 
-
     async def _answer(self, question: str, context: str | None = None) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
 
-        # ----------------  Vektor basiert auf Frage *plus* Verlauf  ------------
         query_text = f"{context}\n{question}" if context else question
         q_vec = await loop.run_in_executor(None, self._vec, query_text)
 
@@ -327,20 +325,18 @@ class LLMManager(commands.Cog):
             lambda: self.q_client.search(
                 collection_name=self.collection,
                 query_vector=q_vec,
-                limit=20,
+                limit=40,                # etwas breiter suchen
                 with_payload=True,
             ),
         )
 
-        # manuellen Einträgen kleines Bonus‑Rating geben
-        boosted = sorted(
-            raw_hits,
-            key=lambda h: (h.score or 0.0)
-            + (0.1 if h.payload.get("source") == "manual" else 0.0),
-            reverse=True,
-        )
+        def _rank(hit):
+            base = hit.score or 0.0
+            overlap = self._token_overlap(query_text, hit.payload.get("content", ""))
+            bonus = 0.1 if hit.payload.get("source") == "manual" else 0.0
+            return base + overlap * self.overlap_weight + bonus
 
-        chosen = boosted[:5]
+        chosen = sorted(raw_hits, key=_rank, reverse=True)[:5]
         self._last_ranked_hits = chosen
         if not chosen:
             return "No relevant information found."
@@ -534,7 +530,7 @@ class LLMManager(commands.Cog):
             if hit.payload.get("source") == "manual" and (hit.score or 0.0) >= thr:
                 for url in hit.payload.get("images", []):
                     await ctx.send(embed=discord.Embed().set_image(url=url))
-                    
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Auto‑Antwort, falls erwähnt oder Kanal auf Auto steht – mit Verlauf."""
