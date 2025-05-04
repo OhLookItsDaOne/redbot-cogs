@@ -285,6 +285,19 @@ class LLMManager(commands.Cog):
         await loop.run_in_executor(None, self._upsert_sync, tags, draft, "manual")
         await ctx.send(f"✅ Saved with tags: {tags}")
 
+        
+    @commands.command(name="setvectorthreshold")
+    @commands.has_permissions(administrator=True)
+    async def setvectorthreshold(self, ctx: commands.Context, value: float):
+        """
+        Set the vector‐similarity threshold for retrieving entries.
+        Usage: !setvectorthreshold 0.2  (value between 0.0 and 1.0)
+        """
+        if not 0.0 <= value <= 1.0:
+            return await ctx.send("⚠️ Threshold must be between 0.0 and 1.0")
+        await self.config.vector_threshold.set(value)
+        await ctx.send(f"✅ Vector similarity threshold set to {value:.0%}")
+
     @commands.command()
     async def llmknow(self, ctx: commands.Context, tag: str, *, content: str):
         """Add a manual knowledge entry."""
@@ -438,58 +451,47 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
 
-        # build keyword list
-        clean = re.sub(r"[^\w\s]", " ", question.lower())
-        kws = [w for w in clean.split() if len(w) > 2]
+        # 1) Embed the user question
+        q_vec = self._vec(question)
 
-        # manual-only vector search + require at least one keyword match
+        # 2) Try manual entries first (no forced keyword match)
         manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
-        if kws:
-            manual_filter["must"].append({
-                "should": [
-                    *({"key": "tag",     "match": {"value": k}} for k in kws),
-                    *({"key": "content", "match": {"value": k}} for k in kws),
-                ]
-            })
-
         manual_hits = await loop.run_in_executor(None, lambda:
             self.q_client.search(
                 collection_name=self.collection,
-                query_vector=self._vec(question),
+                query_vector=q_vec,
                 query_filter=manual_filter,
-                limit=5,
+                limit=10,
                 with_payload=True,
             )
         )
 
-        # fallback only to wiki entries if no manual hits
+        # 3) If none, fall back to everything
         if manual_hits:
             hits = manual_hits
         else:
-            wiki_filter = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
             hits = await loop.run_in_executor(None, lambda:
                 self.q_client.search(
                     collection_name=self.collection,
-                    query_vector=self._vec(question),
-                    query_filter=wiki_filter,
-                    limit=5,
+                    query_vector=q_vec,
+                    limit=10,
                     with_payload=True,
                 )
             )
 
-        # drop any hit whose cosine‐score is below our threshold
+        # 4) Apply a cosine‐similarity cutoff
         vec_thr = await self.config.vector_threshold()
-        hits = [h for h in hits if getattr(h, "score", 0) >= vec_thr]
+        hits = [h for h in hits if (h.score or 0) >= vec_thr]
 
         if not hits:
             return "No relevant information found."
 
-        # remember for image‐sending
+        # 5) Remember for image‐sending
         self._last_ranked_hits = hits
 
-        # assemble the LLM prompt
+        # 6) Build the LLM prompt
         ctx = "\n\n".join(
-            " ".join(h.payload["content"].split()[:200]) for h in hits
+            " ".join(h.payload["content"].split()[:200]) for h in hits[:5]
         )
         prompt = (
             "Use **only** the facts below to answer. If insufficient, say so.\n\n"
@@ -500,14 +502,6 @@ class LLMManager(commands.Cog):
         api, model = await self.config.api_url(), await self.config.model()
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
 
-    def _token_overlap(self, answer: str, entry: str) -> float:
-        """Compute fraction of entry-tokens that appear in the answer."""
-        ans_tokens = set(re.findall(r"\w+", answer.lower()))
-        ent_tokens = set(re.findall(r"\w+", entry.lower()))
-        if not ent_tokens:
-            return 0.0
-        return len(ans_tokens & ent_tokens) / len(ent_tokens)
-
 
     @commands.command(name="askllm")
     async def askllm_cmd(self, ctx, *, question: str):
@@ -515,17 +509,21 @@ class LLMManager(commands.Cog):
             ans = await self._answer(question)
         await ctx.send(ans)
 
+        # only send images whose entries overlap sufficiently
         thr = await self.config.threshold()
-        for hit in self._last_ranked_hits:
-            if hit.payload.get("source") != "manual":
+        for h in self._last_ranked_hits:
+            if h.payload.get("source") != "manual":
                 continue
-            entry = hit.payload.get("content", "")
-            if self._token_overlap(ans, entry) >= thr:
-                for url in hit.payload.get("images", []):
+            content = h.payload["content"]
+            # compute token overlap
+            ans_tokens = set(re.findall(r"\w+", ans.lower()))
+            ent_tokens = set(re.findall(r"\w+", content.lower()))
+            overlap = len(ans_tokens & ent_tokens) / (len(ent_tokens) or 1)
+            if overlap >= thr:
+                for url in h.payload.get("images", []):
                     emb = discord.Embed()
                     emb.set_image(url=url)
                     await ctx.send(embed=emb)
-
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
