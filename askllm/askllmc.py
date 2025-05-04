@@ -357,7 +357,7 @@ class LLMManager(commands.Cog):
 
     @commands.command()
     async def llmknowshow(self, ctx):
-        """Show stored entries (chunked ≤2000 chars)."""
+        """Show stored entries (chunked ≤2000 chars), including any image URLs."""
         await self.ensure_qdrant()
         try:
             pts, _ = self.q_client.scroll(
@@ -366,7 +366,7 @@ class LLMManager(commands.Cog):
                 limit=1000
             )
         except http.exceptions.ResponseHandlingException as e:
-            await ctx.send(f"⚠️ Fehler: Verbindung zu Qdrant fehlgeschlagen: {e}")
+            await ctx.send(f"⚠️ Error: Connection to database failed!: {e}")
             return
         if not pts:
             return await ctx.send("No knowledge entries stored.")
@@ -374,8 +374,13 @@ class LLMManager(commands.Cog):
         cur, chunks = hdr, []
         for p in pts:
             pl = p.payload or {}
-            snip = pl.get("content", "")[:280].replace("\n", " ")
-            line = f"[{p.id}] ({pl.get('tag','NoTag')},{pl.get('source','?')}): {snip}\n"
+            snip = pl.get("content", "")[:200].replace("\n", " ")
+            line = f"[{p.id}] ({pl.get('tag','NoTag')},{pl.get('source','?')}): {snip}"
+            images = pl.get("images", [])
+            if images:
+                # make images clearly visible
+                line += "\n  → Images: " + ", ".join(images)
+            line += "\n"
             if len(cur) + len(line) > maxlen - len(ftr):
                 chunks.append(cur + ftr)
                 cur = hdr + line
@@ -384,6 +389,39 @@ class LLMManager(commands.Cog):
         chunks.append(cur + ftr)
         for c in chunks:
             await ctx.send(c)
+
+    @commands.command(name="llmknowclearimgs")
+    @commands.has_permissions(administrator=True)
+    async def llmknowclearimgs(self, ctx, doc_id: int = None):
+        """
+        Clears all image URLs from a specific entry or from all entries if no ID given.
+        Usage: !llmknowclearimgs [doc_id]
+        """
+        await self.ensure_qdrant()
+        if doc_id:
+            pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
+            if not pts:
+                return await ctx.send(f"Entry {doc_id} not found.")
+            # remove images field
+            self.q_client.set_payload(
+                collection_name=self.collection,
+                payload={"images": []},
+                points=[doc_id],
+            )
+            await ctx.send(f"🔄 removed all pictures from {doc_id}.")
+        else:
+            # find all points with images
+            all_pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=1000)
+            ids_to_clear = [p.id for p in all_pts if p.payload and p.payload.get("images")]
+            if not ids_to_clear:
+                return await ctx.send("No entries with images found.")
+            for pid in ids_to_clear:
+                self.q_client.set_payload(
+                    collection_name=self.collection,
+                    payload={"images": []},
+                    points=[pid],
+                )
+            await ctx.send(f"🔄 Images from {len(ids_to_clear)} removed.")
 
 
     @commands.command()
