@@ -376,14 +376,19 @@ class LLMManager(commands.Cog):
 
         query_text = f"{context}\n{question}" if context else question
         q_vec = await loop.run_in_executor(None, self._vec, query_text)
-
-        # ---------- 1) TAG‑FIRST search -------------------------------------
+# ---------- 1) TAG‑FIRST search -------------------------------------
         tags = self._guess_tags(question)
-        filt = (
-            {"must": [{"key": "tag", "match_any": {"any": tags}}]}
-            if tags
-            else None
-        )
+
+        filt = None
+        if tags:
+            # one FieldCondition per tag, OR‑verknüpft
+            filt = {
+                "should": [
+                    {"key": "tag", "match": {"value": t}}
+                    for t in tags
+                ],
+                "minimum_should_match": 1,
+            }
 
         hits = await loop.run_in_executor(
             None,
@@ -392,9 +397,10 @@ class LLMManager(commands.Cog):
                 query_vector=q_vec,
                 limit=40,
                 with_payload=True,
-                query_filter=filt,
+                query_filter=filt,      # or `filter=filt` depending on your client version
             ),
         )
+
 
         # fallback to plain vector search if tag filter returned nothing
         if not hits and filt:
