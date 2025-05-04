@@ -45,6 +45,7 @@ class LLMManager(commands.Cog):
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
+            auto_channels=[]
         )
 
         self.collection = "fus_wiki"
@@ -240,6 +241,40 @@ class LLMManager(commands.Cog):
         self._last_manual_id = None
 
     # --------------------------------------------------------------------
+    # Autochannel
+    # --------------------------------------------------------------------
+    @commands.command(name="addautochannel")
+    @commands.has_permissions(administrator=True)
+    async def add_auto_channel(self, ctx, channel: discord.TextChannel):
+        """Fügt einen Channel zur Liste hinzu, in dem der Bot automatisch antwortet."""
+        chans = await self.config.auto_channels()
+        if channel.id in chans:
+            return await ctx.send(f"{channel.mention} ist bereits registriert.")
+        chans.append(channel.id)
+        await self.config.auto_channels.set(chans)
+        await ctx.send(f"{channel.mention} wurde zur Auto-Reply-Liste hinzugefügt.")
+
+    @commands.command(name="removeautochannel")
+    @commands.has_permissions(administrator=True)
+    async def remove_auto_channel(self, ctx, channel: discord.TextChannel):
+        """Entfernt einen Channel aus der Auto-Reply-Liste."""
+        chans = await self.config.auto_channels()
+        if channel.id not in chans:
+            return await ctx.send(f"{channel.mention} war nicht registriert.")
+        chans.remove(channel.id)
+        await self.config.auto_channels.set(chans)
+        await ctx.send(f"{channel.mention} wurde aus der Liste entfernt.")
+
+    @commands.command(name="listautochannels")
+    async def list_auto_channels(self, ctx):
+        """Zeigt alle Channels, in denen der Bot automatisch antwortet."""
+        chans = await self.config.auto_channels()
+        if not chans:
+            return await ctx.send("Keine Auto-Reply-Channels konfiguriert.")
+        mentions = [f"<#{cid}>" for cid in chans]
+        await ctx.send("Auto-Reply aktiv in: " + ", ".join(mentions))
+
+    # --------------------------------------------------------------------
     # GitHub‑Wiki import  (unchanged)
     # --------------------------------------------------------------------
     @commands.command()
@@ -307,6 +342,7 @@ class LLMManager(commands.Cog):
                 self._ensure_collection(force=True)
                 return self.q_client.search(*args, **kwargs)
             raise
+        
     # --------------------------------------------------------------------
     # main Q&A
     # --------------------------------------------------------------------
@@ -445,17 +481,26 @@ class LLMManager(commands.Cog):
     async def on_message(self, m: discord.Message):
         if m.author.bot or not m.guild:
             return
-        if self.bot.user.mentioned_in(m):
-            q = m.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
-            if q:
-                try:
-                    async with m.channel.typing():
-                        ans = await self._answer(q)
-                except http.exceptions.ResponseHandlingException as e:
-                    await m.channel.send(f"⚠️ Couldnt connect to DB: {e}")
-                    return
-                await m.channel.send(ans)
 
+        autolist = await self.config.auto_channels()
+        # 1) Erwähnung oder !askllm wie gehabt
+        if self.bot.user.mentioned_in(m) or m.content.startswith("!askllm"):
+            q = m.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
+        # 2) Auto-Reply-Kanäle: jede Nachricht als Frage
+        elif m.channel.id in autolist:
+            q = m.content.strip()
+        else:
+            return
+
+        if not q:
+            return
+
+        try:
+            async with m.channel.typing():
+                ans = await self._answer(q)
+        except http.exceptions.ResponseHandlingException as e:
+            return await m.channel.send(f"⚠️ Could not connect to the specified Database: {e}")
+        await m.channel.send(ans)
 
     # --------------------------------------------------------------------
     # simple setters
