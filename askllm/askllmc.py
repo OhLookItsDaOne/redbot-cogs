@@ -17,7 +17,6 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient, http
 from rank_bm25 import BM25Okapi
 
-
 def _ensure_pkg(mod: str, pip_name: str | None = None):
     """Install missing PyPI packages on-the-fly (safe in Docker)."""
     try:
@@ -38,7 +37,7 @@ _ensure_pkg("rank_bm25")
 
 class LLMManager(commands.Cog):
     """Interact with a local Ollama LLM through a Qdrant knowledge base."""
-
+    THRESHOLD = 0.6  # 60 %
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210123)
@@ -488,20 +487,34 @@ class LLMManager(commands.Cog):
         api, model = await self.config.api_url(), await self.config.model()
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
 
+
+    def _token_overlap(self, answer: str, entry: str) -> float:
+        """Compute fraction of entry-tokens that appear in the answer."""
+        ans_tokens = set(re.findall(r"\w+", answer.lower()))
+        ent_tokens = set(re.findall(r"\w+", entry.lower()))
+        if not ent_tokens:
+            return 0.0
+        return len(ans_tokens & ent_tokens) / len(ent_tokens)
+
+
     @commands.command(name="askllm")
-    async def askllm_cmd(self, ctx: commands.Context, *, question: str):
-        """Explicit command to ask the LLM."""
+    async def askllm_cmd(self, ctx, *, question: str):
         async with ctx.typing():
             ans = await self._answer(question)
         await ctx.send(ans)
-        # only attach images for manual entries that were actually used
-        for h in self._last_ranked_hits:
-            if h.payload.get("source") != "manual":
+
+        # nur Bilder der tatsächlich relevanten Hits senden
+        for hit in self._last_ranked_hits:
+            if hit.payload.get("source") != "manual":
                 continue
-            for url in h.payload.get("images", []):
-                emb = discord.Embed()
-                emb.set_image(url=url)
-                await ctx.send(embed=emb)
+            entry_text = hit.payload.get("content", "")
+            score = self._token_overlap(ans, entry_text)
+            if score >= self.THRESHOLD:
+                for url in hit.payload.get("images", []):
+                    emb = discord.Embed()
+                    emb.set_image(url=url)
+                    await ctx.send(embed=emb)
+
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -523,14 +536,17 @@ class LLMManager(commands.Cog):
         async with message.channel.typing():
             ans = await self._answer(q)
         await message.channel.send(ans)
-        for h in self._last_ranked_hits:
-            if h.payload.get("source") != "manual":
-                continue
-            for url in h.payload.get("images", []):
-                emb = discord.Embed()
-                emb.set_image(url=url)
-                await message.channel.send(embed=emb)
 
+        for hit in self._last_ranked_hits:
+            if hit.payload.get("source") != "manual":
+                continue
+            entry = hit.payload.get("content", "")
+            if self._token_overlap(ans, entry) >= self.THRESHOLD:
+                for url in hit.payload.get("images", []):
+                    emb = discord.Embed()
+                    emb.set_image(url=url)
+                    await message.channel.send(embed=emb)
+                    
     @commands.command()
     async def setmodel(self, ctx: commands.Context, model: str):
         """Set the Ollama model name."""
