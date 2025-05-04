@@ -45,6 +45,7 @@ class LLMManager(commands.Cog):
             qdrant_url="http://192.168.10.5:6333",
             auto_channels=[],
             threshold=0.6,  # default token‐overlap threshold
+            vector_threshold=0.3,
         )
 
         self.collection = "fus_wiki"
@@ -432,59 +433,61 @@ class LLMManager(commands.Cog):
                 return self.q_client.search(**kwargs)
             raise
 
+
     async def _answer(self, question: str) -> str:
-        """Retrieve and rank relevant snippets, then ask the LLM to answer."""
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
 
-        # 1) Heuristic expansion
-        aug = question
-        ql = question.lower()
-        if "virtual" in ql and "desktop" in ql and "resolution" not in ql:
-            aug += " resolution"
-
-        # 2) Build keyword list
-        clean = re.sub(r"[^\w\s]", " ", aug.lower())
+        # build keyword list
+        clean = re.sub(r"[^\w\s]", " ", question.lower())
         kws = [w for w in clean.split() if len(w) > 2]
 
-        # 3) Manual-only vector search + keyword boost
+        # manual-only vector search + require at least one keyword match
         manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
         if kws:
-            manual_filter["should"] = [
-                *({"key": "tag",     "match": {"value": k}} for k in kws),
-                *({"key": "content", "match": {"value": k}} for k in kws),
-            ]
-        manual_hits = await loop.run_in_executor(
-            None,
-            lambda: self.q_client.search(
+            manual_filter["must"].append({
+                "should": [
+                    *({"key": "tag",     "match": {"value": k}} for k in kws),
+                    *({"key": "content", "match": {"value": k}} for k in kws),
+                ]
+            })
+
+        manual_hits = await loop.run_in_executor(None, lambda:
+            self.q_client.search(
                 collection_name=self.collection,
-                query_vector=self._vec(aug),
+                query_vector=self._vec(question),
                 query_filter=manual_filter,
                 limit=5,
                 with_payload=True,
-            ),
+            )
         )
 
+        # fallback only to wiki entries if no manual hits
         if manual_hits:
             hits = manual_hits
         else:
-            # fallback to full vector search
-            hits = await loop.run_in_executor(
-                None,
-                lambda: self.q_client.search(
+            wiki_filter = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
+            hits = await loop.run_in_executor(None, lambda:
+                self.q_client.search(
                     collection_name=self.collection,
-                    query_vector=self._vec(aug),
+                    query_vector=self._vec(question),
+                    query_filter=wiki_filter,
                     limit=5,
                     with_payload=True,
-                ),
+                )
             )
+
+        # drop any hit whose cosine‐score is below our threshold
+        vec_thr = await self.config.vector_threshold()
+        hits = [h for h in hits if getattr(h, "score", 0) >= vec_thr]
 
         if not hits:
             return "No relevant information found."
 
+        # remember for image‐sending
         self._last_ranked_hits = hits
 
-        # 4) Build the LLM prompt
+        # assemble the LLM prompt
         ctx = "\n\n".join(
             " ".join(h.payload["content"].split()[:200]) for h in hits
         )
@@ -496,7 +499,6 @@ class LLMManager(commands.Cog):
         )
         api, model = await self.config.api_url(), await self.config.model()
         return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
-
 
     def _token_overlap(self, answer: str, entry: str) -> float:
         """Compute fraction of entry-tokens that appear in the answer."""
