@@ -66,6 +66,25 @@ class LLMManager(commands.Cog):
     def _vec(self, txt: str) -> List[float]:
         return self.embedder.encode(txt).tolist()
 
+    async def _get_recent_context(
+        self,
+        channel: discord.TextChannel,
+        *,
+        before: discord.Message | None = None,
+        n: int = 3,
+    ) -> str:
+        """Gibt bis zu `n` letzte *menschliche* Nachrichten als String zurück."""
+        lines: list[str] = []
+        async for m in channel.history(limit=n * 4, before=before):
+            if m.author.bot:
+                continue
+            lines.append(m.content.strip())
+            if len(lines) >= n:
+                break
+        lines.reverse()                     # chronologische Reihenfolge
+        return "\n".join(lines)
+
+
     def _upsert_sync(self, tag: str, content: str, source: str) -> int:
         """Insert a new knowledge entry, extracting any inline images."""
         self._ensure_collection()
@@ -294,36 +313,39 @@ class LLMManager(commands.Cog):
         await self.config.vector_threshold.set(value)
         await ctx.send(f"✅ Vector threshold set to {value:.0%}")
 
-    async def _answer(self, question: str) -> str:
+
+    async def _answer(self, question: str, context: str | None = None) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
-        q_vec = self._vec(question)
 
-        # 1) Broad vector search across all entries
-        raw_hits = await loop.run_in_executor(None, lambda:
-            self.q_client.search(
+        # ----------------  Vektor basiert auf Frage *plus* Verlauf  ------------
+        query_text = f"{context}\n{question}" if context else question
+        q_vec = await loop.run_in_executor(None, self._vec, query_text)
+
+        raw_hits = await loop.run_in_executor(
+            None,
+            lambda: self.q_client.search(
                 collection_name=self.collection,
                 query_vector=q_vec,
                 limit=20,
-                with_payload=True
-            )
+                with_payload=True,
+            ),
         )
 
-        # 2) Boost manual entries
+        # manuellen Einträgen kleines Bonus‑Rating geben
         boosted = sorted(
             raw_hits,
-            key=lambda h: (h.score or 0.0) + (0.1 if h.payload.get("source")=="manual" else 0.0),
-            reverse=True
+            key=lambda h: (h.score or 0.0)
+            + (0.1 if h.payload.get("source") == "manual" else 0.0),
+            reverse=True,
         )
 
-        # 3) Keep top-5 *regardless* of threshold for answering
         chosen = boosted[:5]
         self._last_ranked_hits = chosen
         if not chosen:
             return "No relevant information found."
 
-        # 4) Build a prompt that *numbers* each snippet
-        facts = "\n\n".join(f"#{i}\n{h.payload['content']}" for i,h in enumerate(chosen))
+        facts = "\n\n".join(f"#{i}\n{h.payload['content']}" for i, h in enumerate(chosen))
         prompt = (
             "Below are numbered facts. Answer the question using ONLY these facts.\n"
             "At the end, list which fact indices you used, e.g. Used: [#0,#2].\n\n"
@@ -332,8 +354,9 @@ class LLMManager(commands.Cog):
             "### Answer ###"
         )
         api, model = await self.config.api_url(), await self.config.model()
-        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
-
+        return await loop.run_in_executor(
+            None, self._ollama_chat_sync, api, model, prompt
+        )
 
     @commands.command()
     async def llmknow(self, ctx: commands.Context, tag: str, *, content: str):
@@ -492,35 +515,37 @@ class LLMManager(commands.Cog):
         if not tb:
             return 0.0
         return len(ta & tb) / len(tb)
-
+    
     @commands.command(name="askllm")
-    async def askllm_cmd(self, ctx, *, question: str):
+    async def askllm_cmd(self, ctx: commands.Context, *, question: str):
+        ctx_txt = await self._get_recent_context(ctx.channel, before=ctx.message)
         async with ctx.typing():
-            ans = await self._answer(question)
+            ans = await self._answer(question, ctx_txt)
         await ctx.send(ans)
 
-        # parse “Used: [#2,#4]” to know which images to send
-        used = re.findall(r"#\d+", ans.split("Used:",1)[-1])
+        # ----- Bilder anhängen, falls relevant ---------------------------------
+        used = re.findall(r"#\d+", ans.split("Used:", 1)[-1])
         thr = await self.config.vector_threshold()
         for idx_str in used:
             idx = int(idx_str.lstrip("#"))
             if idx >= len(self._last_ranked_hits):
                 continue
             hit = self._last_ranked_hits[idx]
-            if hit.payload.get("source")=="manual" and (hit.score or 0.0) >= thr:
+            if hit.payload.get("source") == "manual" and (hit.score or 0.0) >= thr:
                 for url in hit.payload.get("images", []):
-                    emb = discord.Embed().set_image(url=url)
-                    await ctx.send(embed=emb)
-
+                    await ctx.send(embed=discord.Embed().set_image(url=url))
+                    
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Auto-respond when mentioned or in configured channels."""
+        """Auto‑Antwort, falls erwähnt oder Kanal auf Auto steht – mit Verlauf."""
         if message.author.bot or not message.guild:
             return
 
         autolist = await self.config.auto_channels()
-        if self.bot.user.mentioned_in(message) or message.content.startswith("!askllm"):
-            q = message.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
+        if self.bot.user.mentioned_in(message):
+            q = message.clean_content.replace(
+                f"@{self.bot.user.display_name}", ""
+            ).strip()
         elif message.channel.id in autolist:
             q = message.content.strip()
         else:
@@ -528,8 +553,11 @@ class LLMManager(commands.Cog):
 
         if not q:
             return
+
+        ctx_txt = await self._get_recent_context(message.channel, before=message)
+
         async with message.channel.typing():
-            ans = await self._answer(q)
+            ans = await self._answer(q, ctx_txt)
         await message.channel.send(ans)
 
         thr = await self.config.threshold()
@@ -539,9 +567,7 @@ class LLMManager(commands.Cog):
             entry = hit.payload.get("content", "")
             if self._token_overlap(ans, entry) >= thr:
                 for url in hit.payload.get("images", []):
-                    emb = discord.Embed()
-                    emb.set_image(url=url)
-                    await message.channel.send(embed=emb)
+                    await message.channel.send(embed=discord.Embed().set_image(url=url))
 
     @commands.command()
     async def setmodel(self, ctx: commands.Context, model: str):
