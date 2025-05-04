@@ -258,7 +258,7 @@ class LLMManager(commands.Cog):
         loop = asyncio.get_running_loop()
 
         # 1) Fetch last messages (excluding bot messages)
-        msgs = await ctx.channel.history(limit=num+20).flatten()
+        msgs = [m async for m in ctx.channel.history(limit=num+20)]
         user_msgs = [m.content for m in msgs if not m.author.bot]
         content = "\n".join(reversed(user_msgs[-num:]))
 
@@ -342,6 +342,7 @@ class LLMManager(commands.Cog):
         # 6) Save entry
         await loop.run_in_executor(None, self._upsert_sync, tags, draft, "manual")
         await ctx.send(f"✅ Entry saved with tags: {tags}")
+
 
     # --------------------------------------------------------------------
     # knowledge‑management commands
