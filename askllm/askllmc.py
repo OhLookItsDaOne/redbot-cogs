@@ -39,6 +39,7 @@ class LLMManager(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210123)
+        self.config.register_global(vector_threshold=0.2)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
@@ -46,6 +47,7 @@ class LLMManager(commands.Cog):
             auto_channels=[],
             threshold=0.6,  # default token‐overlap threshold
             vector_threshold=0.3,
+
         )
 
         self.collection = "fus_wiki"
@@ -287,16 +289,53 @@ class LLMManager(commands.Cog):
 
 
     @commands.command(name="setvectorthreshold")
-    @commands.has_permissions(administrator=True)
-    async def setvectorthreshold(self, ctx: commands.Context, value: float):
-        """
-        Set the vector‐similarity threshold for retrieving entries.
-        Usage: !setvectorthreshold 0.2  (value between 0.0 and 1.0)
-        """
+
+    @commands.command(name="setvectorthreshold")
+    async def setvectorthreshold(self, ctx, value: float):
         if not 0.0 <= value <= 1.0:
             return await ctx.send("⚠️ Threshold must be between 0.0 and 1.0")
         await self.config.vector_threshold.set(value)
-        await ctx.send(f"✅ Vector similarity threshold set to {value:.0%}")
+        await ctx.send(f"✅ Vector threshold set to {value:.0%}")
+
+    async def _answer(self, question: str) -> str:
+        await self.ensure_qdrant()
+        loop = asyncio.get_running_loop()
+        q_vec = self._vec(question)
+
+        # 1) Broad vector search across all entries
+        raw_hits = await loop.run_in_executor(None, lambda:
+            self.q_client.search(
+                collection_name=self.collection,
+                query_vector=q_vec,
+                limit=20,
+                with_payload=True
+            )
+        )
+
+        # 2) Boost manual entries
+        boosted = sorted(
+            raw_hits,
+            key=lambda h: (h.score or 0.0) + (0.1 if h.payload.get("source")=="manual" else 0.0),
+            reverse=True
+        )
+
+        # 3) Keep top-5 *regardless* of threshold for answering
+        chosen = boosted[:5]
+        if not chosen:
+            return "No relevant information found."
+
+        # 4) Build a prompt that *numbers* each snippet
+        facts = "\n\n".join(f"#{i}\n{h.payload['content']}" for i,h in enumerate(chosen))
+        prompt = (
+            "Below are numbered facts. Answer the question using ONLY these facts.\n"
+            "At the end, list which fact indices you used, e.g. Used: [#0,#2].\n\n"
+            f"### Facts ###\n{facts}\n\n"
+            f"### Question ###\n{question}\n\n"
+            "### Answer ###"
+        )
+        api, model = await self.config.api_url(), await self.config.model()
+        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, prompt)
+
 
     @commands.command()
     async def llmknow(self, ctx: commands.Context, tag: str, *, content: str):
@@ -501,17 +540,17 @@ class LLMManager(commands.Cog):
             ans = await self._answer(question)
         await ctx.send(ans)
 
-        # only send images for manual entries that were actually used
+        # parse “Used: [#2,#4]” to know which images to send
+        used = re.findall(r"#\d+", ans.split("Used:",1)[-1])
         thr = await self.config.vector_threshold()
-        for h in self._last_ranked_hits:
-            if h.payload.get("source") != "manual":
-                continue
-            # Qdrant score already reflects cosine similarity
-            if (h.score or 0.0) >= thr:
-                for url in h.payload.get("images", []):
-                    emb = discord.Embed()
-                    emb.set_image(url=url)
+        for idx_str in used:
+            idx = int(idx_str.lstrip("#"))
+            hit = self._last_ranked_hits[idx]
+            if hit.payload.get("source")=="manual" and (hit.score or 0.0) >= thr:
+                for url in hit.payload.get("images", []):
+                    emb = discord.Embed().set_image(url=url)
                     await ctx.send(embed=emb)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Auto-respond when mentioned or in configured channels."""
