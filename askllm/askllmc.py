@@ -567,150 +567,64 @@ class LLMManager(commands.Cog):
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
 
-        # --- BM25-Retrieval aufbauen (einmal) und ausführen ---
-        if self.bm25 is None:
-            pts, _ = self.q_client.scroll(self.collection, with_payload=True, limit=10000)
-            if not pts:
-                bm25_hits = []
-            else:
-                docs = [p.payload.get("content", "") for p in pts]
-                tokenized = [doc.lower().split() for doc in docs]
-                try:
-                    self.bm25 = BM25Okapi(tokenized)
-                    self._bm25_pts = pts
-                except ZeroDivisionError:
-                    self.bm25 = None
-                    bm25_hits = []
-                else:
-                    tokenized_q = question.lower().split()
-                    bm25_scores = self.bm25.get_scores(tokenized_q)
-                    top_bm25 = sorted(
-                        zip(self._bm25_pts, bm25_scores),
-                        key=lambda x: x[1],
-                        reverse=True
-                    )[:20]
-                    bm25_hits = [p for p, _ in top_bm25]
-        else:
-            tokenized_q = question.lower().split()
-            bm25_scores = self.bm25.get_scores(tokenized_q)
-            top_bm25 = sorted(
-                zip(self._bm25_pts, bm25_scores),
-                key=lambda x: x[1],
-                reverse=True
-            )[:20]
-            bm25_hits = [p for p, _ in top_bm25]
-
-        # ---------- (A) Heuristische Query-Erweiterung -----------------
+        # (A) Heuristische Query-Erweiterung
         aug_q = question
         ql = question.lower()
         if "virtual" in ql and "desktop" in ql and "resolution" not in ql:
             aug_q += " resolution"
-        # --------------------------------------------------------------
-        # ---------- (B) Keyword- / Tag-Filter -------------------------
-        clean_q = re.sub(r"[^\w\s]", " ", aug_q.lower())
-        kws = [w for w in clean_q.split() if len(w) > 2]
-        tag_filter = (
-            {"should": (
-                [{"key": "tag",     "match": {"value": k}} for k in kws] +
-                [{"key": "content", "match": {"value": k}} for k in kws]
-            )}
-            if kws else None
-        )
-        # --------------------------------------------------------------
 
-        # ---------- (C)  Manual Retrieval (Vector + Tag) -----------------
-        # Basisfilter: nur source="manual"
-        manual_filter = {"must": [{"key": "source", "match": {"value": "manual"}}]}
-
-        # (1) Vector-Suche innerhalb der manuellen Einträge
-        manual_vec_hits = self._safe_search(
-            self.collection,
-            query_vector=self._vec(aug_q),
-            limit=20,
-            query_filter=manual_filter,
-        )
-
-        # (2) Tag-/Keyword-Filter auf dieselben manuellen Einträge
-        manual_tag_hits = []
-        if tag_filter:
-            # wir fügen die Schlagwort-Bedingungen als "should" hinzu, bleiben aber in source=manual
-            combined_filter = {
-                "must": manual_filter["must"],
-                "should": tag_filter["should"],
-            }
-            manual_tag_hits, _ = self.q_client.scroll(
-                self.collection,
-                with_payload=True,
-                limit=20,
-                scroll_filter=combined_filter,
-            )
-
-        # (3) Beide Ergebnisse zusammenführen (ohne Duplikate)
-        manual_dict: dict[int, Any] = {h.id: h for h in manual_vec_hits}
-        for h in manual_tag_hits:
-            manual_dict.setdefault(h.id, h)
-        manual_hits = list(manual_dict.values())
-
-        # Wenn wir manuelle Ergebnisse haben, nehmen wir nur diese
-        if manual_hits:
-            hits = manual_hits
-        else:
-            # Wiki-Fallback: wie gehabt…
-            tag_hits = []
-            if tag_filter:
-                tag_hits, _ = self.q_client.scroll(
-                    self.collection,
-                    with_payload=True,
-                    limit=20,
-                    scroll_filter=tag_filter,
-                )
-            vec_hits = self._safe_search(
-                self.collection,
+        # (B) Voller Vektor-Search über alle Einträge
+        #    wir nutzen `search` damit wir Score und Payload bekommen
+        hits = await loop.run_in_executor(
+            None,
+            lambda: self.q_client.search(
+                collection_name=self.collection,
                 query_vector=self._vec(aug_q),
                 limit=20,
+                with_payload=True,
             )
-            hit_dict = {h.id: h for h in vec_hits}
-            for h in tag_hits + bm25_hits:
-                hit_dict.setdefault(h.id, h)
-            hits = list(hit_dict.values())
-        # --------------------------------------------------------------
-
-        if not hits:
-            return "No relevant information found."
-
-        # ---------- (D) Kombinieren & Re-Rank -------------------------
-        numbered = "\n\n".join(f"#{i}\n{h.payload.get('content','')}" for i, h in enumerate(hits))
-        rank_prompt = (
-            f"User question: {question}\n\n"
-            "Below are context snippets (#0 …). Rate relevance 0-10.\n"
-            "Return EXACT JSON: {\"scores\":[…]}\n\n"
-            f"{numbered}"
         )
-        api, model = await self.config.api_url(), await self.config.model()
-        rank = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, rank_prompt)
-        try:
-            scores = json.loads(rank)["scores"]
-        except Exception:
-            scores = [10] * len(hits)
-        ranked = sorted(zip(hits, scores), key=lambda x: x[1], reverse=True)[:5]
-        # Treffer merken, damit wir später die images holen können
+
+        # (C) Boost für manuelle Einträge
+        BOOST = 0.1
+        scored = []
+        for h in hits:
+            score = h.score or 0
+            if h.payload.get("source") == "manual":
+                score += BOOST
+            scored.append((h, score))
+
+        # (D) BM25-Backfill für evtl. fehlende Dokumente
+        #     (optional – nur, wenn du BM25 weiter einsetzen willst)
+        if self.bm25:
+            tokenized_q = question.lower().split()
+            bm25_scores = self.bm25.get_scores(tokenized_q)
+            for doc, s in zip(self._bm25_pts, bm25_scores):
+                if doc.id not in {h.id for h, _ in scored} and s > 0:
+                    scored.append((doc, s * 0.01))
+
+        # (E) Finale Sortierung + Top-5
+        ranked = sorted(scored, key=lambda x: x[1], reverse=True)[:5]
         self._last_ranked_hits = [h for h, _ in ranked]
 
+        if not self._last_ranked_hits:
+            return "No relevant information found."
 
-        # ---------- (E) Token-Budget schonen: nur Top 5 & max. 200 Wörter ----------
+        # (F) Prompt bauen
         ctx = "\n\n".join(
             " ".join(h.payload.get("content", "").split()[:200])
-            for h, _ in ranked
+            for h in self._last_ranked_hits
         )
-
         final_prompt = (
             "Use **only** the facts below to answer. If the facts are insufficient, say so.\n\n"
             f"### Facts ###\n{ctx}\n\n"
             f"### Question ###\n{question}\n\n"
             "### Answer ###"
         )
-        return await loop.run_in_executor(None, self._ollama_chat_sync, api, model, final_prompt)
-
+        return await loop.run_in_executor(None, self._ollama_chat_sync,
+                                          await self.config.api_url(),
+                                          await self.config.model(),
+                                          final_prompt)
 
     # --------------------------------------------------------------------
     # public command + mention hook
@@ -735,6 +649,7 @@ class LLMManager(commands.Cog):
             return
 
         autolist = await self.config.auto_channels()
+        # Frage ermitteln
         if self.bot.user.mentioned_in(m) or m.content.startswith("!askllm"):
             q = m.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
         elif m.channel.id in autolist:
@@ -745,26 +660,25 @@ class LLMManager(commands.Cog):
         if not q:
             return
 
-        # 1) Reset der letzten Treffer, damit keine alten Bilder hängen bleiben
-        self._last_ranked_hits = []
-
+        # 1) Antwort holen
         try:
             async with m.channel.typing():
                 ans = await self._answer(q)
         except http.exceptions.ResponseHandlingException as e:
             return await m.channel.send(f"⚠️ Could not connect: {e}")
 
-        # 2) Antwort absetzen
+        # 2) Antwort senden
         await m.channel.send(ans)
 
-        # 3) Nur Bilder aus manuellen Treffern senden
-        for h in self._last_ranked_hits:
-            if h.payload.get("source") != "manual":
-                continue
-            for url in h.payload.get("images", []):
-                embed = discord.Embed()
-                embed.set_image(url=url)
-                await m.channel.send(embed=embed)
+        # 3) Nur Bilder des **obersten** manuellen Treffers anhängen
+        if hasattr(self, "_last_ranked_hits") and self._last_ranked_hits:
+            top = self._last_ranked_hits[0]
+            if top.payload.get("source") == "manual":
+                for url in top.payload.get("images", []):
+                    embed = discord.Embed()
+                    embed.set_image(url=url)
+                    await m.channel.send(embed=embed)
+
 
     # --------------------------------------------------------------------
     # simple setters
