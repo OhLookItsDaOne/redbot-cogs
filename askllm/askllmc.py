@@ -262,21 +262,28 @@ class LLMManager(commands.Cog):
         user_msgs = [m.content for m in msgs if not m.author.bot]
         content = "\n".join(reversed(user_msgs[-num:]))
 
-        # 2) Generate initial draft via LLM
+        # 2) Generate initial draft via LLM (constrain length)
         api, model = await self.config.api_url(), await self.config.model()
         draft_prompt = (
-            "Please create a concise knowledge entry from the following chat messages:\n"
+            "Please create a concise knowledge entry from the following chat messages,\n"
+            "keeping it under 1500 characters:\n"
             f"{content}\n\nEntry:"
         )
         draft = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, draft_prompt)
 
         # 3) Interactive loop: yes / no / edit
         while True:
-            await ctx.send(f"**Draft:**\n```{draft}```\nReply with `yes`, `no`, or `edit`.")
+            # truncate preview to avoid Discord's 2000 char limit
+            preview = draft if len(draft) <= 1500 else draft[:1500] + "…"
+            await ctx.send(
+                f"**Draft (preview):**\n```{preview}```\nReply with `yes`, `no`, or `edit`."
+            )
             try:
                 reply = await self.bot.wait_for(
                     "message",
-                    check=lambda m: m.author == ctx.author and m.channel == ctx.channel and m.content.lower() in ["yes", "no", "edit"],
+                    check=lambda m: m.author == ctx.author
+                        and m.channel == ctx.channel
+                        and m.content.lower() in ["yes", "no", "edit"],
                     timeout=300
                 )
             except asyncio.TimeoutError:
@@ -295,13 +302,15 @@ class LLMManager(commands.Cog):
                 except asyncio.TimeoutError:
                     return await ctx.send("⏱️ Timeout – learn process aborted.")
                 edit_prompt = (
-                    "Please revise the following entry based on this feedback:\n"
+                    "Please revise the following entry based on this feedback,\n"
+                    "and keep it under 1500 characters:\n"
                     f"Entry: {draft}\nFeedback: {feedback.content}\n\nRevised entry:"
                 )
                 draft = await loop.run_in_executor(None, self._ollama_chat_sync, api, model, edit_prompt)
                 continue
             # cmd == "yes"
             break
+
 
         # 4) Generate tags
         tag_prompt = (
