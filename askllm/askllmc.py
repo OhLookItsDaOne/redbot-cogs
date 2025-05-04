@@ -65,25 +65,29 @@ class LLMManager(commands.Cog):
 
     def _vec(self, txt: str) -> List[float]:
         return self.embedder.encode(txt).tolist()
-
+    
     async def _get_recent_context(
         self,
         channel: discord.TextChannel,
         *,
         before: discord.Message | None = None,
-        n: int = 3,
+        n: int = 10,                       # ← default jetzt 10
     ) -> str:
-        """Gibt bis zu `n` letzte *menschliche* Nachrichten als String zurück."""
+        """
+        Return up to *n* most‑recent messages (user **and** bot) in
+        chronological order, each prefixed with 'User:' or 'Bot:'.
+        """
         lines: list[str] = []
-        async for m in channel.history(limit=n * 4, before=before):
-            if m.author.bot:
+        async for m in channel.history(limit=n * 5, before=before):
+            content = m.content.strip()
+            if not content:
                 continue
-            lines.append(m.content.strip())
+            role = "Bot" if m.author.bot else "User"
+            lines.append(f"{role}: {content}")
             if len(lines) >= n:
                 break
-        lines.reverse()                     # chronologische Reihenfolge
+        lines.reverse()           # oldest → newest
         return "\n".join(lines)
-
 
     def _upsert_sync(self, tag: str, content: str, source: str) -> int:
         """Insert a new knowledge entry, extracting any inline images."""
@@ -609,7 +613,7 @@ class LLMManager(commands.Cog):
     
     @commands.command(name="askllm")
     async def askllm_cmd(self, ctx: commands.Context, *, question: str):
-        ctx_txt = await self._get_recent_context(ctx.channel, before=ctx.message)
+        ctx_txt = await self._get_recent_context(ctx.channel, before=ctx.message, n=10)
         async with ctx.typing():
             ans = await self._answer(question, ctx_txt)
         await ctx.send(ans)
