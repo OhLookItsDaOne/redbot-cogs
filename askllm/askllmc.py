@@ -75,30 +75,28 @@ class LLMManager(commands.Cog):
     # --------------------------------------------------------------------
     def _upsert_sync(self, tag: str, content: str, source: str) -> int:
         self._ensure_collection()
-        # 1) Alle Markdown-Links extrahieren
-        all_urls = re.findall(r'\[.*?\]\((https?://[^\s\)]+)\)', content)
-        # 2) Filter nur echte Bild-URLs
-        image_urls = [
-            u for u in all_urls
-            if re.search(r'\.(?:jpe?g|png|gif|webp)(?:\?|$)', u, re.IGNORECASE)
-        ]
-        # 3) Markdown entfernen und Inline-Links belassen
-        #    – Bilder-Markup löschen
+        # 1) Extract only explicit markdown image URLs (png/jpg/gif/webp)
+        image_urls = re.findall(
+            r'!\[.*?\]\((https?://[^\s\)]+\.(?:png|jpe?g|gif|webp)(?:\?[^)\s]*)?)\)',
+            content,
+            flags=re.IGNORECASE
+        )
+        # 2) Remove image markup but keep normal links inline
         txt = re.sub(r'!\[.*?\]\((https?://[^\s\)]+)\)', '', content)
-        #    – normale Links durch URL ersetzen
-        txt = re.sub(r'\[.*?\]\((https?://[^\s\)]+)\)', r'\1', txt).strip()
-        # 4) Vektor & Payload zusammenbauen
+        txt = re.sub(r'\[([^\]]+)\]\((https?://[^\s\)]+)\)', r'\1: \2', txt).strip()
+        # 3) Build vector and payload
         pid = uuid.uuid4().int & ((1 << 64) - 1)
         vec = self._vec(f"{tag}. {tag}. {txt}")
         payload = {"tag": tag, "content": txt, "source": source}
         if image_urls:
             payload["images"] = image_urls
-        # 5) Upsert
+        # 4) Upsert
         self.q_client.upsert(
             self.collection,
             [{"id": pid, "vector": vec, "payload": payload}],
         )
         return pid
+
 
 
     # --------------------------------------------------------------------
@@ -196,23 +194,26 @@ class LLMManager(commands.Cog):
     @commands.command(name="llmknowaddimg")
     @commands.has_permissions(administrator=True)
     async def llmknowaddimg(self, ctx, doc_id: int, url: str):
-        """Fügt eine Bild-URL zum Payload eines Eintrags hinzu."""
+        """Adds an image URL to an entry—only if it looks like an actual image file."""
+        # validate extension
+        if not re.search(r'\.(?:png|jpe?g|gif|webp)(?:\?.*)?$', url, flags=re.IGNORECASE):
+            return await ctx.send("⚠️ The provided URL does not appear to be an image.")
         await self.ensure_qdrant()
         pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
         if not pts:
-            return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
+            return await ctx.send(f"Entry {doc_id} not found.")
         payload = pts[0].payload or {}
         images = payload.get("images", [])
         if url in images:
-            return await ctx.send("URL ist bereits hinterlegt.")
+            return await ctx.send("⚠️ This image URL is already stored.")
         images.append(url)
-        # Nur das images-Feld aktualisieren
+        # update only the images field
         self.q_client.set_payload(
             collection_name=self.collection,
             payload={"images": images},
             points=[doc_id],
         )
-        await ctx.send(f"Bild-URL hinzugefügt zu Eintrag {doc_id}.")
+        await ctx.send(f"✅ Image URL added to entry {doc_id}.")
 
     @commands.command(name="llmknowrmimg")
     @commands.has_permissions(administrator=True)
