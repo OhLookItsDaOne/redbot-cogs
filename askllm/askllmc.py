@@ -714,6 +714,7 @@ class LLMManager(commands.Cog):
     async def on_message(self, m: discord.Message):
         if m.author.bot or not m.guild:
             return
+
         autolist = await self.config.auto_channels()
         if self.bot.user.mentioned_in(m) or m.content.startswith("!askllm"):
             q = m.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
@@ -721,16 +722,24 @@ class LLMManager(commands.Cog):
             q = m.content.strip()
         else:
             return
+
         if not q:
             return
+
+        # 1) Reset der letzten Treffer, damit keine alten Bilder hängen bleiben
+        self._last_ranked_hits = []
+
         try:
             async with m.channel.typing():
                 ans = await self._answer(q)
         except http.exceptions.ResponseHandlingException as e:
             return await m.channel.send(f"⚠️ Could not connect: {e}")
+
+        # 2) Antwort absetzen
         await m.channel.send(ans)
-        # Nur Bilder aus manuellen Treffern senden
-        for h in getattr(self, "_last_ranked_hits", []):
+
+        # 3) Nur Bilder aus manuellen Treffern senden
+        for h in self._last_ranked_hits:
             if h.payload.get("source") != "manual":
                 continue
             for url in h.payload.get("images", []):
