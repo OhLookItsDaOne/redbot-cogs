@@ -181,15 +181,14 @@ class LLMManager(commands.Cog):
             if offset is None:
                 break
         return ids
-
     # --------------------------------------------------------------------
     # Commands zum Hinzufügen/Entfernen/Bewegen von Bild-URLs
-    # --------------------------------------------------------------------    @commands.command()
+    # --------------------------------------------------------------------
+    @commands.command(name="llmknowaddimg")
     @commands.has_permissions(administrator=True)
     async def llmknowaddimg(self, ctx, doc_id: int, url: str):
         """Fügt eine Bild-URL zum Payload eines Eintrags hinzu."""
         await self.ensure_qdrant()
-        # Punkt direkt per ID laden
         pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
         if not pts:
             return await ctx.send(f"Eintrag {doc_id} nicht gefunden.")
@@ -198,11 +197,10 @@ class LLMManager(commands.Cog):
         if url in images:
             return await ctx.send("URL ist bereits hinterlegt.")
         images.append(url)
-        # Nur das images-Feld aktualisieren
         self.q_client.upsert(self.collection, [{"id": doc_id, "payload": {"images": images}}])
         await ctx.send(f"Bild-URL hinzugefügt zu Eintrag {doc_id}.")
 
-    @commands.command()
+    @commands.command(name="llmknowrmimg")
     @commands.has_permissions(administrator=True)
     async def llmknowrmimg(self, ctx, doc_id: int, url: str):
         """Entfernt eine Bild-URL aus einem bestehenden Eintrag."""
@@ -220,7 +218,7 @@ class LLMManager(commands.Cog):
 
     @commands.command(name="llmknowmvimg")
     @commands.has_permissions(administrator=True)
-    async def llmknow_move_image(self, ctx, doc_id: int, from_pos: int, to_pos: int):
+    async def llmknowmvimg(self, ctx, doc_id: int, from_pos: int, to_pos: int):
         """Verschiebt eine Bild-URL innerhalb des Payloads eines Eintrags."""
         await self.ensure_qdrant()
         pts = self.q_client.retrieve(self.collection, [doc_id], with_payload=True)
