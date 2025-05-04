@@ -381,14 +381,12 @@ class LLMManager(commands.Cog):
 
         filt = None
         if tags:
-            # one FieldCondition per tag, OR‑verknüpft
             filt = {
                 "should": [
                     {"key": "tag", "match": {"value": t}}
                     for t in tags
-                ],
-                "minimum_should_match": 1,
-            }
+                ]
+            }  # ✔ OR‑Verknüpfung, kein extra Flag nötig
 
         hits = await loop.run_in_executor(
             None,
@@ -397,10 +395,9 @@ class LLMManager(commands.Cog):
                 query_vector=q_vec,
                 limit=40,
                 with_payload=True,
-                query_filter=filt,      # or `filter=filt` depending on your client version
+                query_filter=filt,     # bleibt unverändert
             ),
         )
-
 
         # fallback to plain vector search if tag filter returned nothing
         if not hits and filt:
