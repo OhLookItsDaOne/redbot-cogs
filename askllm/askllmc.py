@@ -36,8 +36,6 @@ _ensure_pkg("rank_bm25")
 
 
 class LLMManager(commands.Cog):
-    """Interact with a local Ollama LLM through a Qdrant knowledge base."""
-    THRESHOLD = 0.6  # 60 %
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210123)
@@ -45,7 +43,8 @@ class LLMManager(commands.Cog):
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
-            auto_channels=[]
+            auto_channels=[],
+            threshold=0.6,  # default token‐overlap threshold
         )
 
         self.collection = "fus_wiki"
@@ -377,6 +376,17 @@ class LLMManager(commands.Cog):
         await self.config.auto_channels.set(chans)
         await ctx.send(f"Auto-reply disabled in {channel.mention}.")
 
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setthreshold(self, ctx, value: float):
+        """
+        Set the image‐overlap threshold. 0.0–1.0 (e.g. 0.6 for 60%).
+        """
+        if not 0.0 <= value <= 1.0:
+            return await ctx.send("⚠️ Threshold must be between 0.0 and 1.0")
+        await self.config.threshold.set(value)
+        await ctx.send(f"✅ Image‐overlap threshold set to {value:.0%}")
+
     @commands.command(name="listautochannels")
     async def list_auto_channels(self, ctx: commands.Context):
         """List all channels with auto-reply enabled."""
@@ -503,13 +513,12 @@ class LLMManager(commands.Cog):
             ans = await self._answer(question)
         await ctx.send(ans)
 
-        # nur Bilder der tatsächlich relevanten Hits senden
+        thr = await self.config.threshold()
         for hit in self._last_ranked_hits:
             if hit.payload.get("source") != "manual":
                 continue
-            entry_text = hit.payload.get("content", "")
-            score = self._token_overlap(ans, entry_text)
-            if score >= self.THRESHOLD:
+            entry = hit.payload.get("content", "")
+            if self._token_overlap(ans, entry) >= thr:
                 for url in hit.payload.get("images", []):
                     emb = discord.Embed()
                     emb.set_image(url=url)
@@ -532,21 +541,21 @@ class LLMManager(commands.Cog):
 
         if not q:
             return
-
         async with message.channel.typing():
             ans = await self._answer(q)
         await message.channel.send(ans)
 
+        thr = await self.config.threshold()
         for hit in self._last_ranked_hits:
             if hit.payload.get("source") != "manual":
                 continue
             entry = hit.payload.get("content", "")
-            if self._token_overlap(ans, entry) >= self.THRESHOLD:
+            if self._token_overlap(ans, entry) >= thr:
                 for url in hit.payload.get("images", []):
                     emb = discord.Embed()
                     emb.set_image(url=url)
                     await message.channel.send(embed=emb)
-                    
+
     @commands.command()
     async def setmodel(self, ctx: commands.Context, model: str):
         """Set the Ollama model name."""
