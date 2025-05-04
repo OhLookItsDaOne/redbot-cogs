@@ -701,13 +701,14 @@ class LLMManager(commands.Cog):
         async with ctx.typing():
             ans = await self._answer(question)
         await ctx.send(ans)
-        # Bilder aus den zuletzt gerankten Treffern
+        # *** Nur manuelle Treffer werden mit Bildern versehen ***
         for h in getattr(self, "_last_ranked_hits", []):
+            if h.payload.get("source") != "manual":
+                continue
             for url in h.payload.get("images", []):
                 embed = discord.Embed()
                 embed.set_image(url=url)
                 await ctx.send(embed=embed)
-
 
     @commands.Cog.listener()
     async def on_message(self, m: discord.Message):
@@ -728,8 +729,10 @@ class LLMManager(commands.Cog):
         except http.exceptions.ResponseHandlingException as e:
             return await m.channel.send(f"⚠️ Could not connect: {e}")
         await m.channel.send(ans)
-        # Bilder senden
+        # Nur Bilder aus manuellen Treffern senden
         for h in getattr(self, "_last_ranked_hits", []):
+            if h.payload.get("source") != "manual":
+                continue
             for url in h.payload.get("images", []):
                 embed = discord.Embed()
                 embed.set_image(url=url)
