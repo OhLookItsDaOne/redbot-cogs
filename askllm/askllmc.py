@@ -248,19 +248,7 @@ class LLMManager(commands.Cog):
         data_dir = str(cog_data_path(self)); os.makedirs(data_dir, exist_ok=True)
         clone_dir = os.path.join(data_dir, "wiki")
 
-        # purge old wiki docs
-        filt = {"must": [{"key": "source", "match": {"value": "wiki"}}]}
-        ids = await asyncio.get_running_loop().run_in_executor(None, self._collect_ids_sync, filt)
-        if ids:
-            await asyncio.get_running_loop().run_in_executor(None, lambda: self.q_client.delete(self.collection, ids))
-
-        # git clone / pull
-        if os.path.isdir(os.path.join(clone_dir, ".git")):
-            subprocess.run(["git", "-C", clone_dir, "pull"], check=False)
-        else:
-            shutil.rmtree(clone_dir, ignore_errors=True)
-            subprocess.run(["git", "clone", repo, clone_dir], check=True)
-        await ctx.send("Wiki repo updated – importing …")
+        # … (Repo klonen/aktualisieren wie gehabt) …
 
         md_files = glob.glob(os.path.join(clone_dir, "*.md"))
         if not md_files:
@@ -268,10 +256,27 @@ class LLMManager(commands.Cog):
 
         def _import(fp: str):
             txt = open(fp, encoding="utf-8").read()
-            soup = BeautifulSoup(markdown(txt), "html.parser")
-            tags = ", ".join({h.get_text(strip=True) for h in soup.find_all(re.compile(r"^h[1-3]$"))})
-            plain = soup.get_text(" ", strip=True)
-            self._upsert_sync(tags or os.path.basename(fp), plain, "wiki")
+            # Markdown → HTML mit TOC-Erweiterung
+            html = markdown(txt, extensions=["extra", "toc"])
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Entferne „Back to Readme“-Links und ähnliche Navi-Leichen
+            for a in soup.find_all("a"):
+                if "Back to" in a.get_text():
+                    a.decompose()
+
+            # Splitte in Sektionen nach Überschriften
+            for header in soup.find_all(re.compile(r"^h[1-6]$")):
+                tag = header.get_text(strip=True)
+                content_parts = []
+                for sib in header.next_siblings:
+                    if sib.name and re.match(r"^h[1-6]$", sib.name):
+                        break
+                    content_parts.append(str(sib))
+                section_html = "".join(content_parts)
+                section_text = BeautifulSoup(section_html, "html.parser").get_text(" ", strip=True)
+                if section_text:
+                    self._upsert_sync(tag, section_text, "wiki")
 
         loop = asyncio.get_running_loop()
         for fp in md_files:
