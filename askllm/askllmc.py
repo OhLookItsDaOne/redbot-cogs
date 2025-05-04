@@ -312,7 +312,40 @@ class LLMManager(commands.Cog):
             return await ctx.send("⚠️ Threshold must be between 0.0 and 1.0")
         await self.config.vector_threshold.set(value)
         await ctx.send(f"✅ Vector threshold set to {value:.0%}")
+# =====================================================
+# 1)  Add / replace this helper inside class LLMManager
+# =====================================================
+    async def _is_relevant_llm(self, question: str, snippet: str) -> bool:
+        """
+        Ask the LLM whether *snippet* is useful for answering *question*.
+        Returns True if the model replies with 'yes', False otherwise.
+        """
+        snippet = snippet.strip()
+        if len(snippet) > 600:                       # keep prompt short
+            snippet = snippet[:600] + " …"
 
+        prompt = (
+            "You are an expert assistant. "
+            "Given a **question** and a **snippet** from a knowledge base, "
+            "answer with exactly one word: **Yes**, **No**, or **Maybe** — "
+            "depending on whether the snippet is relevant for answering the question.\n\n"
+            f"### Question ###\n{question}\n\n"
+            f"### Snippet ###\n{snippet}\n\n"
+            "Relevant?"
+        )
+
+        api, model = await self.config.api_url(), await self.config.model()
+        loop = asyncio.get_running_loop()
+        reply = await loop.run_in_executor(
+            None, self._ollama_chat_sync, api, model, prompt
+        )
+        reply = reply.strip().lower()
+        return reply.startswith("y")          # treat 'yes' as relevant
+
+
+# =========================================================
+# 2)  Completely replace the current _answer method with:
+# =========================================================
     async def _answer(self, question: str, context: str | None = None) -> str:
         await self.ensure_qdrant()
         loop = asyncio.get_running_loop()
@@ -320,14 +353,57 @@ class LLMManager(commands.Cog):
         query_text = f"{context}\n{question}" if context else question
         q_vec = await loop.run_in_executor(None, self._vec, query_text)
 
-        raw_hits = await loop.run_in_executor(
+        # ---- 1) initial vector search (broad) ------------------------------
+        hits = await loop.run_in_executor(
             None,
             lambda: self.q_client.search(
                 collection_name=self.collection,
                 query_vector=q_vec,
-                limit=40,                # etwas breiter suchen
+                limit=40,                      # broad initial pool
                 with_payload=True,
             ),
+        )
+
+        # ---- 2) preliminary ranking (cosine + manual bonus) ----------------
+        hits.sort(
+            key=lambda h: (h.score or 0.0)
+            + (0.1 if h.payload.get("source") == "manual" else 0.0),
+            reverse=True,
+        )
+
+        # ---- 3) LLM relevance filtering ------------------------------------
+        relevant: list = []
+        max_checks = 15                       # avoid spamming the model
+        for h in hits:
+            if len(relevant) >= 8:            # we only need a handful
+                break
+            if max_checks <= 0:
+                break
+            max_checks -= 1
+            if await self._is_relevant_llm(question, h.payload.get("content", "")):
+                relevant.append(h)
+
+        if not relevant:
+            return "No relevant information found in the knowledge base."
+
+        self._last_ranked_hits = relevant[:5]   # cache for image lookup etc.
+        facts = "\n\n".join(
+            f"#{i}\n{h.payload['content']}" for i, h in enumerate(self._last_ranked_hits)
+        )
+
+        prompt = (
+            "Below are numbered facts from the knowledge base. "
+            "Answer the **question** using **only** these facts. "
+            "After your answer, list which fact numbers you used "
+            "exactly like this: Used: [#0,#3].\n\n"
+            f"### Facts ###\n{facts}\n\n"
+            f"### Question ###\n{question}\n\n"
+            "### Answer ###"
+        )
+
+        api, model = await self.config.api_url(), await self.config.model()
+        return await loop.run_in_executor(
+            None, self._ollama_chat_sync, api, model, prompt
         )
 
         def _rank(hit):
