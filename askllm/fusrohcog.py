@@ -1,4 +1,34 @@
 from __future__ import annotations
+
+"""
+FusRoh Cog – SkyrimVR Mod‑List Helper
+-------------------------------------
+A Red‑DiscordBot cog that turns your bot into a knowledgeable
+support assistant for the SkyrimVR mod‑list community.
+
+Main ideas
+~~~~~~~~~~
+* **Vector store** – Qdrant running at the URL you configure stores
+  factual support snippets ("knowledge") as text payloads plus embeddings.
+* **LLM** – Ollama hosts *gemma3:12b* for both embeddings and chat.
+* **Commands** –
+
+  * ``!fusknow <text>`` – add *text* to the knowledge base.
+  * ``!fusshow [count]`` – list newest *count* entries (default 10).
+  * ``!fusknowdel <id>`` – delete an entry by its point‑id.
+  * ``!learn <n>`` – ingest the last *n* messages of the channel.
+  * ``!autotype [on|off]`` – toggle auto‑reply in the current channel.
+
+* **Auto‑response** – In channels marked with ``autotype`` (or when the
+  bot is mentioned), the last 5 chat messages are combined with the top
+  knowledge hits to build a prompt.  The system prompt tells Gemma to
+  *only* answer when sufficient context exists and to reply "I’m not
+  sure" otherwise, minimizing hallucinations.
+
+Docker‑friendly – All URLs are configurable so the cog can talk to
+containers on your Unraid box.
+"""
+
 import asyncio
 import json
 import logging
@@ -68,7 +98,7 @@ class QdrantClient:
         body = {
             "vector": vector,
             "limit": limit,
-            "with_payload": True,
+            "with_payload": "true",
             "score_threshold": 0.25,  # tune this – lower → more results, higher → stricter
         }
         resp = await self._request("POST", f"/collections/{self.collection}/points/search", json=body)
