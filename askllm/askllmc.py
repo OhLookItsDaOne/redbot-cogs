@@ -81,6 +81,8 @@ class LLMManager(commands.Cog):
 
         # Phrase & synonyms
         self.rake = Rake()
+        import nltk.data
+        self.rake.sentence_tokenizer = nltk.data.load("tokenizers/punkt/english.pickle").tokenize  # override RAKE tokenizer
         self.nlp = spacy.load('en_core_web_sm')
 
         # Cache
@@ -225,9 +227,10 @@ class LLMManager(commands.Cog):
 
     @commands.command(name="llmknow")
     @commands.has_permissions(administrator=True)
-    async def llmknow(self, ctx, tag: str, *, content: str):
+    async def llmknow(self, ctx: commands.Context, tag: str, *, content: str):
+        pid = await asyncio.get_running_loop().run_in_executor(None, lambda: self.upsert_entry(tag.lower(), content, 'manual'))(self, ctx, tag: str, *, content: str):
         """Manually add a knowledge entry"""
-        pid=await asyncio.get_running_loop().run_inexecutor(None, lambda: self.upsert_entry(tag.lower(), content, 'manual'))
+        pid=await asyncio.get_running_loop().run_in_executor(None, lambda: self.upsert_entry(tag.lower(), content, 'manual'))
         await ctx.send(f"Added entry under '{tag}' (ID {pid})")
         self._last_manual_id=pid
 
