@@ -40,8 +40,9 @@ from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient, http
 from rank_bm25 import BM25Okapi
 
-# Stelle sicher, dass WordNet-Corpus vorhanden ist
+# Stelle sicher, dass notwendige NLTK-Corpora vorhanden sind
 nltk.download('wordnet', quiet=True)
+nltk.download('stopwords', quiet=True)  # für RAKE und ggf. weitere Textverarbeitung
 
 class LLMManager(commands.Cog):
     """
