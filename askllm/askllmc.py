@@ -44,6 +44,7 @@ from rank_bm25 import BM25Okapi
 nltk.download('wordnet', quiet=True)
 nltk.download('stopwords', quiet=True)
 nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)  # for RAKE sentence tokenization
 
 class LLMManager(commands.Cog):
     """
