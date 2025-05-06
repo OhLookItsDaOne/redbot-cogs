@@ -254,13 +254,30 @@ class FusRohCog(commands.Cog):
     # ----------------------- Datenbank‑Anzeige ----------------------------
     @commands.command()
     @commands.has_permissions(administrator=True)
-    async def fusshow(self, ctx, count: int = 10, offset: int = 0):
+    async def fusshow(self, ctx, count: int = 10, offset: int = 0, *, flag: str = ""):
+        full = "--full" in flag
         rows = await (await self._qd_client()).scroll(count, offset)
         if not rows:
             return await ctx.send("No entries.")
-        await self._chunk_send(
-            ctx, "\n".join(f"• **{r['id']}** – {r['payload']['text'][:150]}…" for r in rows)
-        )
+    
+        lines = []
+        for r in rows:
+            txt = r["payload"]["text"]
+            if not full:
+                txt = txt[:150] + ("…" if len(txt) > 150 else "")
+            lines.append(f"• **{r['id']}** – {txt}")
+        await self._chunk_send(ctx, "\n".join(lines))
+    @commands.command()
+    async def fusget(self, ctx, point_id: int):
+        qd = await self._qd_client()
+        res = await qd.scroll(limit=1, offset=0)          # kleiner Hack
+        res = [p for p in res if p["id"] == point_id]
+        if not res:
+            return await ctx.send("ID not found.")
+        payload = res[0]["payload"]
+        text = payload["text"]
+        links = "\n".join(payload.get("links", []))
+        await self._chunk_send(ctx, f"**{point_id}**\n{text}\n{links}")
 
     # ----------------------- Eintrag löschen ------------------------------
     @commands.command()
