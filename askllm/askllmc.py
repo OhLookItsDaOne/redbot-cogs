@@ -1,4 +1,3 @@
-```python
 # askllmc.py – Hybrid Qdrant + local-Ollama Support Cog mit Synonym-, Phrase- und BM25-Hybrid-Retrieval
 import asyncio
 import re
@@ -291,4 +290,3 @@ class LLMManager(commands.Cog):
 
 async def setup(bot:commands.Bot):
     await bot.add_cog(LLMManager(bot))
-```
