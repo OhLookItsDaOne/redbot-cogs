@@ -231,6 +231,24 @@ class LLMManager(commands.Cog):
     async def llmknowshow(self, ctx: commands.Context):
         await self.ensure_qdrant()
         pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
+        if not pts:
+            return await ctx.send("No entries.")
+        text = "
+
+".join(
+            f"[{p.id}] ({p.payload.get('tag')}) {p.payload.get('content')}" +
+            ("
+→ Images:
+" + "
+".join(f"- {u}" for u in p.payload.get('images', [])) if p.payload.get('images') else "")
+            for p in pts
+        )
+        for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
+            await ctx.send(f"```{chunk}```")
+
+    @commands.command(name="llmknowaddimg")"(self, ctx: commands.Context):
+        await self.ensure_qdrant()
+        pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
         if not pts: return await ctx.send("No entries.")
         text = "
 
