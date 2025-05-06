@@ -153,7 +153,11 @@ class FusRohCog(commands.Cog):
         return self._st.encode(text, convert_to_numpy=True).tolist()
 
     async def _chat(self, messages):
-        sys = "You are a helpful SkyrimVR‑mod‑list assistant. If no answer from Knowledge, reply ‘I’m not sure’."
+        sys = (
+            "You are a concise SkyrimVR‑mod‑list support assistant. "
+            "Answer the user without repeating the entire knowledge text. "
+            "If nothing relevant is found, reply: 'I’m not sure'."
+            )
         payload = {"model": await self.config.chat_model(), "stream": False, "messages": [{"role": "system", "content": sys}, *messages]}
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{(await self.config.api_url()).rstrip('/')}/api/chat", json=payload) as resp:
@@ -240,11 +244,12 @@ class FusRohCog(commands.Cog):
         history.reverse()
         ctx_msgs = [{"role": "user" if m.author == message.author else "assistant", "content": m.clean_content} for m in history]
         hits = await (await self._qd_client()).search(await self._embed(message.clean_content))
-        hits = await (await self._qd_client()).search(
-            await self._embed(message.clean_content)
-        )
         if hits:
-            kb = "\n\n".join(f"* {h['payload']['text']}" for h in hits)
+            kb = "\n\n".join(
+                f"* {h['payload']['text'][:300]}…"  # max 300 Zeichen
+                for h in hits[:3]                   # nur Top‑3 Treffer
+            )
+
             ctx_msgs.append(
                 {"role": "system", "content": f"Knowledge:\n{kb}"}
             )
@@ -254,6 +259,7 @@ class FusRohCog(commands.Cog):
             logger.exception("Chat error: %s", exc)
             return
         if "i’m not sure" in reply.lower():
+            await message.channel.send(reply)   # oder eine eigene kurze Nachricht
             return
         await message.channel.send(reply)
 
