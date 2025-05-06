@@ -2,6 +2,8 @@
 import asyncio
 import subprocess
 # Dynamisches Nachinstallieren fehlender Pakete (safe in Docker)
+import subprocess
+
 def _ensure_pkg(mod: str, pip_name: str | None = None):
     try:
         __import__(mod)
@@ -20,7 +22,14 @@ _ensure_pkg("cachetools")
 _ensure_pkg("sentence_transformers")
 _ensure_pkg("qdrant_client")
 _ensure_pkg("rank_bm25")
-_ensure_pkg("en_core_web_sm")
+
+# SpaCy Modell auf Modulebene herunterladen, falls nicht vorhanden
+import spacy
+try:
+    spacy.load('en_core_web_sm')
+except OSError:
+    import spacy.cli
+    spacy.cli.download('en_core_web_sm')
 
 import asyncio
 import re
@@ -81,13 +90,8 @@ class LLMManager(commands.Cog):
         # Phrase-Extractor
         self.rake = Rake()
 
-                # NLP-Tokenizer (mit On‑Demand Download des Models)
-        try:
-            self.nlp = spacy.load('en_core_web_sm')
-        except OSError:
-            import spacy.cli
-            spacy.cli.download('en_core_web_sm')
-            self.nlp = spacy.load('en_core_web_sm')
+                        # NLP-Tokenizer
+        self.nlp = spacy.load('en_core_web_sm')
 
         # Cache für populäre Queries (TTL 1h)
         self.cache = TTLCache(maxsize=100, ttl=3600)
