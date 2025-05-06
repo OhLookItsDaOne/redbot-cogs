@@ -37,7 +37,10 @@ except ImportError:  # pragma: no cover – optional dep
 
 EMBED_MODEL = "intfloat/e5-large-v2"
 EMBED_DIM = 1024
-
+# ------------------------------------------------------------------
+# Konstante ganz OBEN in der Datei (neben EMBED_DIM etc.)
+HIT_THRESHOLD = 0.30
+# ------------------------------------------------------------------
 logger = logging.getLogger("red.fusrohcog")
 DEFAULT_COLLECTION = "fusroh_support"
 
@@ -252,11 +255,6 @@ class FusRohCog(commands.Cog):
         await qd.drop_all()
         await qd.recreate_collection()
         await ctx.send("💥 Qdrant wiped and fresh collection created.")
-# ------------------------------------------------------------------
-# Konstante ganz OBEN in der Datei (neben EMBED_DIM etc.)
-HIT_THRESHOLD = 0.30
-# ------------------------------------------------------------------
-
     # ---------- listener ----------
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
