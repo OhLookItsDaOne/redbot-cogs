@@ -227,41 +227,42 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Added entry under '{tag}' (ID {pid})")
         self._last_manual_id = pid
 
-@commands.command(name="llmknowshow")
-async def llmknowshow(self, ctx: commands.Context):
-    """List all knowledge entries with images"""
-    await self.ensure_qdrant()
-    pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
-    if not pts:
-        return await ctx.send("No entries.")
-    lines: List[str] = []
-    for p in pts:
-        pl = p.payload or {}
-        entry = f"[{p.id}] ({pl.get('tag')}) {pl.get('content')}"
-        imgs = pl.get('images', [])
-        if imgs:
-            entry += "\n→ Images:\n" + "\n".join(f"- {u}" for u in imgs)
-        lines.append(entry)
-    text = "\n\n".join(lines)
-    for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
-        await ctx.send(f"```{chunk}```")
+    @commands.command(name="llmknowshow")
+    async def llmknowshow(self, ctx: commands.Context):
+        """List all knowledge entries with images"""
+        await self.ensure_qdrant()
+        pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
+        if not pts:
+            return await ctx.send("No entries.")
+        lines: List[str] = []
+        for p in pts:
+            pl = p.payload or {}
+            entry = f"[{p.id}] ({pl.get('tag')}) {pl.get('content')}"
+            imgs = pl.get("images", [])
+            if imgs:
+                entry += "\n→ Images:\n" + "\n".join(f"- {u}" for u in imgs)
+            lines.append(entry)
+        text = "\n\n".join(lines)
+        for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
+            await ctx.send(f"```{chunk}```")
 
-@commands.command(name="llmknowaddimg")
-@commands.has_permissions(administrator=True)
-async def llmknowaddimg(self, ctx: commands.Context, doc_id: int, url: str):
-    """Add an image URL to a knowledge entry"""
-    await self.ensure_qdrant()
-    pts = self.q_client.retrieve("fus_wiki", [doc_id], with_payload=True)
-    if not pts:
-        return await ctx.send(f"No entry {doc_id}.")
-    pl = pts[0].payload or {}
-    imgs = pl.get("images", [])
-    if url in imgs:
-        return await ctx.send("⚠️ Already added.")
-    imgs.append(url)
-    self.q_client.set_payload("fus_wiki", {"images": imgs}, [doc_id])
-    await ctx.send("✅ Image added.")
-
+    @commands.command(name="llmknowaddimg")
+    @commands.has_permissions(administrator=True)
+    async def llmknowaddimg(self, ctx: commands.Context, doc_id: int, url: str):
+        """Add an image URL to a knowledge entry"""
+        if not re.search(r'\.(?:png|jpe?g|gif|webp)(?:\?.*)?$', url, flags=re.IGNORECASE):
+            return await ctx.send("⚠️ That URL doesn't look like an image.")
+        await self.ensure_qdrant()
+        pts = self.q_client.retrieve("fus_wiki", [doc_id], with_payload=True)
+        if not pts:
+            return await ctx.send(f"No entry {doc_id}.")
+        pl = pts[0].payload or {}
+        images = pl.get("images", [])
+        if url in images:
+            return await ctx.send("⚠️ Already added.")
+        images.append(url)
+        self.q_client.set_payload("fus_wiki", {"images": images}, [doc_id])
+        await ctx.send("✅ Image added.")
 
     @commands.command(name="llmknowrmimg")
     @commands.has_permissions(administrator=True)
