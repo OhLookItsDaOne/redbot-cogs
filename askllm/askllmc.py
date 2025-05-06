@@ -81,8 +81,7 @@ class LLMManager(commands.Cog):
 
         # Phrase & synonyms
         self.rake = Rake()
-        import nltk.data
-        self.rake.sentence_tokenizer = nltk.data.load("tokenizers/punkt/english.pickle").tokenize  # override RAKE tokenizer
+        self.rake.sentence_tokenizer = nltk.sent_tokenize
         self.nlp = spacy.load('en_core_web_sm')
 
         # Cache
