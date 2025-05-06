@@ -1,3 +1,4 @@
+```python
 # askllmc.py – Hybrid Qdrant + local-Ollama Support Cog mit Synonym-, Phrase- und BM25-Hybrid-Retrieval
 import asyncio
 import subprocess
@@ -319,7 +320,156 @@ class LLMManager(commands.Cog):
         await self.config.qdrant_url.set(url.rstrip('/')); self.q_client=None; await ctx.send("Qdrant-URL updated")
 
     @commands.Cog.listener()
-    async def on_ready(self): print("LLMManager loaded.")
+    async def on_ready(self):
+        print("LLMManager loaded.")
+
+    # ===== Ursprüngliche CRUD-/Admin-Commands =====
+    @commands.command(name="llmknow")
+    @commands.has_permissions(administrator=True)
+    async def llmknow(self, ctx: commands.Context, tag: str, *, content: str):
+        """Manuell einen Knowledge-Eintrag hinzufügen"""
+        await self.ensure_qdrant()
+        pid = await asyncio.get_running_loop().run_in_executor(None, self._upsert_entry, tag.lower(), content, "manual")
+        await ctx.send(f"Added entry under '{tag}' (ID {pid}).")
+        self._last_manual_id = pid
+
+    @commands.command(name="llmknowshow")
+    async def llmknowshow(self, ctx: commands.Context):
+        """List all entries, showing full content and image URLs."""
+        await self.ensure_qdrant()
+        pts, _ = self.q_client.scroll('fus_wiki', with_payload=True, limit=1000)
+        if not pts:
+            return await ctx.send("No entries stored.")
+        out = []
+        for p in pts:
+            pl = p.payload or {}
+            line = f"[{p.id}] ({pl.get('tag')}, {pl.get('source')}): {pl.get('content')}"
+            imgs = pl.get("images", [])
+            if imgs:
+                line += "\n  → Images:\n" + "\n".join(f"    • {u}" for u in imgs)
+            out.append(line)
+        # Hier richtig zusammenfügen
+        text = "\n\n".join(out)
+        for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
+            await ctx.send(f"```{chunk}```")
+
+    @commands.command(name="llmknowmvimg")
+    @commands.has_permissions(administrator=True)
+    async def llmknowmvimg(self, ctx: commands.Context, doc_id: int, from_pos: int, to_pos: int):
+        """Reorder ein Bild in einem Knowledge-Eintrag"""
+        await self.ensure_qdrant()
+        pts = self.q_client.retrieve('fus_wiki', [doc_id], with_payload=True)
+        if not pts:
+            return await ctx.send(f"No entry with ID {doc_id}.")
+        imgs = pts[0].payload.get('images', [])
+        if not (1 <= from_pos <= len(imgs)):
+            return await ctx.send("'from' position out of range.")
+        url = imgs.pop(from_pos-1)
+        to_pos = max(1, min(to_pos, len(imgs)+1))
+        imgs.insert(to_pos-1, url)
+        self.q_client.set_payload('fus_wiki', {'images': imgs}, [doc_id])
+        await ctx.send("✅ Image reordered.")
+
+    @commands.command(name="llmknowclearimgs")
+    @commands.has_permissions(administrator=True)
+    async def llmknowclearimgs(self, ctx: commands.Context, doc_id: Optional[int] = None):
+        """Clear image URLs from one entry or all entries"""
+        await self.ensure_qdrant()
+        if doc_id:
+            pts = self.q_client.retrieve('fus_wiki', [doc_id], with_payload=True)
+            if not pts:
+                return await ctx.send(f"No entry {doc_id}.")
+            self.q_client.set_payload('fus_wiki', {'images':[]}, [doc_id])
+            return await ctx.send(f"Cleared images from {doc_id}.")
+        pts, _ = self.q_client.scroll('fus_wiki', with_payload=True, limit=1000)
+        to_clear = [p.id for p in pts if p.payload.get('images')]
+        for pid in to_clear:
+            self.q_client.set_payload('fus_wiki', {'images':[]}, [pid])
+        await ctx.send(f"Cleared images from {len(to_clear)} entries.")
+
+    @commands.command(name="llmknowdelete")
+    @commands.has_permissions(administrator=True)
+    async def llmknowdelete(self, ctx: commands.Context, doc_id: int):
+        """Delete einen einzelnen Eintrag"""
+        await self.ensure_qdrant()
+        self.q_client.delete('fus_wiki', [doc_id])
+        await ctx.send(f"Deleted entry {doc_id}.")
+
+    @commands.command(name="llmknowdeletetag")
+    @commands.has_permissions(administrator=True)
+    async def llmknowdeletetag(self, ctx: commands.Context, tag: str):
+        """Delete alle Einträge mit einem Tag"""
+        await self.ensure_qdrant()
+        filt = {'must':[{'key':'tag','match':{'value':tag.lower()}}]}
+        pts, _ = self.q_client.scroll('fus_wiki', with_payload=False, limit=1000, scroll_filter=filt)
+        ids = [p.id for p in pts]
+        if ids:
+            self.q_client.delete('fus_wiki', ids)
+        await ctx.send(f"Deleted {len(ids)} entries tagged '{tag}'.")
+
+    @commands.command(name="llmknowdeletelast")
+    @commands.has_permissions(administrator=True)
+    async def llmknowdeletelast(self, ctx: commands.Context):
+        """Delete den zuletzt angelegten manuellen Eintrag"""
+        if not hasattr(self, '_last_manual_id') or self._last_manual_id is None:
+            return await ctx.send("No recent manual entry.")
+        await self.ensure_qdrant()
+        self.q_client.delete('fus_wiki', [self._last_manual_id])
+        await ctx.send(f"Deleted last entry {self._last_manual_id}.")
+        self._last_manual_id = None
+
+    @commands.command(name="addautochannel")
+    @commands.has_permissions(administrator=True)
+    async def add_auto_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Enable auto-reply in diesem Kanal"""
+        chans = await self.config.auto_channels()
+        if channel.id in chans:
+            return await ctx.send("Already enabled there.")
+        chans.append(channel.id)
+        await self.config.auto_channels.set(chans)
+        await ctx.send(f"Auto-reply enabled in {channel.mention}.")
+
+    @commands.command(name="removeautochannel")
+    @commands.has_permissions(administrator=True)
+    async def remove_auto_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Disable auto-reply in diesem Kanal"""
+        chans = await self.config.auto_channels()
+        if channel.id not in chans:
+            return await ctx.send("Not enabled there.")
+        chans.remove(channel.id)
+        await self.config.auto_channels.set(chans)
+        await ctx.send(f"Auto-reply disabled in {channel.mention}.")
+
+    @commands.command(name="listautochannels")
+    async def list_auto_channels(self, ctx: commands.Context):
+        """List all channels with auto-reply enabled"""
+        chans = await self.config.auto_channels()
+        if not chans:
+            return await ctx.send("No auto-reply channels set.")
+        mentions = ", ".join(f"<#{cid}>" for cid in chans)
+        await ctx.send(f"Auto-reply active in: {mentions}")
+
+    @commands.command(name="setthreshold")
+    @commands.has_permissions(administrator=True)
+    async def setthreshold(self, ctx: commands.Context, value: float):
+        """Set the token-overlap threshold (0.0–1.0)"""
+        if not 0.0 <= value <= 1.0:
+            return await ctx.send("Threshold must be between 0.0 and 1.0")
+        await self.config.threshold.set(value)
+        await ctx.send(f"✅ Threshold set to {value:.0%}")
+
+    @commands.command(name="setvectorthreshold")
+    @commands.has_permissions(administrator=True)
+    async def setvectorthreshold(self, ctx: commands.Context, value: float):
+        """Set the vector score threshold (0.0–1.0)"""
+        if not 0.0 <= value <= 1.0:
+            return await ctx.send("Threshold must be between 0.0 and 1.0")
+        await self.config.vector_threshold.set(value)
+        await ctx.send(f"✅ Vector threshold set to {value:.0%}")
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(LLMManager(bot))
 
 async def setup(bot:commands.Bot):
     await bot.add_cog(LLMManager(bot))
+
