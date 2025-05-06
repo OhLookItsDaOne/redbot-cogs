@@ -1,5 +1,27 @@
 # askllmc.py – Hybrid Qdrant + local-Ollama Support Cog mit Synonym-, Phrase- und BM25-Hybrid-Retrieval
 import asyncio
+import subprocess
+# Dynamisches Nachinstallieren fehlender Pakete (safe in Docker)
+def _ensure_pkg(mod: str, pip_name: str | None = None):
+    try:
+        __import__(mod)
+    except ModuleNotFoundError:
+        subprocess.check_call(
+            ["python", "-m", "pip", "install", pip_name or mod],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        __import__(mod)
+
+# sicherstellen, dass alle externen Dependencies vorhanden sind
+_ensure_pkg("nltk")
+_ensure_pkg("spacy")
+_ensure_pkg("rake_nltk")
+_ensure_pkg("cachetools")
+_ensure_pkg("sentence_transformers")
+_ensure_pkg("qdrant_client")
+_ensure_pkg("rank_bm25")
+
+import asyncio
 import re
 import uuid
 import json
