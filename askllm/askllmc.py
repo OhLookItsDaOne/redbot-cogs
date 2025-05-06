@@ -63,8 +63,8 @@ class LLMManager(commands.Cog):
         self.config = Config.get_conf(self, identifier=9876543210123)
         self.config.register_global(
             model="gemma3:12b",
-            api_url="http://localhost:11434",
-            qdrant_url="http://localhost:6333",
+            api_url="http://192.168.10.5:11434",
+            qdrant_url="http://192.168.10.5:6333",
             vector_threshold=0.3,
             recency_months=6,
             auto_channels=[],
