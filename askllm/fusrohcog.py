@@ -1,36 +1,21 @@
 from __future__ import annotations
-
 """
-FusRoh Cog – SkyrimVR Mod‑List Helper
--------------------------------------
-A Red‑DiscordBot cog that turns your bot into a knowledgeable
-support assistant for the SkyrimVR mod‑list community.
+FusRoh Cog – SkyrimVR Mod‑List Helper
+====================================
+Red‑DiscordBot cog that teams **Ollama (gemma3:12b)** with a
+self‑hosted **Qdrant** vector store so your Discord bot can answer
+SkyrimVR‑mod‑list support questions from a curated knowledge base.
 
-Main ideas
-~~~~~~~~~~
-* **Vector store** – Qdrant running at the URL you configure stores
-  factual support snippets ("knowledge") as text payloads plus embeddings.
-* **LLM** – Ollama hosts *gemma3:12b* for both embeddings and chat.
-* **Commands** –
-
-  * ``!fusknow <text>`` – add *text* to the knowledge base.
-  * ``!fusshow [count]`` – list newest *count* entries (default 10).
-  * ``!fusknowdel <id>`` – delete an entry by its point‑id.
-  * ``!learn <n>`` – ingest the last *n* messages of the channel.
-  * ``!autotype [on|off]`` – toggle auto‑reply in the current channel.
-
-* **Auto‑response** – In channels marked with ``autotype`` (or when the
-  bot is mentioned), the last 5 chat messages are combined with the top
-  knowledge hits to build a prompt.  The system prompt tells Gemma to
-  *only* answer when sufficient context exists and to reply "I’m not
-  sure" otherwise, minimizing hallucinations.
-
-Docker‑friendly – All URLs are configurable so the cog can talk to
-containers on your Unraid box.
+Key points
+----------
+* Commands: ``!fusknow``, ``!fusshow``, ``!fusknowdel``, ``!learn``,
+  ``!autotype``.
+* Auto‑replies in designated channels (or when mentioned).
+* **Hallucination guard** – replies "I’m not sure" unless KB provides
+  a strong match.
+* On start‑up Qdrant collection is (re‑)created to avoid schema drift.
 """
 
-import asyncio
-import json
 import logging
 import textwrap
 import time
@@ -43,16 +28,20 @@ from redbot.core.commands import BadArgument
 
 logger = logging.getLogger("red.fusrohcog")
 DEFAULT_COLLECTION = "fusroh_support"
+EMBEDDING_DIM = 768  # Gemma default – change if you swap model
 
+# ---------------------------------------------------------------------------
+# Qdrant minimal async wrapper
+# ---------------------------------------------------------------------------
 
 class QdrantClient:
-    """Very small async wrapper around Qdrant’s REST API."""
+    """Tiny async HTTP wrapper for the Qdrant REST API."""
 
     def __init__(self, url: str, collection: str = DEFAULT_COLLECTION):
         self.base = url.rstrip("/")
         self.collection = collection
 
-    # ---------- helpers ----------
+    # ------------------------- low‑level helper -------------------------
     async def _request(self, method: str, path: str, **kwargs):
         url = f"{self.base}{path}"
         async with aiohttp.ClientSession() as session:
@@ -62,96 +51,76 @@ class QdrantClient:
                     raise RuntimeError(f"Qdrant {method} {path} failed: {resp.status} {txt}")
                 return await resp.json()
 
-    # ---------- collection mgmt ----------
-    async def _ensure_collection(self):
+    # ---------------------- collection management ----------------------
+    async def recreate_collection(self):
+        """Drop existing collection (if any) and create a fresh one."""
+        # Delete if present
+        try:
+            await self._request("DELETE", f"/collections/{self.collection}")
+        except RuntimeError:
+            pass  # 404 – not present, that’s fine
+        # Create new
+        schema = {"vectors": {"size": EMBEDDING_DIM, "distance": "Cosine"}}
+        await self._request("PUT", f"/collections/{self.collection}", json=schema)
+        logger.info("Re‑created Qdrant collection %s", self.collection)
+
+    async def ensure_collection(self):
         try:
             await self._request("GET", f"/collections/{self.collection}")
         except RuntimeError:
-            schema = {
-                "vectors": {
-                    "size": 768,  # Gemma embeddings size – adjust if you use another model
-                    "distance": "Cosine",
-                }
-            }
-            await self._request("PUT", f"/collections/{self.collection}", json=schema)
-            logger.info("Created Qdrant collection %s", self.collection)
+            await self.recreate_collection()
 
-    # ---------- CRUD ops ----------
+    # ----------------------------- CRUD -------------------------------
     async def upsert(self, point_id: int, vector: List[float], payload: Dict[str, Any]):
-        await self._ensure_collection()
-        data = {
-            "points": [
-                {
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": payload,
-                }
-            ]
-        }
+        await self.ensure_collection()
+        data = {"points": [{"id": point_id, "vector": vector, "payload": payload}]}
         await self._request("PUT", f"/collections/{self.collection}/points", json=data)
 
-    async def delete(self, point_id: int):
+    async def delete_point(self, point_id: int):
+        await self.ensure_collection()
         data = {"points": [point_id]}
         await self._request("DELETE", f"/collections/{self.collection}/points", json=data)
 
-        async def search(self, vector: List[float], limit: int = 5):
-        await self._ensure_collection()
+    async def search(self, vector: List[float], limit: int = 5):
+        await self.ensure_collection()
         body = {
             "vector": vector,
             "limit": limit,
-            "with_payload": "true",
-            "score_threshold": 0.25,  # tune this – lower → more results, higher → stricter
-        }
-        resp = await self._request("POST", f"/collections/{self.collection}/points/search", json=body)
-        return resp.get("result", [])
-        body = {
-            "vector": vector,
-            "limit": limit,
-            "with_payload": "true",
-            "score_threshold": 0.25,  # tune this – lower → more results, higher → stricter
+            "with_payload": True,
+            "score_threshold": 0.25,
         }
         resp = await self._request("POST", f"/collections/{self.collection}/points/search", json=body)
         return resp.get("result", [])
 
-        async def scroll(self, limit: int = 10, offset: int = 0):
-        await self._ensure_collection()
-        params = {"limit": limit, "offset": offset, "with_payload": "true"}
-        try:
-            resp = await self._request("GET", f"/collections/{self.collection}/points", params=params)
-        except RuntimeError as exc:
-            if "404" in str(exc):
-                return []
-            raise
-        return resp.get("result", [])
-        params = {"limit": limit, "offset": offset, "with_payload": "true"}
+    async def scroll(self, limit: int = 10, offset: int = 0):
+        await self.ensure_collection()
+        params = {"limit": limit, "offset": offset, "with_payload": True}
         resp = await self._request("GET", f"/collections/{self.collection}/points", params=params)
         return resp.get("result", [])
 
+# ---------------------------------------------------------------------------
+# Cog
+# ---------------------------------------------------------------------------
 
 class FusRohCog(commands.Cog):
-    """Cog entry‑point – add with ``[p]load fusrohcog``"""
+    """Attach with `[p]load FusRoh`"""
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # noinspection PyTypeChecker
-        self.config = Config.get_conf(self, identifier=0xABCD1234)
+        self.config = Config.get_conf(self, identifier=0xFUSFUS)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
-            autotype_channels=[],  # List[int]
+            autotype_channels=[],
         )
-        # ---------- runtime cache ----------
         self._qdrant: QdrantClient | None = None
 
-    # -------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------
-
+    # --------------------------- helpers ---------------------------
     async def _get_qdrant(self) -> QdrantClient:
         if self._qdrant is None:
-            url = await self.config.qdrant_url()
-            self._qdrant = QdrantClient(url)
+            self._qdrant = QdrantClient(await self.config.qdrant_url())
+            await self._qdrant.recreate_collection()  # Start clean each boot
         return self._qdrant
 
     async def _create_embedding(self, text: str) -> List[float]:
@@ -159,189 +128,129 @@ class FusRohCog(commands.Cog):
         payload = {
             "model": await self.config.model(),
             "prompt": text,
-            "raw": False,
             "stream": False,
-            "format": "json",
             "options": {"type": "embedding"},
         }
-        endpoint = f"{url.rstrip('/')}/api/embeddings"
         async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload) as resp:
+            async with session.post(f"{url.rstrip('/')}/api/embeddings", json=payload) as resp:
                 if resp.status >= 400:
-                    raise RuntimeError(f"Ollama embeddings error {resp.status}: {await resp.text()}")
-                data = await resp.json()
-        return data["embedding"]  # type: ignore[index]
+                    raise RuntimeError(f"Embeddings error {resp.status}: {await resp.text()}")
+                return (await resp.json())["embedding"]
 
-    async def _generate_reply(self, context_messages: List[Dict[str, str]]) -> str:
+    async def _generate_reply(self, context: List[Dict[str, str]]) -> str:
         url = await self.config.api_url()
-        system_prompt = textwrap.dedent(
-            """
-            You are a helpful support assistant for the SkyrimVR mod‑list community.
-            * If you do not find a factual answer in the provided `Knowledge` section, say "I’m not sure.".
-            * Do *not* invent features or steps – be concise and precise.
-            * If the user asks about mod installation troubleshooting, list clear steps.
-            """
-        ).strip()
+        sys_prompt = (
+            "You are a helpful support assistant for the SkyrimVR mod‑list community. "
+            "If no answer is found in the Knowledge section, say ‘I’m not sure’."
+        )
         payload = {
             "model": await self.config.model(),
             "stream": False,
-            "format": "json",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                *context_messages,
-            ],
+            "messages": [{"role": "system", "content": sys_prompt}, *context],
         }
-        endpoint = f"{url.rstrip('/')}/api/chat"
         async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload) as resp:
+            async with session.post(f"{url.rstrip('/')}/api/chat", json=payload) as resp:
                 if resp.status >= 400:
-                    raise RuntimeError(f"Ollama chat error {resp.status}: {await resp.text()}")
-                data = await resp.json()
-        return data["message"]["content"]  # type: ignore[index]
+                    raise RuntimeError(f"Chat error {resp.status}: {await resp.text()}")
+                return (await resp.json())["message"]["content"]
 
     async def _chunk_send(self, ctx: commands.Context, text: str):
-        """Split *text* into <=2000‑char chunks for Discord."""
         for i in range(0, len(text), 1990):
-            await ctx.send(f"```{text[i:i + 1990]}```")
+            await ctx.send(f"```{text[i:i+1990]}```")
 
     @staticmethod
-    def _ts_id() -> int:
+    def _pid() -> int:
         return int(time.time() * 1000)
 
-    # -------------------------------------------------------------------
-    # Commands
-    # -------------------------------------------------------------------
-
-    @commands.command(name="fusknow")
-    @commands.cooldown(1, 10, commands.BucketType.user)
+    # ----------------------------- commands -----------------------------
+    @commands.command()
     async def fusknow(self, ctx: commands.Context, *, text: str):
         """Add *text* to the knowledge base."""
-        vector = await self._create_embedding(text)
-        point_id = self._ts_id()
-        payload = {"text": text, "author": str(ctx.author), "ts": ctx.message.created_at.isoformat()}
-        qd = await self._get_qdrant()
-        await qd.upsert(point_id, vector, payload)
-        await ctx.tick()
-        await ctx.send(f"Knowledge saved with id `{point_id}`.")
+        vec = await self._create_embedding(text)
+        pid = self._pid()
+        await (await self._get_qdrant()).upsert(pid, vec, {"text": text, "author": str(ctx.author)})
+        await ctx.send(f"✅ Saved with id `{pid}`")
 
-    @commands.command(name="fusshow")
+    @commands.command()
     async def fusshow(self, ctx: commands.Context, count: int = 10, offset: int = 0):
-        """Show *count* entries starting at *offset*."""
-        qd = await self._get_qdrant()
-        entries = await qd.scroll(limit=count, offset=offset)
-        if not entries:
-            await ctx.send("No entries found.")
+        """Show recent entries."""
+        rows = await (await self._get_qdrant()).scroll(count, offset)
+        if not rows:
+            await ctx.send("No entries.")
             return
-        parts = []
-        for p in entries:
-            tid = p["id"]
-            txt = p["payload"].get("text", "<no text>")
-            parts.append(f"• **{tid}** – {txt[:150]}…")
-        await self._chunk_send(ctx, "\n".join(parts))
+        out = [f"• **{r['id']}** – {r['payload']['text'][:150]}…" for r in rows]
+        await self._chunk_send(ctx, "\n".join(out))
 
-    @commands.command(name="fusknowdel")
+    @commands.command()
     async def fusknowdel(self, ctx: commands.Context, point_id: int):
-        """Delete an entry by its *point_id*."""
-        qd = await self._get_qdrant()
-        try:
-            await qd.delete(point_id)
-        except RuntimeError as exc:
-            raise BadArgument(str(exc))
-        await ctx.tick()
-        await ctx.send(f"Deleted knowledge id `{point_id}`.")
+        await (await self._get_qdrant()).delete_point(point_id)
+        await ctx.send("🗑️ Deleted.")
 
-    @commands.command(name="learn")
+    @commands.command()
     async def learn(self, ctx: commands.Context, count: int = 5):
-        """Ingest the last *count* messages from this channel."""
-        if count < 1 or count > 20:
-            raise BadArgument("Count must be between 1 and 20.")
-        messages = [m async for m in ctx.channel.history(limit=count + 1) if m.id != ctx.message.id]
-        messages.reverse()  # oldest‑first
-        joined = "\n".join(f"{m.author.display_name}: {m.clean_content}" for m in messages)
-        vector = await self._create_embedding(joined)
-        qd = await self._get_qdrant()
-        pid = self._ts_id()
-        await qd.upsert(pid, vector, {"text": joined, "learned": True})
-        await ctx.send(f"Learned from {len(messages)} messages (id `{pid}`).")
+        if not 1 <= count <= 20:
+            raise BadArgument("Count 1‑20.")
+        msgs = [m async for m in ctx.channel.history(limit=count+1) if m.id != ctx.message.id]
+        msgs.reverse()
+        bundle = "\n".join(f"{m.author.display_name}: {m.clean_content}" for m in msgs)
+        pid = self._pid()
+        await (await self._get_qdrant()).upsert(pid, await self._create_embedding(bundle), {"text": bundle, "learned": True})
+        await ctx.send(f"📚 Learned `{pid}`.")
 
-    @commands.command(name="autotype")
+    @commands.command()
     async def autotype(self, ctx: commands.Context, mode: str | None = None):
-        """Without args – show current status.  Use *on* or *off* to toggle for this channel."""
-        channel_id = ctx.channel.id
+        cid = ctx.channel.id
         autos = await self.config.autotype_channels()
         if mode is None:
-            await ctx.send("Auto‑typing is currently **{}** for this channel.".format(
-                "enabled" if channel_id in autos else "disabled"))
+            await ctx.send(f"Auto‑typing is **{'on' if cid in autos else 'off'}** here.")
             return
-        mode = mode.lower()
-        if mode not in {"on", "off"}:
-            raise BadArgument("Mode must be 'on' or 'off'.")
-        if mode == "on":
-            if channel_id not in autos:
-                autos.append(channel_id)
+        if mode.lower() == "on":
+            if cid not in autos:
+                autos.append(cid)
                 await self.config.autotype_channels.set(autos)
-            await ctx.send("Enabled auto‑typing in this channel.")
+            await ctx.send("Auto‑typing enabled.")
+        elif mode.lower() == "off":
+            if cid in autos:
+                autos.remove(cid)
+                await self.config.autotype_channels.set(autos)
+            await ctx.send("Auto‑typing disabled.")
         else:
-            if channel_id in autos:
-                autos.remove(channel_id)
-                await self.config.autotype_channels.set(autos)
-            await ctx.send("Disabled auto‑typing in this channel.")
+            raise BadArgument("Use on/off.")
 
-    # -------------------------------------------------------------------
-    # Listeners
-    # -------------------------------------------------------------------
-
+    # --------------------------- listener ---------------------------
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
-        """Auto‑reply when appropriate."""
-        # Ignore DMs, bots, and our own messages
-        if not message.guild or message.author.bot or message.author == self.bot.user:
+        if (not message.guild) or message.author.bot or message.author == self.bot.user:
             return
-
         ctx = await self.bot.get_context(message)
-        # If it *is* a command we already handled above.
         if ctx.valid:
             return
-
-        channel_id = message.channel.id
         autos = await self.config.autotype_channels()
-        should_reply = channel_id in autos or self.bot.user in message.mentions
-        if not should_reply:
+        if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
 
-        # ---- Build context for LLM
-        # Pull latest 5 msgs including user’s message
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
-        chat_context = [
-            {"role": "user" if m.author == message.author else "assistant", "content": m.clean_content}
-            for m in history
-        ]
-        # Embed user message to search KB
-        vector = await self._create_embedding(message.clean_content)
-        qd = await self._get_qdrant()
-        hits = await qd.search(vector, limit=5)
-        knowledge_blurbs = [h["payload"]["text"] for h in hits]
-        if knowledge_blurbs:
-            kb_section = "\n\n".join(f"* {txt}" for txt in knowledge_blurbs)
-            chat_context.append({"role": "system", "content": f"Knowledge:\n{kb_section}"})
+        context = [{"role": "user" if m.author == message.author else "assistant", "content": m.clean_content} for m in history]
+
+        emb = await self._create_embedding(message.clean_content)
+        hits = await (await self._get_qdrant()).search(emb)
+        if hits:
+            kb = "\n\n".join(f"* {h['payload']['text']}" for h in hits)
+            context.append({"role": "system", "content": f"Knowledge:\n{kb}"})
 
         try:
-            reply = await self._generate_reply(chat_context)
-        except Exception as exc:  # broad – log and bail silently
-            logger.exception("Failed to generate reply: %s", exc)
+            reply = await self._generate_reply(context)
+        except Exception as e:
+            logger.exception("LLM error: %s", e)
             return
-        # Avoid spamming – skip if LLM decides it’s unsure.
         if "i’m not sure" in reply.lower():
             return
-        # Finally send answer
-        await message.channel.typing()
         await message.channel.send(reply)
 
-    # -------------------------------------------------------------------
-    # Cog setup helper (for Red’s load mechanism)
-    # -------------------------------------------------------------------
-
+# ---------------------------------------------------------------------------
+# Red loader
+# ---------------------------------------------------------------------------
 
 async def setup(bot: Red):
     await bot.add_cog(FusRohCog(bot))
