@@ -86,7 +86,7 @@ class QdrantClient:
         body = {
             "vector": vector,
             "limit": limit,
-            "with_payload": True,
+            "with_payload": "true",
             "score_threshold": 0.25,
         }
         resp = await self._request("POST", f"/collections/{self.collection}/points/search", json=body)
@@ -107,7 +107,7 @@ class FusRohCog(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFUSFUS)
+        self.config = Config.get_conf(self, identifier=0xF0F5F5)
         self.config.register_global(
             model="gemma3:12b",
             api_url="http://192.168.10.5:11434",
