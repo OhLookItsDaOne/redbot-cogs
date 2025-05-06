@@ -308,7 +308,7 @@ class FusRohCog(commands.Cog):
     async def fusthreshold(
         self, ctx, vec: float | None = None, ce: float | None = None
     ):
-        \"\"\"`!fusthreshold` → zeigt;  `!fusthreshold 0.22 0.18` → setzt.\"\"\"
+        """`!fusthreshold` → zeigt;  `!fusthreshold 0.22 0.18` → setzt."""
         if vec is None and ce is None:
             v, c = await self._vec_thr(), await self._ce_thr()
             await ctx.send(f"Vector‑Thr **{v:.2f}**, CE‑Thr **{c:.2f}**")
