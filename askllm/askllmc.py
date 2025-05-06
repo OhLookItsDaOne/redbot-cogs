@@ -227,55 +227,41 @@ class LLMManager(commands.Cog):
         await ctx.send(f"Added entry under '{tag}' (ID {pid})")
         self._last_manual_id = pid
 
-    @commands.command(name="llmknowshow")
-    async def llmknowshow(self, ctx: commands.Context):
-        """List all knowledge entries with images"""
-        await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
-        if not pts:
-            return await ctx.send("No entries.")
-        lines: List[str] = []
-        for p in pts:
-            pl = p.payload or {}
-            entry = f"[{p.id}] ({pl.get('tag')}) {pl.get('content')}"
-            imgs = pl.get('images', [])
-            if imgs:
-                entry += "→ Images:" + "".join(f"- {u}" for u in imgs)
-            lines.append(entry)
-        text = "".join(lines)
-        for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
-            await ctx.send(f"```{chunk}```")
+@commands.command(name="llmknowshow")
+async def llmknowshow(self, ctx: commands.Context):
+    """List all knowledge entries with images"""
+    await self.ensure_qdrant()
+    pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
+    if not pts:
+        return await ctx.send("No entries.")
+    lines: List[str] = []
+    for p in pts:
+        pl = p.payload or {}
+        entry = f"[{p.id}] ({pl.get('tag')}) {pl.get('content')}"
+        imgs = pl.get('images', [])
+        if imgs:
+            entry += "\n→ Images:\n" + "\n".join(f"- {u}" for u in imgs)
+        lines.append(entry)
+    text = "\n\n".join(lines)
+    for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
+        await ctx.send(f"```{chunk}```")
 
-    @commands.command(name="llmknowaddimg")
-    @commands.has_permissions(administrator=True)
-    async def llmknowaddimg(self, ctx: commands.Context, doc_id: int, url: str):"(self, ctx: commands.Context):
-        await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
-        if not pts: return await ctx.send("No entries.")
-        text = "".join(
-            f"[{p.id}] ({p.payload.get('tag')}) {p.payload.get('content')}" +
-            ("→ Images:" + "".join(f"- {u}" for u in p.payload.get('images', [])) if p.payload.get('images') else "")
-            for p in pts
-        )
-        for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
-            await ctx.send(f"```{chunk}```")
+@commands.command(name="llmknowaddimg")
+@commands.has_permissions(administrator=True)
+async def llmknowaddimg(self, ctx: commands.Context, doc_id: int, url: str):
+    """Add an image URL to a knowledge entry"""
+    await self.ensure_qdrant()
+    pts = self.q_client.retrieve("fus_wiki", [doc_id], with_payload=True)
+    if not pts:
+        return await ctx.send(f"No entry {doc_id}.")
+    pl = pts[0].payload or {}
+    imgs = pl.get("images", [])
+    if url in imgs:
+        return await ctx.send("⚠️ Already added.")
+    imgs.append(url)
+    self.q_client.set_payload("fus_wiki", {"images": imgs}, [doc_id])
+    await ctx.send("✅ Image added.")
 
-    @commands.command(name="llmknowaddimg")
-    @commands.has_permissions(administrator=True)
-    async def llmknowaddimg(self, ctx: commands.Context, doc_id: int, url: str):
-        if not url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
-            return await ctx.send("⚠️ Not an image URL.")
-        await self.ensure_qdrant()
-        pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1, scroll_filter={"must":[{"key":"id","match":{"value":doc_id}}]})
-        if not pts:
-            return await ctx.send(f"No entry {doc_id}.")
-        pl = pts[0].payload or {}
-        imgs = pl.setdefault('images', [])
-        if url in imgs:
-            return await ctx.send("⚠️ Already added.")
-        imgs.append(url)
-        self.q_client.set_payload("fus_wiki", {"images": imgs}, [doc_id])
-        await ctx.send("✅ Image added.")
 
     @commands.command(name="llmknowrmimg")
     @commands.has_permissions(administrator=True)
