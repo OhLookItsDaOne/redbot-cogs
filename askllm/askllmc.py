@@ -229,35 +229,32 @@ class LLMManager(commands.Cog):
 
     @commands.command(name="llmknowshow")
     async def llmknowshow(self, ctx: commands.Context):
+        """List all knowledge entries with images"""
         await self.ensure_qdrant()
         pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
         if not pts:
             return await ctx.send("No entries.")
-        text = "
-
-".join(
-            f"[{p.id}] ({p.payload.get('tag')}) {p.payload.get('content')}" +
-            ("
-→ Images:
-" + "
-".join(f"- {u}" for u in p.payload.get('images', [])) if p.payload.get('images') else "")
-            for p in pts
-        )
+        lines: List[str] = []
+        for p in pts:
+            pl = p.payload or {}
+            entry = f"[{p.id}] ({pl.get('tag')}) {pl.get('content')}"
+            imgs = pl.get('images', [])
+            if imgs:
+                entry += "→ Images:" + "".join(f"- {u}" for u in imgs)
+            lines.append(entry)
+        text = "".join(lines)
         for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
             await ctx.send(f"```{chunk}```")
 
-    @commands.command(name="llmknowaddimg")"(self, ctx: commands.Context):
+    @commands.command(name="llmknowaddimg")
+    @commands.has_permissions(administrator=True)
+    async def llmknowaddimg(self, ctx: commands.Context, doc_id: int, url: str):"(self, ctx: commands.Context):
         await self.ensure_qdrant()
         pts, _ = self.q_client.scroll("fus_wiki", with_payload=True, limit=1000)
         if not pts: return await ctx.send("No entries.")
-        text = "
-
-".join(
+        text = "".join(
             f"[{p.id}] ({p.payload.get('tag')}) {p.payload.get('content')}" +
-            ("
-→ Images:
-" + "
-".join(f"- {u}" for u in p.payload.get('images', [])) if p.payload.get('images') else "")
+            ("→ Images:" + "".join(f"- {u}" for u in p.payload.get('images', [])) if p.payload.get('images') else "")
             for p in pts
         )
         for chunk in (text[i:i+1900] for i in range(0, len(text), 1900)):
