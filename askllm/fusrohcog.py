@@ -100,7 +100,15 @@ class QdrantClient:
 
     async def scroll(self, limit: int = 10, offset: int = 0):
         try:
-            res = await self._request("GET", f"/collections/{self.collection}/points", params={"limit": limit, "offset": offset, "with_payload": True})
+            res = await self._request(
+                "GET",
+                f"/collections/{self.collection}/points",
+                params={
+                    "limit": limit,
+                    "offset": offset,
+                    "with_payload": "true",   # yarl expects a str
+                },
+            )
         except RuntimeError as exc:
             if "404" in str(exc):
                 return []
