@@ -18,16 +18,15 @@ Commands: `!fusknow`, `!fusshow`, `!fusknowdel`, `!learn`, `!autotype`,
 > *The database is **not wiped** on restart.  `!fuswipe` stays available
 > if you ever want a clean slate.*
 """
-
 import logging
 import time
 from typing import Any, Dict, List
-
+import numpy as np
 import aiohttp
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 from redbot.core.commands import BadArgument
-
+from sentence_transformers import CrossEncoder
 # ── Local embedding model ────────────────────────────────────────────────
 try:
     from sentence_transformers import SentenceTransformer  # type: ignore
@@ -90,14 +89,19 @@ class QdrantClient:
         await self._request("DELETE", f"/collections/{self.collection}/points", json={"points": [pid]})
 
     async def search(self, vec: List[float], limit: int = 5):
-        res = await self._request("POST", f"/collections/{self.collection}/points/search", json={
-            "vector": vec,
-            "limit": limit,
-            "with_payload": True,
-            "score_threshold": 0.25,
-        })
+        res = await self._request(
+            "POST",
+            f"/collections/{self.collection}/points/search",
+            json={
+                "vector": vec,
+                "limit":  limit,
+                "with_payload": True,
+                "with_vectors": True,          #  <‑ ergänzen
+                "score_threshold": 0.25,
+            },
+        )
         return res.get("result", [])
-
+        
     async def scroll(self, limit: int = 10, offset: int = 0):
         body = {"limit": limit, "with_payload": True}
         if offset:
@@ -126,6 +130,7 @@ class QdrantClient:
 class FusRohCog(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
+        # ---------- Red‑Config ----------
         self.config = Config.get_conf(self, identifier=0xF0F5F5)
         self.config.register_global(
             chat_model="gemma3:12b",
@@ -133,9 +138,17 @@ class FusRohCog(commands.Cog):
             qdrant_url="http://192.168.10.5:6333",
             autotype_channels=[],
         )
+        # ---------- Vektor‑ & LLM‑Runtime ----------
         self._qd: QdrantClient | None = None
         self._st: SentenceTransformer | None = None
-
+        # Cross‑Encoder initialisieren **hier**, nicht ganz oben
+        device = "cuda" if torch and torch.cuda.is_available() else "cpu"
+        self._ce = CrossEncoder(
+            "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            device=device,
+        )
+        logger.info("Loaded Cross‑Encoder on %s", device)
+        
     # ---------- helpers ----------
     async def _qd_client(self) -> QdrantClient:
         if self._qd is None:
@@ -151,30 +164,43 @@ class FusRohCog(commands.Cog):
             self._st = SentenceTransformer(EMBED_MODEL, device=device)
             logger.info("Loaded %s on %s", EMBED_MODEL, device)
         return self._st.encode(text, convert_to_numpy=True).tolist()
+     # ---------- Hilfsfunktionen ----------
+    @staticmethod
+    def chunk_text(text: str, tokens: int = 120, overlap: int = 20):
+        words = text.split()
+        step  = tokens - overlap
+        for i in range(0, len(words), step):
+            yield " ".join(words[i : i + tokens])
 
-    async def _chat(self, messages):
-        sys = (
-            "You are a concise SkyrimVR‑mod‑list support assistant. "
-            "Answer the user without repeating the entire knowledge text. "
-            "If nothing relevant is found, reply: 'I’m not sure'."
-            )
-        payload = {"model": await self.config.chat_model(), "stream": False, "messages": [{"role": "system", "content": sys}, *messages]}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{(await self.config.api_url()).rstrip('/')}/api/chat", json=payload) as resp:
-                if resp.status >= 400:
-                    raise RuntimeError(await resp.text())
-                return (await resp.json())["message"]["content"]
+    @staticmethod
+    def mmr(query_vec, doc_vecs, k: int = 3, λ: float = 0.7):
+        """Maximal Marginal Relevance – gibt die Indexliste der besten k Vektoren zurück."""
+        query = np.asarray(query_vec)
+        sim   = [np.dot(query, d) / (np.linalg.norm(query) * np.linalg.norm(d)) for d in doc_vecs]
 
-    async def _chunk_send(self, ctx, text):
-        for i in range(0, len(text), 1990):
-            await ctx.send(f"```{text[i:i+1990]}```")
+        selected, selected_ids = [], set()
+        for _ in range(k):
+            mmr_scores = [
+                λ * s - (1 - λ) * max(
+                    np.dot(d, doc_vecs[j]) / (np.linalg.norm(d) * np.linalg.norm(doc_vecs[j]))
+                    for j in selected_ids
+                ) if i not in selected_ids else -1
+                for i, (s, d) in enumerate(zip(sim, doc_vecs))
+            ]
+            nxt = int(np.argmax(mmr_scores))
+            selected.append(nxt)
+            selected_ids.add(nxt)
+        return selected
 
     # ---------- commands ----------
     @commands.command()
     async def fusknow(self, ctx, *, text: str):
-        pid = int(time.time() * 1000)
-        await (await self._qd_client()).upsert(pid, await self._embed(text), {"text": text, "author": str(ctx.author)})
-        await ctx.send(f"✅ Saved `{pid}`")
+        for chunk in self.chunk_text(text):
+            pid  = int(time.time()*1000)
+            vec  = await self._embed(chunk)
+            meta = {"author": str(ctx.author), "source": ctx.message.jump_url}
+            await (await self._qd_client()).upsert(pid, vec, {"text": chunk, **meta})
+        await ctx.send("✅ Added.")
 
     @commands.command()
     async def fusshow(self, ctx, count: int = 10, offset: int = 0):
@@ -226,41 +252,71 @@ class FusRohCog(commands.Cog):
         await qd.drop_all()
         await qd.recreate_collection()
         await ctx.send("💥 Qdrant wiped and fresh collection created.")
+# ------------------------------------------------------------------
+# Konstante ganz OBEN in der Datei (neben EMBED_DIM etc.)
+HIT_THRESHOLD = 0.30
+# ------------------------------------------------------------------
 
     # ---------- listener ----------
-        # ---------- listener ----------
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
+        # ---- Vorbedingungen -------------------------------------------------
         if not message.guild or message.author.bot or message.author == self.bot.user:
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
+
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
 
+        # ---- Chat‑Historie als Kontext --------------------------------------
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
-        ctx_msgs = [{"role": "user" if m.author == message.author else "assistant", "content": m.clean_content} for m in history]
-        hits = await (await self._qd_client()).search(await self._embed(message.clean_content))
-        if hits:
-            kb = "\n\n".join(
-                f"* {h['payload']['text'][:300]}…"  # max 300 Zeichen
-                for h in hits[:3]                   # nur Top‑3 Treffer
-            )
+        ctx_msgs = [
+            {
+                "role": "user" if m.author == message.author else "assistant",
+                "content": m.clean_content,
+            }
+            for m in history
+        ]
 
-            ctx_msgs.append(
-                {"role": "system", "content": f"Knowledge:\n{kb}"}
-            )
+        # ---- Vektor‑Suche ----------------------------------------------------
+        query_vec = await self._embed(message.clean_content)
+        hits = await (await self._qd_client()).search(query_vec, limit=8)
+
+        # 1. Score‑Schwelle
+        hits = [h for h in hits if h["score"] >= HIT_THRESHOLD]
+        if not hits:
+            await message.channel.send("I’m not sure.")
+            return
+
+        # 2. MMR‑Diversität (Top‑5)
+        doc_vecs = [h["vector"] for h in hits]          # <- vectors braucht 'with_vectors':True
+        best_idx = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
+        hits     = [hits[i] for i in best_idx]
+
+        # 3. Cross‑Encoder‑Rerank (Top‑2 höchster Präzision)
+        pairs   = [(message.clean_content, h["payload"]["text"]) for h in hits]
+        scores  = self._ce.predict(pairs)
+        hits    = [h for h, s in sorted(zip(hits, scores), key=lambda x: -x[1])][:2]
+
+        # ---- Knowledge‑Block für Gemma --------------------------------------
+        kb = "\n\n".join(f"* {h['payload']['text'][:300]}…" for h in hits)
+        ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
+
+        # ---- LLM‑Antwort -----------------------------------------------------
         try:
             reply = await self._chat(ctx_msgs)
         except Exception as exc:
             logger.exception("Chat error: %s", exc)
             return
+
         if "i’m not sure" in reply.lower():
-            await message.channel.send(reply)   # oder eine eigene kurze Nachricht
+            await message.channel.send(reply)
             return
+
         await message.channel.send(reply)
 
 # ── loader ───────────────────────────────────────────────────────────────
