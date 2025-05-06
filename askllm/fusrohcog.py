@@ -94,7 +94,16 @@ class QdrantClient:
         data = {"points": [point_id]}
         await self._request("DELETE", f"/collections/{self.collection}/points", json=data)
 
-    async def search(self, vector: List[float], limit: int = 5):
+        async def search(self, vector: List[float], limit: int = 5):
+        await self._ensure_collection()
+        body = {
+            "vector": vector,
+            "limit": limit,
+            "with_payload": "true",
+            "score_threshold": 0.25,  # tune this – lower → more results, higher → stricter
+        }
+        resp = await self._request("POST", f"/collections/{self.collection}/points/search", json=body)
+        return resp.get("result", [])
         body = {
             "vector": vector,
             "limit": limit,
@@ -104,7 +113,16 @@ class QdrantClient:
         resp = await self._request("POST", f"/collections/{self.collection}/points/search", json=body)
         return resp.get("result", [])
 
-    async def scroll(self, limit: int = 10, offset: int = 0):
+        async def scroll(self, limit: int = 10, offset: int = 0):
+        await self._ensure_collection()
+        params = {"limit": limit, "offset": offset, "with_payload": "true"}
+        try:
+            resp = await self._request("GET", f"/collections/{self.collection}/points", params=params)
+        except RuntimeError as exc:
+            if "404" in str(exc):
+                return []
+            raise
+        return resp.get("result", [])
         params = {"limit": limit, "offset": offset, "with_payload": "true"}
         resp = await self._request("GET", f"/collections/{self.collection}/points", params=params)
         return resp.get("result", [])
