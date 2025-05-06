@@ -238,7 +238,7 @@ class FusRohCog(commands.Cog):
     async def fusknow(self, ctx, *, text: str):
         """Fügt Wissen hinzu – Tags optional in eckigen Klammern."""
         tags, clean = self._split_tags(text)
-        for chunk in self.chunk_text(clean):
+        for chunk in self.chunk_text(self.clean_discord_text(clean)):
             pid = int(time.time() * 1000)
             vec = await self._embed(chunk)
             payload = {
@@ -268,13 +268,10 @@ class FusRohCog(commands.Cog):
     async def fusknowdel(self, ctx, point_id: int):
         await (await self._qd_client()).delete(point_id)
         await ctx.send("🗑️ Deleted.")
-        
-    # ----------------------- Auto‑Lernen ----------------------------------
+            # ----------------------- Auto‑Lernen ----------------------------------
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, count: int = 5):
-        """Nimmt die letzten *count* Messages, strippt Namen/Markdown
-        und speichert sie (Links separat)."""
         if not 1 <= count <= 20:
             raise BadArgument("Count 1‑20")
         msgs = [
@@ -286,9 +283,9 @@ class FusRohCog(commands.Cog):
         clean_lines, links = [], []
         for m in msgs:
             clean_lines.append(self.clean_discord_text(m.clean_content))
-            links += re.findall(r'https?://\\S+', m.content)
+            links += re.findall(r'https?://\S+', m.content)   # ← ein Backslash
 
-        bundle = "\\n".join(clean_lines)
+        bundle = "\n".join(clean_lines)                      # ← echtes \n
         payload = {"text": bundle, "learned": True}
         if links:
             payload["links"] = links
@@ -350,7 +347,7 @@ class FusRohCog(commands.Cog):
         await qd.drop_all()
         await qd.recreate_collection()
         await ctx.send("💥 Qdrant wiped and fresh collection created.")
-
+        
     # ---------- Hilfs‑Methode: Chat‑Aufruf --------------------------------
     async def _chat(self, messages):
         sys_prompt = (
@@ -359,10 +356,6 @@ class FusRohCog(commands.Cog):
             "be answered from them, reply exactly: “I’m not sure.”\n"
             "Cite with [#] markers (1‑based) after each fact you use."
         )
-        reply = await self._chat(ctx_msgs)
-        if '[#' not in reply:
-            reply = "I’m not sure."
-
         body = {
             "model": await self.config.chat_model(),
             "stream": False,
@@ -376,6 +369,7 @@ class FusRohCog(commands.Cog):
                     raise RuntimeError(await resp.text())
                 data = await resp.json()
         return data["message"]["content"]
+
 
     # ---------- listener --------------------------------------------------
     @commands.Cog.listener()
