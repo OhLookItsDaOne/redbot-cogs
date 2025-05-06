@@ -225,6 +225,19 @@ class LLMManager(commands.Cog):
             return r.text.strip()
 
     @commands.Cog.listener()
+        async def _get_recent_context(self, channel: discord.TextChannel, before: discord.Message, n: int = 10) -> str:
+        lines: List[str] = []
+        async for m in channel.history(limit=n * 5, before=before):
+            content = m.content.strip()
+            if not content:
+                continue
+            role = "Bot" if m.author.bot else "User"
+            lines.append(f"{role}: {content}")
+            if len(lines) >= n:
+                break
+        lines.reverse()
+        return
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
