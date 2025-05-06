@@ -167,6 +167,12 @@ class FusRohCog(commands.Cog):
             self._st = SentenceTransformer(EMBED_MODEL, device=device)
             logger.info("Loaded %s on %s", EMBED_MODEL, device)
         return self._st.encode(text, convert_to_numpy=True).tolist()
+
+    # ---------- kleine Ausgabe‑Hilfe ----------
+    async def _chunk_send(self, ctx: commands.Context, text: str):
+        """Schickt langen Text in 2000‑Zeichen‑Chunks an Discord."""
+        for i in range(0, len(text), 1990):
+            await ctx.send(f"```{text[i:i+1990]}```")
      # ---------- Hilfsfunktionen ----------
     @staticmethod
     def chunk_text(text: str, tokens: int = 120, overlap: int = 20):
