@@ -197,38 +197,38 @@ class LLMManager(commands.Cog):
         return [h for h, _ in results[:8]]
 
     async def _ask_llm(self, facts: List[str], question: str) -> str:
+        # Build prompt
         prompt = (
-            "Use only these facts to answer. If none apply, say 'I don't know'.\nFacts:\n" +
-            "\n\n".join(facts) +
-            f"\n\nQuestion: {question}\nAnswer:"
+            "Use only these facts to answer. If none apply, say 'I don't know'.\nFacts:\n"
+            + "\n\n".join(facts)
+            + f"\n\nQuestion: {question}\nAnswer:"
         )
         api, model = await self.config.api_url(), await self.config.model()
+        # Disable streaming to avoid chunk floods
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
         r = requests.post(
-            f"{api.rstrip('/')}" f"/api/chat",
-            json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-            timeout=120
+            f"{api.rstrip('/')}" + "/api/chat",
+            json=payload,
+            timeout=120,
         )
         r.raise_for_status()
         try:
-            return r.json().get('message', {}).get('content', '').strip()
-        except ValueError:
+            data = r.json()
+            # Extract assistant content
+            return data.get('message', {}).get('content', '').strip()
+        except (ValueError, json.JSONDecodeError):
+            # Fallback to raw text
             return r.text.strip()
-
-    async def _get_recent_context(self, channel: discord.TextChannel, before: discord.Message, n: int = 10) -> str:
-        lines: List[str] = []
-        async for m in channel.history(limit=n * 5, before=before):
-            if not m.content.strip():
-                continue
-            role = "Bot" if m.author.bot else "User"
-            lines.append(f"{role}: {m.content.strip()}")
-            if len(lines) >= n:
-                break
-        return "\n".join(lines[::-1])
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
+        # Determine if should reply
         autolist = await self.config.auto_channels()
         if self.bot.user.mentioned_in(message):
             q = message.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
@@ -238,19 +238,28 @@ class LLMManager(commands.Cog):
             return
         if not q:
             return
+
+        # Gather context and retrieve hits
         ctx_txt = await self._get_recent_context(message.channel, before=message)
         async with message.channel.typing():
             hits = await self._retrieve(q)
             facts = [h.payload.get('content', '') for h in hits]
             ans = await self._ask_llm(facts, q)
-        # split LLM reply into 1900-char chunks
-        for chunk in (ans[i:i+1900] for i in range(0, len(ans), 1900)):
-            await message.channel.send(chunk)
+
+        # Truncate or chunk answer to fit Discord limits
+        if len(ans) > 1900:
+            for chunk in (ans[i:i+1900] for i in range(0, len(ans), 1900)):
+                await message.channel.send(chunk)
+        else:
+            await message.channel.send(ans)
+
+        # Send any images from top hits
         thr = await self.config.vector_threshold()
-        for h in self._last_ranked_hits:
+        for idx, h in enumerate(self._last_ranked_hits):
             if h.payload.get('source') != 'manual':
                 continue
-            if getattr(h, 'score', 0) >= thr:
+            score = getattr(h, 'score', 0)
+            if score >= thr:
                 for url in h.payload.get('images', []):
                     await message.channel.send(embed=Embed().set_image(url=url))
 
