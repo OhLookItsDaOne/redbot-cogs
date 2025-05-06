@@ -1,4 +1,3 @@
-```python
 # askllmc.py – Hybrid Qdrant + local-Ollama Support Cog mit Synonym-, Phrase- und BM25-Hybrid-Retrieval
 import asyncio
 import subprocess
