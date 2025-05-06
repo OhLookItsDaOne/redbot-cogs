@@ -99,12 +99,9 @@ class QdrantClient:
         return res.get("result", [])
 
     async def scroll(self, limit: int = 10, offset: int = 0):
-        body = {
-            "limit": limit,
-            "with_payload": True,
-        }
+        body = {"limit": limit, "with_payload": True}
         if offset:
-            body["offset"] = offset            # only include if non‑zero
+            body["offset"] = offset
         try:
             res = await self._request(
                 "POST",
@@ -113,9 +110,14 @@ class QdrantClient:
             )
         except RuntimeError as exc:
             if "404" in str(exc):
-                return []                      # no collection yet
+                return []
             raise
-        return res.get("result", [])
+
+        data = res.get("result", {})
+        # new ⇣ pick the actual list of points
+        if isinstance(data, dict) and "points" in data:
+            return data["points"]
+        return data  # fallback for older API shapes
 
 # ─────────────────────────────────────────────────────────────────────────
 # Cog
