@@ -228,13 +228,14 @@ class FusRohCog(commands.Cog):
         history.reverse()
         ctx_msgs = [{"role": "user" if m.author == message.author else "assistant", "content": m.clean_content} for m in history]
         hits = await (await self._qd_client()).search(await self._embed(message.clean_content))
+        hits = await (await self._qd_client()).search(
+            await self._embed(message.clean_content)
+        )
         if hits:
-            kb = "
-
-".join(f"* {h['payload']['text']}" for h in hits)
-            ctx_msgs.append({"role": "system", "content": f"Knowledge:
-{kb}"})
-
+            kb = "\n\n".join(f"* {h['payload']['text']}" for h in hits)
+            ctx_msgs.append(
+                {"role": "system", "content": f"Knowledge:\n{kb}"}
+            )
         try:
             reply = await self._chat(ctx_msgs)
         except Exception as exc:
