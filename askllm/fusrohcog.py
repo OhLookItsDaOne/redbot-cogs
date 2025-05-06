@@ -187,6 +187,13 @@ class FusRohCog(commands.Cog):
         step = tokens - overlap
         for i in range(0, len(words), step):
             yield " ".join(words[i : i + tokens])
+    # Entfernt Namen / > Zitate / Markdown‑Headlines
+    @staticmethod
+    def clean_discord_text(txt: str) -> str:
+        txt = re.sub(r'^>.*$', '', txt, flags=re.M)          # blockquotes
+        txt = re.sub(r'^#+\\s+', '', txt, flags=re.M)        # markdown h#
+        txt = re.sub(r'^\\s*\\w{2,20}:\\s*', '', txt)        # name:
+        return txt.strip()
 
     @staticmethod
     def mmr(query_vec, doc_vecs, k: int = 3, λ: float = 0.7):
@@ -261,11 +268,13 @@ class FusRohCog(commands.Cog):
     async def fusknowdel(self, ctx, point_id: int):
         await (await self._qd_client()).delete(point_id)
         await ctx.send("🗑️ Deleted.")
-
+        
     # ----------------------- Auto‑Lernen ----------------------------------
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, count: int = 5):
+        """Nimmt die letzten *count* Messages, strippt Namen/Markdown
+        und speichert sie (Links separat)."""
         if not 1 <= count <= 20:
             raise BadArgument("Count 1‑20")
         msgs = [
@@ -273,10 +282,20 @@ class FusRohCog(commands.Cog):
             if m.id != ctx.message.id
         ]
         msgs.reverse()
-        bundle = "\n".join(f"{m.author.display_name}: {m.clean_content}" for m in msgs)
+
+        clean_lines, links = [], []
+        for m in msgs:
+            clean_lines.append(self.clean_discord_text(m.clean_content))
+            links += re.findall(r'https?://\\S+', m.content)
+
+        bundle = "\\n".join(clean_lines)
+        payload = {"text": bundle, "learned": True}
+        if links:
+            payload["links"] = links
+
         pid = int(time.time() * 1000)
         await (await self._qd_client()).upsert(
-            pid, await self._embed(bundle), {"text": bundle, "learned": True}
+            pid, await self._embed(bundle), payload
         )
         await ctx.send(f"📚 Learned `{pid}`")
 
@@ -335,9 +354,15 @@ class FusRohCog(commands.Cog):
     # ---------- Hilfs‑Methode: Chat‑Aufruf --------------------------------
     async def _chat(self, messages):
         sys_prompt = (
-            "You are a concise SkyrimVR‑mod‑list support assistant. "
-            "If the provided knowledge is insufficient, reply: “I’m not sure.”"
+            "You are a concise SkyrimVR‑mod‑list support assistant.\n"
+            "Use **only** the facts under 'Knowledge'. If the answer cannot "
+            "be answered from them, reply exactly: “I’m not sure.”\n"
+            "Cite with [#] markers (1‑based) after each fact you use."
         )
+        reply = await self._chat(ctx_msgs)
+        if '[#' not in reply:
+            reply = "I’m not sure."
+
         body = {
             "model": await self.config.chat_model(),
             "stream": False,
@@ -420,8 +445,13 @@ class FusRohCog(commands.Cog):
         hits = [h for h, s in sorted(scored, key=lambda x: -x[1])[:2]]
 
         # --- Knowledge‑Block ---------------------------------------------
-        kb = "\n\n".join(f"* {h['payload']['text'][:300]}…" for h in hits)
-        ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
+        kb_parts = []
+        for h in hits:
+            kb_parts.append(f"* {h['payload']['text'][:300]}…")
+            for u in h['payload'].get('links', [])[:2]:
+                kb_parts.append(f"  ↪ {u}")
+        kb = "\\n".join(kb_parts)
+        ctx_msgs.append({"role": "system", "content": f"Knowledge:\\n{kb}"})
 
         # --- LLM‑Antwort --------------------------------------------------
         try:
