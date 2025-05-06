@@ -228,7 +228,7 @@ class LLMManager(commands.Cog):
     @commands.command(name="llmknow")
     @commands.has_permissions(administrator=True)
     async def llmknow(self, ctx: commands.Context, tag: str, *, content: str):
-        pid = await asyncio.get_running_loop().run_in_executor(None, lambda: self.upsert_entry(tag.lower(), content, 'manual'))(self, ctx, tag: str, *, content: str):
+        pid = await asyncio.get_running_loop().run_in_executor(None, lambda: self.upsert_entry(tag.lower(), content, 'manual'))
         """Manually add a knowledge entry"""
         pid=await asyncio.get_running_loop().run_in_executor(None, lambda: self.upsert_entry(tag.lower(), content, 'manual'))
         await ctx.send(f"Added entry under '{tag}' (ID {pid})")
@@ -388,3 +388,5 @@ class LLMManager(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LLMManager(bot))
+
+  
