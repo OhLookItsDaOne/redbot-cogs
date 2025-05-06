@@ -105,7 +105,7 @@ class QdrantClient:
         return resp.get("result", [])
 
     async def scroll(self, limit: int = 10, offset: int = 0):
-        params = {"limit": limit, "offset": offset, "with_payload": True}
+        params = {"limit": limit, "offset": offset, "with_payload": "true"}
         resp = await self._request("GET", f"/collections/{self.collection}/points", params=params)
         return resp.get("result", [])
 
