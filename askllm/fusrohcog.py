@@ -37,10 +37,6 @@ except ImportError:  # pragma: no cover – optional dep
 
 EMBED_MODEL = "intfloat/e5-large-v2"
 EMBED_DIM = 1024
-# ------------------------------------------------------------------
-# Konstante ganz OBEN in der Datei (neben EMBED_DIM etc.)
-HIT_THRESHOLD = 0.30
-# ------------------------------------------------------------------
 logger = logging.getLogger("red.fusrohcog")
 DEFAULT_COLLECTION = "fusroh_support"
 
@@ -140,6 +136,7 @@ class FusRohCog(commands.Cog):
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
             autotype_channels=[],
+            hit_threshold=0.30,
         )
         # ---------- Vektor‑ & LLM‑Runtime ----------
         self._qd: QdrantClient | None = None
@@ -173,6 +170,10 @@ class FusRohCog(commands.Cog):
         """Schickt langen Text in 2000‑Zeichen‑Chunks an Discord."""
         for i in range(0, len(text), 1990):
             await ctx.send(f"```{text[i:i+1990]}```")
+
+            
+    async def _threshold(self) -> float:
+        return await self.config.hit_threshold()
      # ---------- Hilfsfunktionen ----------
     @staticmethod
     def chunk_text(text: str, tokens: int = 120, overlap: int = 20):
@@ -203,6 +204,7 @@ class FusRohCog(commands.Cog):
 
     # ---------- commands ----------
     @commands.command()
+    @commands.has_permissions(administrator=True)
     async def fusknow(self, ctx, *, text: str):
         for chunk in self.chunk_text(text):
             pid  = int(time.time()*1000)
@@ -212,6 +214,7 @@ class FusRohCog(commands.Cog):
         await ctx.send("✅ Added.")
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
     async def fusshow(self, ctx, count: int = 10, offset: int = 0):
         rows = await (await self._qd_client()).scroll(count, offset)
         if not rows:
@@ -219,11 +222,26 @@ class FusRohCog(commands.Cog):
         await self._chunk_send(ctx, "\n".join(f"• **{r['id']}** – {r['payload']['text'][:150]}…" for r in rows))
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
     async def fusknowdel(self, ctx, point_id: int):
         await (await self._qd_client()).delete(point_id)
         await ctx.send("🗑️ Deleted.")
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def fusthreshold(self, ctx, value: float = None):
+        """Zeigt oder setzt die Score‑Schwelle (0.0‒1.0)."""
+        if value is None:
+            cur = await self._threshold()
+            await ctx.send(f"Aktueller Schwellenwert: **{cur:.2f}**")
+            return
+        if not 0.0 < value < 1.0:
+            raise BadArgument("Wert muss zwischen 0 und 1 liegen.")
+        await self.config.hit_threshold.set(value)
+        await ctx.send(f"✅ Schwellenwert auf **{value:.2f}** gesetzt.")
+    
+    @commands.command()
+    @commands.has_permissions(administrator=True)
     async def learn(self, ctx, count: int = 5):
         if not 1 <= count <= 20:
             raise BadArgument("Count 1‑20")
@@ -235,6 +253,7 @@ class FusRohCog(commands.Cog):
         await ctx.send(f"📚 Learned `{pid}`")
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
     async def autotype(self, ctx, mode: str | None = None):
         cid = ctx.channel.id
         autos = await self.config.autotype_channels()
@@ -289,22 +308,24 @@ class FusRohCog(commands.Cog):
         # ---- Vektor‑Suche ----------------------------------------------------
         query_vec = await self._embed(message.clean_content)
         hits = await (await self._qd_client()).search(query_vec, limit=8)
-
-        # 1. Score‑Schwelle
-        hits = [h for h in hits if h["score"] >= HIT_THRESHOLD]
         if not hits:
-            await message.channel.send("I’m not sure.")
-            return
-
-        # 2. MMR‑Diversität (Top‑5)
-        doc_vecs = [h["vector"] for h in hits]          # <- vectors braucht 'with_vectors':True
+            await message.channel.send("I’m not sure."); return
+        
+        # 1. MMR‑Diversität (Top‑5)
+        doc_vecs = [h["vector"] for h in hits]
         best_idx = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
         hits     = [hits[i] for i in best_idx]
-
-        # 3. Cross‑Encoder‑Rerank (Top‑2 höchster Präzision)
-        pairs   = [(message.clean_content, h["payload"]["text"]) for h in hits]
-        scores  = self._ce.predict(pairs)
-        hits    = [h for h, s in sorted(zip(hits, scores), key=lambda x: -x[1])][:2]
+        
+        # 2. Cross‑Encoder‑Rerank + Schwelle
+        pairs  = [(message.clean_content, h["payload"]["text"]) for h in hits]
+        scores = self._ce.predict(pairs)
+        thr    = await self._threshold()
+        
+        scored = [(h, s) for h, s in zip(hits, scores) if s >= thr]
+        if not scored:
+            await message.channel.send("I’m not sure."); return
+        
+        hits = [h for h, s in sorted(scored, key=lambda x: -x[1])[:2]]
 
         # ---- Knowledge‑Block für Gemma --------------------------------------
         kb = "\n\n".join(f"* {h['payload']['text'][:300]}…" for h in hits)
