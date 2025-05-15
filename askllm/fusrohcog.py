@@ -118,10 +118,12 @@ class QdrantClient:
         )
         return res.get("result", [])
 
-    async def scroll(self, limit: int = 10, offset: int = 0):
+    async def scroll(self, limit: int = 10, offset: int = 0, qfilter: dict | None = None):
         body = {"limit": limit, "with_payload": True}
         if offset:
             body["offset"] = offset
+        if qfilter:
+            body["filter"] = qfilter
         try:
             res = await self._request(
                 "POST", f"/collections/{self.collection}/points/scroll", json=body
@@ -447,14 +449,29 @@ class FusRohCog(commands.Cog):
             return
         hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
 
-        # Knowledge-Block zusammenbauen
-        kb_parts = []
+        # --- Cross-Encoder + CE-Schwelle (Top-2) ------------
+        # ... dein existing code bis:
+        hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
+
+        # --- Level-2 Nachladen aller Chunks desselben doc_id ---
+        kb_texts = []
         for h in hits:
-            kb_parts.append(f"* {h['payload']['text'][:300]}…")
-            for link in h["payload"].get("links", [])[:2]:
-                kb_parts.append(f"  ↪ {link}")
-        kb = "\n".join(kb_parts)
-        ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
+            doc = h["payload"]["doc_id"]
+            # hole alle Chunks mit diesem doc_id
+            chunks = await (await self._qd_client()).scroll(
+                limit=100,
+                offset=0,
+                qfilter={"must":[{"key":"doc_id","match":{"value": doc}}]}
+            )
+            # sortiere nach ID für Reihenfolge
+            chunks.sort(key=lambda c: c["id"])
+            full = " ".join(c["payload"]["text"] for c in chunks)
+            kb_texts.append(full)
+
+        # baue Knowledge-Block
+        kb = "\n\n".join(f"* {text[:500]}…" for text in kb_texts)
+        ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
+
 
         # LLM-Antwort
         try:
