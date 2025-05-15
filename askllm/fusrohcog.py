@@ -237,15 +237,18 @@ class FusRohCog(commands.Cog):
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def fusknow(self, ctx, *, text: str):
-        """Fügt Wissen hinzu – Tags optional in eckigen Klammern."""
+        """Fügt Wissen hinzu – Tags optional in eckigen Klammern."""
+        # generiere einmalig eine gemeinsame doc_id
+        doc_id = int(time.time() * 1000)
         tags, clean = self._split_tags(text)
-        for chunk in self.chunk_text(self.clean_discord_text(clean)):
+        for chunk in self.chunk_text(clean):
             pid = int(time.time() * 1000)
             vec = await self._embed(chunk)
             payload = {
                 "text": chunk,
                 "author": str(ctx.author),
                 "source": ctx.message.jump_url,
+                "doc_id": doc_id,            # <-- hier
             }
             if tags:
                 payload["tags"] = tags
@@ -389,22 +392,19 @@ class FusRohCog(commands.Cog):
                     raise RuntimeError(await resp.text())
                 data = await resp.json()
         return data["message"]["content"]
-
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
-        # Vorbedingungen
+        # 1) Vorbedingungen
         if not message.guild or message.author.bot or message.author == self.bot.user:
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
-
-        # Auto-Typing / Mention
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
 
-        # Chat-Historie als Kontext
+        # 2) Chat-Historie
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
         ctx_msgs = [
@@ -412,66 +412,61 @@ class FusRohCog(commands.Cog):
             for m in history
         ]
 
-        # Query-Embedding
-        query_vec = await self._embed(message.clean_content)
+        # 3) Query-Embedding
+        query = message.clean_content
+        query_vec = await self._embed(query)
 
-        # Optionaler Tag-Filter
-        word_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9\-]+", message.clean_content.lower())}
-        possible_tags = {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
-        want_tags = list(word_tokens & possible_tags)
-        qfilter = (
-            {"must": [{"key": "tags", "match": {"value": t}} for t in want_tags]}
-            if want_tags else None
-        )
+        # 4) Optionaler Tag-Filter
+        tokens = re.findall(r"[A-Za-z0-9\-]+", query.lower())
+        want = set(tokens) & {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
+        qfilter = {"must": [{"key": "tags", "match": {"value": t}} for t in want]} if want else None
 
-        # Vektor-Suche (ohne server-seitigen Threshold)
-        hits = await (await self._qd_client()).search(query_vec, limit=8, qfilter=qfilter)
-
-        # Client-seitige Score-Filterung
+        # 5) Vektor-Suche mit Client-Seiten-Threshold
         vec_thr = await self._vec_thr()
+        hits = await (await self._qd_client()).search(query_vec, limit=8, qfilter=qfilter)
         hits = [h for h in hits if h.get("score", 0) >= vec_thr]
         if not hits:
-            await message.channel.send("I’m not sure.")
-            return
+            return await message.channel.send("I’m not sure.")
 
-        # MMR Diversität (Top-5)
+        # 6) MMR-Diversität (Top-5)
         doc_vecs = [h["vector"] for h in hits]
-        best_idx = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
-        hits = [hits[i] for i in best_idx]
+        idxs = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
+        hits = [hits[i] for i in idxs]
 
-        # Cross-Encoder-Rerank + CE-Schwelle (Top-2)
-        pairs = [(message.clean_content, h["payload"]["text"]) for h in hits]
+        # 7) Cross-Encoder-Rerank + CE-Threshold (Top-2)
+        pairs  = [(query, h["payload"]["text"]) for h in hits]
         scores = self._ce.predict(pairs)
         ce_thr = await self._ce_thr()
         scored = [(h, s) for h, s in zip(hits, scores) if s >= ce_thr]
         if not scored:
-            await message.channel.send("I’m not sure.")
-            return
+            return await message.channel.send("I’m not sure.")
         hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
 
-        # --- Cross-Encoder + CE-Schwelle (Top-2) ------------
-        # ... dein existing code bis:
-        hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
-
-        # --- Level-2 Nachladen aller Chunks desselben doc_id ---
+        # 8) Level-2 Nachladen aller Chunks desselben Dokuments
         kb_texts = []
         for h in hits:
-            doc = h["payload"]["doc_id"]
-            # hole alle Chunks mit diesem doc_id
+            # doc_id aus Payload oder fallback auf die Point-ID
+            doc = h["payload"].get("doc_id", h["id"])
             chunks = await (await self._qd_client()).scroll(
                 limit=100,
                 offset=0,
                 qfilter={"must":[{"key":"doc_id","match":{"value": doc}}]}
             )
-            # sortiere nach ID für Reihenfolge
             chunks.sort(key=lambda c: c["id"])
             full = " ".join(c["payload"]["text"] for c in chunks)
             kb_texts.append(full)
 
-        # baue Knowledge-Block
+        # 9) Knowledge-Block bauen
         kb = "\n\n".join(f"* {text[:500]}…" for text in kb_texts)
-        ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
+        ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
 
+        # 10) LLM-Antwort holen und <think>-Blöcke rausfiltern
+        try:
+            raw = await self._chat(ctx_msgs)
+        except Exception:
+            return
+        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
+        await message.channel.send(reply or "I’m not sure.")
 
         # LLM-Antwort
         try:
