@@ -110,7 +110,6 @@ class QdrantClient:
             "limit": limit,
             "with_payload": True,
             "with_vectors": True,
-            "score_threshold": 0.25,
         }
         if qfilter:
             body["filter"] = qfilter
@@ -389,65 +388,56 @@ class FusRohCog(commands.Cog):
                 data = await resp.json()
         return data["message"]["content"]
 
-
-    # ---------- listener --------------------------------------------------
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
-        if (
-            not message.guild
-            or message.author.bot
-            or message.author == self.bot.user
-        ):
+        # Vorbedingungen
+        if not message.guild or message.author.bot or message.author == self.bot.user:
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
 
+        # Auto-Typing / Mention
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
 
-        # --- History ------------------------------------------------------
+        # Chat-Historie als Kontext
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
         ctx_msgs = [
-            {
-                "role": "user" if m.author == message.author else "assistant",
-                "content": m.clean_content,
-            }
+            {"role": "user" if m.author == message.author else "assistant", "content": m.clean_content}
             for m in history
         ]
 
-        # --- Query‑Embedding ---------------------------------------------
+        # Query-Embedding
         query_vec = await self._embed(message.clean_content)
 
-        # --- Tag‑Filter aus Query (optional) -----------------------------
-        word_tokens = {
-            w.lower()
-            for w in re.findall(r"[A-Za-z0-9\-]+", message.clean_content.lower())
-        }
+        # Optionaler Tag-Filter
+        word_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9\-]+", message.clean_content.lower())}
         possible_tags = {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
         want_tags = list(word_tokens & possible_tags)
         qfilter = (
             {"must": [{"key": "tags", "match": {"value": t}} for t in want_tags]}
-            if want_tags
-            else None
+            if want_tags else None
         )
 
-        # --- Vektor‑Suche -------------------------------------------------
-        hits = await (await self._qd_client()).search(
-            query_vec, limit=8, qfilter=qfilter
-        )
+        # Vektor-Suche (ohne server-seitigen Threshold)
+        hits = await (await self._qd_client()).search(query_vec, limit=8, qfilter=qfilter)
+
+        # Client-seitige Score-Filterung
+        vec_thr = await self._vec_thr()
+        hits = [h for h in hits if h.get("score", 0) >= vec_thr]
         if not hits:
             await message.channel.send("I’m not sure.")
             return
 
-        # --- MMR Top‑5 ----------------------------------------------------
+        # MMR Diversität (Top-5)
         doc_vecs = [h["vector"] for h in hits]
         best_idx = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
         hits = [hits[i] for i in best_idx]
 
-        # --- Cross‑Encoder + CE‑Schwelle ----------------------------------
+        # Cross-Encoder-Rerank + CE-Schwelle (Top-2)
         pairs = [(message.clean_content, h["payload"]["text"]) for h in hits]
         scores = self._ce.predict(pairs)
         ce_thr = await self._ce_thr()
@@ -455,27 +445,26 @@ class FusRohCog(commands.Cog):
         if not scored:
             await message.channel.send("I’m not sure.")
             return
-        hits = [h for h, s in sorted(scored, key=lambda x: -x[1])[:2]]
+        hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
 
-        # --- Knowledge‑Block ---------------------------------------------
+        # Knowledge-Block zusammenbauen
         kb_parts = []
         for h in hits:
             kb_parts.append(f"* {h['payload']['text'][:300]}…")
-            for u in h['payload'].get('links', [])[:2]:
-                kb_parts.append(f"  ↪ {u}")
-        kb = "\\n".join(kb_parts)
-        ctx_msgs.append({"role": "system", "content": f"Knowledge:\\n{kb}"})
-        
-        # --- LLM-Antwort --------------------------------------------------
+            for link in h["payload"].get("links", [])[:2]:
+                kb_parts.append(f"  ↪ {link}")
+        kb = "\n".join(kb_parts)
+        ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
+
+        # LLM-Antwort
         try:
             raw = await self._chat(ctx_msgs)
-        except Exception as exc:
-            logger.exception("Chat error: %s", exc)
+        except Exception:
             return
-        
-        # alle <think>…</think>–Blöcke entfernen
+        # <think>-Blöcke herausfiltern
         reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
         await message.channel.send(reply if reply else "I’m not sure.")
+
 # ── loader ───────────────────────────────────────────────────────────────
 async def setup(bot: Red):
     await bot.add_cog(FusRohCog(bot))
