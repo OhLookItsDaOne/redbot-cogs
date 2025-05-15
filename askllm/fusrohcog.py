@@ -432,45 +432,47 @@ class FusRohCog(commands.Cog):
         if not hits:
             await message.channel.send("I’m not sure.")
             return
-
-        # 3) Optional: Filter auf Tags, falls vorhanden
+        # 3) Tag-Matching: versuche erst alle Tags, sonst wenigstens eines
+        selected: list = []
+        prompt_note = ""
         if want_tags:
-            tagged = [
+            # exakte Treffer (alle Tags)
+            exact = [
                 h for h in hits
-                if "tags" in h["payload"] and any(t in h["payload"]["tags"] for t in want_tags)
+                if "tags" in h["payload"] and all(t in h["payload"]["tags"] for t in want_tags)
             ]
-            if tagged:
-                hits = tagged
+            if exact:
+                selected = exact
+                prompt_note = f"Direct entry matching: {', '.join(want_tags)}."
+            else:
+                # Fallback: Einträge, die eines der Tags enthalten
+                fallback = [
+                    h for h in hits
+                    if "tags" in h["payload"] and any(t in h["payload"]["tags"] for t in want_tags)
+                ]
+                if fallback:
+                    selected = fallback
+                    prompt_note = f"No exact match; using related entries for: {', '.join(want_tags)}."
+        else:
+            selected = hits
 
-        # 4) MMR-Diversität (Top-5)
-        doc_vecs = [h["vector"] for h in hits]
-        best_idx = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
-        hits = [hits[i] for i in best_idx]
-
-        # 5) Cross-Encoder + CE-Schwelle (Top-2)
-        pairs = [(message.clean_content, h["payload"]["text"]) for h in hits]
-        scores = self._ce.predict(pairs)
-        ce_thr = await self._ce_thr()
-        scored = [(h, s) for h, s in zip(hits, scores) if s >= ce_thr]
-        if not scored:
+        if not selected:
             await message.channel.send("I’m not sure.")
             return
-        hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
 
-        # 6) Level-2 Nachladen aller Chunks desselben Dokuments
+        # 4) Level-2 Nachladen aller Chunks desselben Dokuments
         kb_texts: list[str] = []
-        for h in hits:
+        for h in selected:
             doc_id = h["payload"]["doc_id"]
             chunks = await (await self._qd_client()).scroll(
                 limit=100,
                 qfilter={"must": [{"key": "doc_id", "match": {"value": doc_id}}]},
             )
             chunks.sort(key=lambda c: c["id"])
-            full = " ".join(c["payload"]["text"] for c in chunks)
-            kb_texts.append(full)
+            kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
 
-        # Knowledge-Block zusammenbauen
-        kb = "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
+        # Knowledge-Block zusammenbauen (füge prompt_note hinzu)
+        kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
         ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
 
         # LLM-Antwort holen & <think> herausfiltern
