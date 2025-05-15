@@ -375,8 +375,6 @@ class FusRohCog(commands.Cog):
             "Cite each fact you use with [#] based on its position in the Knowledge block."
             
         )
-
-        )
         body = {
             "model": await self.config.chat_model(),
             "stream": False,
