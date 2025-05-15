@@ -391,20 +391,21 @@ class FusRohCog(commands.Cog):
                 if resp.status >= 400:
                     raise RuntimeError(await resp.text())
                 data = await resp.json()
-        return data["message"]["content"]
-    @commands.Cog.listener()
+        return data["message"]["content"]    @commands.Cog.listener()
     async def on_message_without_command(self, message):
-        # 1) Vorbedingungen
+        # Vorbedingungen
         if not message.guild or message.author.bot or message.author == self.bot.user:
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
+
+        # Auto-Typing / Mention
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
 
-        # 2) Chat-Historie
+        # Chat-Verlauf als Kontext
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
         ctx_msgs = [
@@ -412,29 +413,39 @@ class FusRohCog(commands.Cog):
             for m in history
         ]
 
-        # 3) Query-Embedding
-        query = message.clean_content
-        query_vec = await self._embed(query)
+        # Query-Embedding
+        query_vec = await self._embed(message.clean_content)
 
-        # 4) Optionaler Tag-Filter
-        tokens = re.findall(r"[A-Za-z0-9\-]+", query.lower())
-        want = set(tokens) & {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
-        qfilter = {"must": [{"key": "tags", "match": {"value": t}} for t in want]} if want else None
+        # Token-basierter Tag-Check (optional)
+        word_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9\-]+", message.clean_content)}
+        possible_tags = {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
+        want_tags = list(word_tokens & possible_tags)
 
-        # 5) Vektor-Suche mit Client-Seiten-Threshold
+        # 1) Vektor-Suche ohne server-seitiges Tag-Filter
+        hits = await (await self._qd_client()).search(query_vec, limit=8)
+
+        # 2) Client-seitige Score-Schwelle
         vec_thr = await self._vec_thr()
-        hits = await (await self._qd_client()).search(query_vec, limit=8, qfilter=qfilter)
         hits = [h for h in hits if h.get("score", 0) >= vec_thr]
         if not hits:
             return await message.channel.send("I’m not sure.")
 
-        # 6) MMR-Diversität (Top-5)
-        doc_vecs = [h["vector"] for h in hits]
-        idxs = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
-        hits = [hits[i] for i in idxs]
+        # 3) Optional: wenn Tags gewünscht und es Treffer mit diesen Tags gibt, nur diese verwenden
+        if want_tags:
+            tagged = [
+                h for h in hits
+                if "tags" in h["payload"] and any(t in h["payload"]["tags"] for t in want_tags)
+            ]
+            if tagged:
+                hits = tagged
 
-        # 7) Cross-Encoder-Rerank + CE-Threshold (Top-2)
-        pairs  = [(query, h["payload"]["text"]) for h in hits]
+        # 4) MMR-Diversität (Top-5)
+        doc_vecs = [h["vector"] for h in hits]
+        best_idx = self.mmr(query_vec, doc_vecs, k=5, λ=0.7)
+        hits = [hits[i] for i in best_idx]
+
+        # 5) Cross-Encoder-Rerank + CE-Schwelle (Top-2)
+        pairs = [(message.clean_content, h["payload"]["text"]) for h in hits]
         scores = self._ce.predict(pairs)
         ce_thr = await self._ce_thr()
         scored = [(h, s) for h, s in zip(hits, scores) if s >= ce_thr]
@@ -442,31 +453,28 @@ class FusRohCog(commands.Cog):
             return await message.channel.send("I’m not sure.")
         hits = [h for h, _ in sorted(scored, key=lambda x: -x[1])[:2]]
 
-        # 8) Level-2 Nachladen aller Chunks desselben Dokuments
+        # 6) Level-2 Nachladen aller Chunks desselben Dokuments
         kb_texts = []
         for h in hits:
-            # doc_id aus Payload oder fallback auf die Point-ID
-            doc = h["payload"].get("doc_id", h["id"])
+            doc = h["payload"]["doc_id"]
             chunks = await (await self._qd_client()).scroll(
-                limit=100,
-                offset=0,
-                qfilter={"must":[{"key":"doc_id","match":{"value": doc}}]}
+                limit=100, qfilter={"must":[{"key":"doc_id","match":{"value":doc}}]}
             )
             chunks.sort(key=lambda c: c["id"])
-            full = " ".join(c["payload"]["text"] for c in chunks)
-            kb_texts.append(full)
+            kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
 
-        # 9) Knowledge-Block bauen
-        kb = "\n\n".join(f"* {text[:500]}…" for text in kb_texts)
+        # Knowledge-Block zusammensetzen
+        kb = "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
         ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
 
-        # 10) LLM-Antwort holen und <think>-Blöcke rausfiltern
+        # LLM-Antwort
         try:
             raw = await self._chat(ctx_msgs)
         except Exception:
             return
         reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
-        await message.channel.send(reply or "I’m not sure.")
+        await message.channel.send(reply if reply else "I’m not sure.")
+
 
         # LLM-Antwort
         try:
