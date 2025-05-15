@@ -148,7 +148,7 @@ class FusRohCog(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xF0F5F5)
         self.config.register_global(
-            chat_model="gemma3:12b",
+            chat_model="deepseek-r1:14b",
             api_url="http://192.168.10.5:11434",
             qdrant_url="http://192.168.10.5:6333",
             autotype_channels=[],
@@ -368,10 +368,13 @@ class FusRohCog(commands.Cog):
     # ---------- Hilfs‑Methode: Chat‑Aufruf --------------------------------
     async def _chat(self, messages):
         sys_prompt = (
-            "You are a concise SkyrimVR‑mod‑list support assistant.\n"
-            "Use **only** the facts under 'Knowledge'. If the answer cannot "
-            "be answered from them, reply exactly: “I’m not sure.”\n"
-            "Cite with [#] markers (1‑based) after each fact you use."
+            "You are a SkyrimVR-support assistant using only the provided Knowledge.\n"
+            "1) Read the Knowledge facts and pick the relevant ones.\n"
+            "2) Formulate a concise answer without repeating all facts verbatim.\n"
+            "3) If you lack enough information, reply exactly “I’m not sure.”\n"
+            "Cite each fact you use with [#] based on its position in the Knowledge block."
+        )
+
         )
         body = {
             "model": await self.config.chat_model(),
@@ -463,16 +466,17 @@ class FusRohCog(commands.Cog):
                 kb_parts.append(f"  ↪ {u}")
         kb = "\\n".join(kb_parts)
         ctx_msgs.append({"role": "system", "content": f"Knowledge:\\n{kb}"})
-
-        # --- LLM‑Antwort --------------------------------------------------
+        
+        # --- LLM-Antwort --------------------------------------------------
         try:
-            reply = await self._chat(ctx_msgs)
+            raw = await self._chat(ctx_msgs)
         except Exception as exc:
             logger.exception("Chat error: %s", exc)
             return
-
+        
+        # alle <think>…</think>–Blöcke entfernen
+        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
         await message.channel.send(reply if reply else "I’m not sure.")
-
 # ── loader ───────────────────────────────────────────────────────────────
 async def setup(bot: Red):
     await bot.add_cog(FusRohCog(bot))
