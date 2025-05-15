@@ -373,6 +373,7 @@ class FusRohCog(commands.Cog):
             "2) Formulate a concise answer without repeating all facts verbatim.\n"
             "3) If you lack enough information, reply exactly “I’m not sure.”\n"
             "Cite each fact you use with [#] based on its position in the Knowledge block."
+            
         )
 
         )
