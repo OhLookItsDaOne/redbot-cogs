@@ -422,16 +422,22 @@ class FusRohCog(commands.Cog):
         word_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9\-]+", message.clean_content.lower())}
         possible_tags = {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
         want_tags = list(word_tokens & possible_tags)
+        all_points = await qd.scroll(limit=100)
+        alle_tags = {t for p in all_points for t in p["payload"].get("tags", [])}
+        await message.channel.send(f"🏷️ Verfügbare Tags in DB: {sorted(alle_tags)}")
+
 
         # 1) Vektor-Suche
         hits = await (await self._qd_client()).search(query_vec, limit=8)
-
+        scores = [round(h.get("score", 0), 3) for h in hits]
+        await message.channel.send(f"🔍 Debug: {len(hits)} Rohergebnisse, Scores = {scores}")
         # 2) Client-seitige Score-Schwelle
         vec_thr = await self._vec_thr()
         hits = [h for h in hits if h.get("score", 0) >= vec_thr]
         if not hits:
             await message.channel.send("I’m not sure.")
             return
+            
         # 3) Tag-Matching: versuche erst alle Tags, sonst wenigstens eines
         selected: list = []
         prompt_note = ""
@@ -475,12 +481,12 @@ class FusRohCog(commands.Cog):
         kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
         ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
 
+
         # LLM-Antwort holen & <think> herausfiltern
         try:
             raw = await self._chat(ctx_msgs)
         except Exception:
             return
-        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
         await message.channel.send(reply if reply else "I’m not sure.")
 
 # ── loader ───────────────────────────────────────────────────────────────
