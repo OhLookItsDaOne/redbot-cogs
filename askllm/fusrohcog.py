@@ -385,34 +385,35 @@ class FusRohCog(commands.Cog):
         hits = [h for h in hits if h["score"] >= vec_thr]
         if not hits:
             return await message.channel.send("I’m not sure.")
-            
         selected = None
         prompt_note = ""
-        
-        # A) Tag-Suche: exakte Kombi oder wenigstens eins
         if want_tags:
             points = await qd.scroll(limit=200)
-            # exakte Treffer
-            direct = [p for p in points
-                      if all(t in p["payload"].get("tags", []) for t in want_tags)]
+            # exakte Treffer: alle Tags müssen drin sein
+            direct = [
+                p for p in points
+                if all(t in p["payload"].get("tags", []) for t in want_tags)
+            ]
             if direct:
                 selected = direct
                 prompt_note = f"Treffer mit allen Tags: {', '.join(want_tags)}."
             else:
                 # Fallback: mindestens ein Tag
-                fallback = [p for p in points
-                            if any(t in p["payload"].get("tags", []) for t in want_tags)]
+                fallback = [
+                    p for p in points
+                    if any(t in p["payload"].get("tags", []) for t in want_tags)
+                ]
                 if fallback:
                     selected = fallback
                     prompt_note = (
                         f"Keine exakten Tag-Treffer; nutze Einträge mit einem der Tags: "
                         f"{', '.join(want_tags)}."
                     )
-             
-        # B) Wenn keine Tag-Treffer, Vektor-Suche mit Threshold
+        
+        # 2) Vektor-Fallback nur, wenn überhaupt keine Tag-Treffer
         if selected is None:
-            hits = await qd.search(query_vec, limit=8)
-            # Debug ausgeben…
+            # Wir haben ja schon das erste `hits = await qd.search(...)`
+            # und den Debug ausgegeben – also nur noch filtern:
             vec_thr = await self._vec_thr()
             hits = [h for h in hits if h["score"] >= vec_thr]
             if not hits:
@@ -420,7 +421,7 @@ class FusRohCog(commands.Cog):
             selected = hits
             prompt_note = "Nutze semantisch ähnliche Einträge (Vektorsuche)."
         
-        # C) Jetzt Chunks laden & LLM befüttern
+        # 3) Chunks laden und Knowledge-Block bauen
         kb_texts = []
         for h in selected:
             doc_id = h["payload"]["doc_id"]
@@ -434,6 +435,7 @@ class FusRohCog(commands.Cog):
         kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
         ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
         
+        # 4) Einmalige LLM-Abfrage und Antwort versenden
         raw = await self._chat(ctx_msgs)
         reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
         await message.channel.send(reply or "I’m not sure.")
