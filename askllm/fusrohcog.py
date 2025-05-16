@@ -380,11 +380,6 @@ class FusRohCog(commands.Cog):
             tags = h["payload"].get("tags", [])
             score = round(h.get("score", 0), 3)
             await message.channel.send(f"id={h['id']} score={score} tags={tags} text=\"{txt}…\"")
-    
-        vec_thr = await self._vec_thr()
-        hits = [h for h in hits if h["score"] >= vec_thr]
-        if not hits:
-            return await message.channel.send("I’m not sure.")
         selected = None
         prompt_note = ""
         if want_tags:
