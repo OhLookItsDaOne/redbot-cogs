@@ -392,7 +392,7 @@ class FusRohCog(commands.Cog):
                     raise RuntimeError(await resp.text())
                 data = await resp.json()
         return data["message"]["content"]    
-        
+    
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
         # Vorbedingungen
@@ -401,12 +401,15 @@ class FusRohCog(commands.Cog):
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
-
+    
         # Auto-Typing / Mention
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
-
+    
+        # Qdrant-Client initialisieren
+        qd = await self._qd_client()
+    
         # Chat-Historie als Kontext
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
@@ -414,18 +417,16 @@ class FusRohCog(commands.Cog):
             {"role": "user" if m.author == message.author else "assistant", "content": m.clean_content}
             for m in history
         ]
-
+    
         # Query-Embedding
         query_vec = await self._embed(message.clean_content)
-
-        # Optional: Tag-Filter aus Query
-        word_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9\-]+", message.clean_content.lower())}
-        possible_tags = {"upscaler", "fsr", "dlss", "dll", "opencomposite"}
-        want_tags = list(word_tokens & possible_tags)
+    
+        # 1) Alle vorhandenen Tags aus der DB holen
         all_points = await qd.scroll(limit=100)
         alle_tags = {t for p in all_points for t in p["payload"].get("tags", [])}
         await message.channel.send(f"🏷️ Verfügbare Tags in DB: {sorted(alle_tags)}")
-
+    
+        # … restlicher Code …
 
         # 1) Vektor-Suche
         hits = await (await self._qd_client()).search(query_vec, limit=8)
