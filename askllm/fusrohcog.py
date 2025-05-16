@@ -449,46 +449,56 @@ class FusRohCog(commands.Cog):
         # 3) Tag-Matching: versuche erst alle Tags, sonst wenigstens eines
         selected: list = []
         prompt_note = ""
+        # 1) Wenn Schlagwörter gefunden wurden, rein tag-basiert suchen
         if want_tags:
-            # exakte Treffer (alle Tags)
-            exact = [
-                h for h in hits
-                if "tags" in h["payload"] and all(t in h["payload"]["tags"] for t in want_tags)
-            ]
-            if exact:
-                selected = exact
-                prompt_note = f"Direct entry matching: {', '.join(want_tags)}."
+            points = await qd.scroll(limit=200)
+            # exakte Treffer: alle Tags müssen im Payload sein
+            direct = [p for p in points
+                      if all(t in p["payload"].get("tags", []) for t in want_tags)]
+            if direct:
+                selected = direct
+                prompt_note = f"Treffer mit allen Tags: {', '.join(want_tags)}."
             else:
-                # Fallback: Einträge, die eines der Tags enthalten
-                fallback = [
-                    h for h in hits
-                    if "tags" in h["payload"] and any(t in h["payload"]["tags"] for t in want_tags)
-                ]
+                # Fallback: mindestens ein Tag
+                fallback = [p for p in points
+                            if any(t in p["payload"].get("tags", []) for t in want_tags)]
                 if fallback:
                     selected = fallback
-                    prompt_note = f"No exact match; using related entries for: {', '.join(want_tags)}."
+                    prompt_note = f"Keine exakten Tag-Treffer, nutze Einträge mit mindestens einem Tag: {', '.join(want_tags)}."
+                else:
+                    # wenn wirklich keine Tag-Einträge existieren, gehen wir erst zur Vektorsuche
+                    selected = None
         else:
+            selected = None
+        
+        # 2) Falls noch nichts ausgewählt, mache Vektor-Suche mit Threshold
+        if selected is None:
+            hits = await qd.search(query_vec, limit=8)
+            vec_thr = await self._vec_thr()
+            hits = [h for h in hits if h["score"] >= vec_thr]
+            if not hits:
+                return await message.channel.send("I’m not sure.")
             selected = hits
-
-        if not selected:
-            await message.channel.send("I’m not sure.")
-            return
-
-        # 4) Level-2 Nachladen aller Chunks desselben Dokuments
-        kb_texts: list[str] = []
+            prompt_note = "Nutze semantisch ähnliche Einträge (Vektorsuche)."
+        
+        # 3) Nun alle Chunks der ausgewählten Dokuments zusammenführen
+        kb_texts = []
         for h in selected:
             doc_id = h["payload"]["doc_id"]
-            chunks = await (await self._qd_client()).scroll(
+            chunks = await qd.scroll(
                 limit=100,
-                qfilter={"must": [{"key": "doc_id", "match": {"value": doc_id}}]},
+                qfilter={"must":[{"key":"doc_id","match":{"value":doc_id}}]},
             )
             chunks.sort(key=lambda c: c["id"])
             kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
-
-        # Knowledge-Block zusammenbauen (füge prompt_note hinzu)
+        
+        # 4) Knowledge-Block bauen und an die LLM schicken
         kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
-        ctx_msgs.append({"role": "system", "content": f"Knowledge:\n{kb}"})
-
+        ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
+        
+        raw = await self._chat(ctx_msgs)
+        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
+        await message.channel.send(reply or "I’m not sure.")
 
         # LLM-Antwort holen & <think> herausfiltern
         try:
