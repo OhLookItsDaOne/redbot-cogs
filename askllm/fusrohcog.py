@@ -70,7 +70,7 @@ class QdrantClient:
             await self._request("DELETE", f"/collections/{self.collection}")
         except RuntimeError:
             pass
-        schema = {"vectors": {"size": EMBED_DIM, "distance": "Cosine"}}
+        schema = {"vectors": {"size": EMBED_DIM, "distance": "Dot"}}
         await self._request("PUT", f"/collections/{self.collection}", json=schema)
         logger.info("Created collection %s (%d‑dims)", self.collection, EMBED_DIM)
 
@@ -425,19 +425,26 @@ class FusRohCog(commands.Cog):
         all_points = await qd.scroll(limit=100)
         alle_tags = {t for p in all_points for t in p["payload"].get("tags", [])}
         await message.channel.send(f"🏷️ Verfügbare Tags in DB: {sorted(alle_tags)}")
-    
-        # … restlicher Code …
+        # 2) Aus der User-Frage nur jene Wörter, die auch als Tag in der DB existieren
+        word_tokens = set(re.findall(r"[A-Za-z0-9_\-]+", message.clean_content.lower()))
+        want_tags = [t for t in word_tokens if t in alle_tags]
+        await message.channel.send(f"🎯 Gesuchte Tags aus Frage: {want_tags}")
 
-        # 1) Vektor-Suche
-        hits = await (await self._qd_client()).search(query_vec, limit=8)
-        scores = [round(h.get("score", 0), 3) for h in hits]
-        await message.channel.send(f"🔍 Debug: {len(hits)} Rohergebnisse, Scores = {scores}")
-        # 2) Client-seitige Score-Schwelle
+
+        # 3) Vector-Search (Dot-Product) mit Threshold
+        hits = await qd.search(query_vec, limit=8)
+        # Debug je Eintrag
+        for h in hits:
+            txt = h["payload"]["text"][:60].replace("\n", " ")
+            tags = h["payload"].get("tags", [])
+            score = round(h.get("score", 0), 3)
+            await message.channel.send(f"id={h['id']} score={score} tags={tags} text=\"{txt}…\"")
+    
         vec_thr = await self._vec_thr()
-        hits = [h for h in hits if h.get("score", 0) >= vec_thr]
+        hits = [h for h in hits if h["score"] >= vec_thr]
         if not hits:
-            await message.channel.send("I’m not sure.")
-            return
+            return await message.channel.send("I’m not sure.")
+
             
         # 3) Tag-Matching: versuche erst alle Tags, sonst wenigstens eines
         selected: list = []
