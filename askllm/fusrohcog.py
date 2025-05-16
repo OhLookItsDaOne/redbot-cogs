@@ -1,23 +1,4 @@
 from __future__ import annotations
-"""
-FusRoh Cog – SkyrimVR Mod‑List Helper
-====================================
-Red‑DiscordBot cog that pairs **Ollama** chat (gemma3:12b by default)
-with a local **Sentence‑Transformers** embedder and **Qdrant** vector
-store so the bot can answer SkyrimVR‑mod‑list support questions.
-
-**Embedding model now:** **intfloat/e5‑large‑v2** (1024‑dim vectors).
-This model delivers top‑tier retrieval quality.  It is downloaded
-automatically on first run and will use GPU if `torch.cuda.is_available()`;
-otherwise it runs happily on CPU (≈1 GB RAM load, encode ~200 ms / text
-on Ryzen‑class CPUs).
-
-Commands: `!fusknow`, `!fusshow`, `!fusknowdel`, `!learn`, `!autotype`,
-`!fuswipe`, `!fusthreshold`.
-
-> *The database is **not wiped** on restart.  `!fuswipe` stays available
-> if you ever want a clean slate.*
-"""
 import logging
 import re
 import time
@@ -29,24 +10,17 @@ from redbot.core import Config, commands
 from redbot.core.bot import Red
 from redbot.core.commands import BadArgument
 from sentence_transformers import CrossEncoder
-
-# ── Local embedding model ────────────────────────────────────────────────
 try:
-    from sentence_transformers import SentenceTransformer  # type: ignore
-    import torch  # type: ignore
-except ImportError:  # pragma: no cover – optional dep
-    SentenceTransformer = None  # type: ignore
-    torch = None  # type: ignore
+    from sentence_transformers import SentenceTransformer 
+    import torch 
+except ImportError:
+    SentenceTransformer = None
+    torch = None 
 
 EMBED_MODEL = "intfloat/e5-large-v2"
 EMBED_DIM = 1024
 logger = logging.getLogger("red.fusrohcog")
 DEFAULT_COLLECTION = "fusroh_support"
-
-# ─────────────────────────────────────────────────────────────────────────
-# Qdrant helper
-# ─────────────────────────────────────────────────────────────────────────
-
 
 class QdrantClient:
     def __init__(self, url: str, collection: str = DEFAULT_COLLECTION):
@@ -63,8 +37,7 @@ class QdrantClient:
                         f"Qdrant {method} {path} {resp.status}: {txt}"
                     )
                 return await resp.json()
-
-    # collection management
+                
     async def recreate_collection(self):
         try:
             await self._request("DELETE", f"/collections/{self.collection}")
@@ -86,7 +59,6 @@ class QdrantClient:
             await self._request("DELETE", f"/collections/{c}")
         logger.warning("Dropped all collections")
 
-    # CRUD
     async def upsert(self, pid: int, vec: List[float], payload: Dict[str, Any]):
         await self._request(
             "PUT",
@@ -136,13 +108,7 @@ class QdrantClient:
         data = res.get("result", {})
         if isinstance(data, dict) and "points" in data:
             return data["points"]
-        return data  # fallback
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Cog
-# ─────────────────────────────────────────────────────────────────────────
-
+        return data
 
 class FusRohCog(commands.Cog):
     def __init__(self, bot: Red):
@@ -162,7 +128,6 @@ class FusRohCog(commands.Cog):
         self._ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
         logger.info("Loaded Cross‑Encoder on %s", device)
 
-    # ---------- helpers ----------
     async def _qd_client(self) -> QdrantClient:
         if self._qd is None:
             self._qd = QdrantClient(await self.config.qdrant_url())
@@ -188,12 +153,12 @@ class FusRohCog(commands.Cog):
         step = tokens - overlap
         for i in range(0, len(words), step):
             yield " ".join(words[i : i + tokens])
-    # Entfernt Namen / > Zitate / Markdown‑Headlines
+
     @staticmethod
     def clean_discord_text(txt: str) -> str:
-        txt = re.sub(r'^>.*$', '', txt, flags=re.M)          # blockquotes
-        txt = re.sub(r'^#+\\s+', '', txt, flags=re.M)        # markdown h#
-        txt = re.sub(r'^\\s*\\w{2,20}:\\s*', '', txt)        # name:
+        txt = re.sub(r'^>.*$', '', txt, flags=re.M)          
+        txt = re.sub(r'^#+\\s+', '', txt, flags=re.M)        
+        txt = re.sub(r'^\\s*\\w{2,20}:\\s*', '', txt)        
         return txt.strip()
 
     @staticmethod
@@ -220,7 +185,6 @@ class FusRohCog(commands.Cog):
     async def _ce_thr(self) -> float:
         return await self.config.ce_thr()
 
-    # --- Hilfs‑Methode: Tags im Text erkennen -----------------------------
     @staticmethod
     def _split_tags(raw: str) -> tuple[list[str], str]:
         """
@@ -233,12 +197,10 @@ class FusRohCog(commands.Cog):
         tags = re.split(r"[,\s]+", tag_str.strip())
         return [t.lower() for t in tags if t], body.strip()
 
-    # ----------------------- Wissenseintrag -------------------------------
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def fusknow(self, ctx, *, text: str):
         """Fügt Wissen hinzu – Tags optional in eckigen Klammern."""
-        # generiere einmalig eine gemeinsame doc_id
         doc_id = int(time.time() * 1000)
         tags, clean = self._split_tags(text)
         for chunk in self.chunk_text(clean):
@@ -248,14 +210,13 @@ class FusRohCog(commands.Cog):
                 "text": chunk,
                 "author": str(ctx.author),
                 "source": ctx.message.jump_url,
-                "doc_id": doc_id,            # <-- hier
+                "doc_id": doc_id,            
             }
             if tags:
                 payload["tags"] = tags
             await (await self._qd_client()).upsert(pid, vec, payload)
         await ctx.send("✅ Added.")
-
-    # ----------------------- Datenbank‑Anzeige ----------------------------
+        
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def fusshow(self, ctx, count: int = 10, offset: int = 0, *, flag: str = ""):
@@ -274,7 +235,7 @@ class FusRohCog(commands.Cog):
     @commands.command()
     async def fusget(self, ctx, point_id: int):
         qd = await self._qd_client()
-        res = await qd.scroll(limit=1, offset=0)          # kleiner Hack
+        res = await qd.scroll(limit=1, offset=0)         
         res = [p for p in res if p["id"] == point_id]
         if not res:
             return await ctx.send("ID not found.")
@@ -283,13 +244,12 @@ class FusRohCog(commands.Cog):
         links = "\n".join(payload.get("links", []))
         await self._chunk_send(ctx, f"**{point_id}**\n{text}\n{links}")
 
-    # ----------------------- Eintrag löschen ------------------------------
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def fusknowdel(self, ctx, point_id: int):
         await (await self._qd_client()).delete(point_id)
         await ctx.send("🗑️ Deleted.")
-            # ----------------------- Auto‑Lernen ----------------------------------
+
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def learn(self, ctx, count: int = 5):
@@ -304,9 +264,9 @@ class FusRohCog(commands.Cog):
         clean_lines, links = [], []
         for m in msgs:
             clean_lines.append(self.clean_discord_text(m.clean_content))
-            links += re.findall(r'https?://\S+', m.content)   # ← ein Backslash
+            links += re.findall(r'https?://\S+', m.content)  
 
-        bundle = "\n".join(clean_lines)                      # ← echtes \n
+        bundle = "\n".join(clean_lines)                   
         payload = {"text": bundle, "learned": True}
         if links:
             payload["links"] = links
@@ -317,7 +277,6 @@ class FusRohCog(commands.Cog):
         )
         await ctx.send(f"📚 Learned `{pid}`")
 
-    # ----------------------- Auto‑Typing ----------------------------------
     @commands.command()
     async def autotype(self, ctx, mode: str | None = None):
         cid = ctx.channel.id
@@ -340,7 +299,6 @@ class FusRohCog(commands.Cog):
         else:
             raise BadArgument("Use on/off")
 
-    # ----------------------- Schwellen‑Befehl -----------------------------
     @commands.command()
     async def fusthreshold(
         self, ctx, vec: float | None = None, ce: float | None = None
@@ -355,12 +313,11 @@ class FusRohCog(commands.Cog):
                 raise BadArgument("vec zwischen 0 und 1")
             await self.config.vec_thr.set(vec)
         if ce is not None:
-            if not 0 < ce < 1:
-                raise BadArgument("ce zwischen 0 und 1")
+            if not 0 <= vec < 1:
+                raise BadArgument("vec zwischen 0 und 1 (0.0 erlaubt)")
             await self.config.ce_thr.set(ce)
         await ctx.send("✅ Schwellen gespeichert.")
 
-    # ----------------------- DB‑Reset -------------------------------------
     @commands.is_owner()
     @commands.command()
     async def fuswipe(self, ctx):
@@ -369,7 +326,6 @@ class FusRohCog(commands.Cog):
         await qd.recreate_collection()
         await ctx.send("💥 Qdrant wiped and fresh collection created.")
         
-    # ---------- Hilfs‑Methode: Chat‑Aufruf --------------------------------
     async def _chat(self, messages):
         sys_prompt = (
             "You are a SkyrimVR-support assistant using only the provided Knowledge.\n"
@@ -395,45 +351,30 @@ class FusRohCog(commands.Cog):
     
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
-        # Vorbedingungen
         if not message.guild or message.author.bot or message.author == self.bot.user:
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
     
-        # Auto-Typing / Mention
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
-    
-        # Qdrant-Client initialisieren
         qd = await self._qd_client()
-    
-        # Chat-Historie als Kontext
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
         ctx_msgs = [
             {"role": "user" if m.author == message.author else "assistant", "content": m.clean_content}
             for m in history
         ]
-    
-        # Query-Embedding
         query_vec = await self._embed(message.clean_content)
-    
-        # 1) Alle vorhandenen Tags aus der DB holen
         all_points = await qd.scroll(limit=100)
         alle_tags = {t for p in all_points for t in p["payload"].get("tags", [])}
         await message.channel.send(f"🏷️ Verfügbare Tags in DB: {sorted(alle_tags)}")
-        # 2) Aus der User-Frage nur jene Wörter, die auch als Tag in der DB existieren
         word_tokens = set(re.findall(r"[A-Za-z0-9_\-]+", message.clean_content.lower()))
         want_tags = [t for t in word_tokens if t in alle_tags]
         await message.channel.send(f"🎯 Gesuchte Tags aus Frage: {want_tags}")
-
-
-        # 3) Vector-Search (Dot-Product) mit Threshold
         hits = await qd.search(query_vec, limit=8)
-        # Debug je Eintrag
         for h in hits:
             txt = h["payload"]["text"][:60].replace("\n", " ")
             tags = h["payload"].get("tags", [])
@@ -444,15 +385,14 @@ class FusRohCog(commands.Cog):
         hits = [h for h in hits if h["score"] >= vec_thr]
         if not hits:
             return await message.channel.send("I’m not sure.")
-
             
-        # 3) Tag-Matching: versuche erst alle Tags, sonst wenigstens eines
-        selected: list = []
+        selected = None
         prompt_note = ""
-        # 1) Wenn Schlagwörter gefunden wurden, rein tag-basiert suchen
+        
+        # A) Tag-Suche: exakte Kombi oder wenigstens eins
         if want_tags:
             points = await qd.scroll(limit=200)
-            # exakte Treffer: alle Tags müssen im Payload sein
+            # exakte Treffer
             direct = [p for p in points
                       if all(t in p["payload"].get("tags", []) for t in want_tags)]
             if direct:
@@ -464,16 +404,15 @@ class FusRohCog(commands.Cog):
                             if any(t in p["payload"].get("tags", []) for t in want_tags)]
                 if fallback:
                     selected = fallback
-                    prompt_note = f"Keine exakten Tag-Treffer, nutze Einträge mit mindestens einem Tag: {', '.join(want_tags)}."
-                else:
-                    # wenn wirklich keine Tag-Einträge existieren, gehen wir erst zur Vektorsuche
-                    selected = None
-        else:
-            selected = None
-        
-        # 2) Falls noch nichts ausgewählt, mache Vektor-Suche mit Threshold
+                    prompt_note = (
+                        f"Keine exakten Tag-Treffer; nutze Einträge mit einem der Tags: "
+                        f"{', '.join(want_tags)}."
+                    )
+             
+        # B) Wenn keine Tag-Treffer, Vektor-Suche mit Threshold
         if selected is None:
             hits = await qd.search(query_vec, limit=8)
+            # Debug ausgeben…
             vec_thr = await self._vec_thr()
             hits = [h for h in hits if h["score"] >= vec_thr]
             if not hits:
@@ -481,7 +420,7 @@ class FusRohCog(commands.Cog):
             selected = hits
             prompt_note = "Nutze semantisch ähnliche Einträge (Vektorsuche)."
         
-        # 3) Nun alle Chunks der ausgewählten Dokuments zusammenführen
+        # C) Jetzt Chunks laden & LLM befüttern
         kb_texts = []
         for h in selected:
             doc_id = h["payload"]["doc_id"]
@@ -492,7 +431,6 @@ class FusRohCog(commands.Cog):
             chunks.sort(key=lambda c: c["id"])
             kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
         
-        # 4) Knowledge-Block bauen und an die LLM schicken
         kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
         ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
         
@@ -500,13 +438,5 @@ class FusRohCog(commands.Cog):
         reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
         await message.channel.send(reply or "I’m not sure.")
 
-        # LLM-Antwort holen & <think> herausfiltern
-        try:
-            raw = await self._chat(ctx_msgs)
-        except Exception:
-            return
-        await message.channel.send(reply if reply else "I’m not sure.")
-
-# ── loader ───────────────────────────────────────────────────────────────
 async def setup(bot: Red):
     await bot.add_cog(FusRohCog(bot))
