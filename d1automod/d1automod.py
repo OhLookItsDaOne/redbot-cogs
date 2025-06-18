@@ -18,7 +18,7 @@ class D1AutoMod(commands.Cog):
 
     async def get_shortname_mapping(self, guild):
         mapping = await self.config.guild(guild).shortnames()
-        rules = await guild.fetch_auto_moderation_rules()
+        rules = await ctx.guild.fetch_auto_moderation_rules()
         names_used = set()
         newmap = {}
         for rule in rules:
@@ -70,6 +70,13 @@ class D1AutoMod(commands.Cog):
             embed=await view.get_embed(),
             view=view
         )
+
+    @automod.command(name="automoddebug")
+    @commands.has_guild_permissions(administrator=True)
+    async def automoddebug(self, ctx):
+        """Debug: Zeigt, ob die fetch_auto_moderation_rules Methode verfügbar ist."""
+        has_attr = hasattr(ctx.guild, "fetch_auto_moderation_rules")
+        await ctx.send(f"fetch_auto_moderation_rules available: {has_attr}")
 
     @automod.command(name="allowrole")
     @commands.has_guild_permissions(administrator=True)
