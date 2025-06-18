@@ -1,6 +1,6 @@
 import discord
 from redbot.core import commands, Config
-from typing import Set
+from typing import Set, Optional
 
 class D1AutoMod(commands.Cog):
     """AutoMod: Manage Discord AutoMod rules via simple commands."""
@@ -10,14 +10,13 @@ class D1AutoMod(commands.Cog):
         self.config = Config.get_conf(self, identifier=2468101214)
         self.config.register_guild(allowed_roles=[], shortnames={})
 
-    async def has_automod_permission(self, ctx):
+    async def has_automod_permission(self, ctx: commands.Context):
         if ctx.author.guild_permissions.administrator:
             return True
         allowed = await self.config.guild(ctx.guild).allowed_roles()
         return any(r.id in allowed for r in ctx.author.roles)
 
     async def get_shortname_mapping(self, guild: discord.Guild):
-        """Build short-name → rule ID map, store in config."""
         seen = set()
         mapping = {}
         try:
@@ -40,112 +39,119 @@ class D1AutoMod(commands.Cog):
 
     @commands.group(name="automod", invoke_without_command=True)
     @commands.guild_only()
-    async def automod(self, ctx, rule: str = None):
+    async def automod(self, ctx: commands.Context,
+                     rule: Optional[str] = None,
+                     action: Optional[str] = None,
+                     *, rest: Optional[str] = None):
         """
-        Show info about an AutoMod rule or subcommand.
+        Manage AutoMod rules.
 
         Usage:
           • !automod list
           • !automod roles
           • !automod allowrole <role>
           • !automod removerole <role>
-          • !automod <rule>                     # info
-          • !automod <rule> enable|disable      # toggle
-          • !automod <rule> add  w1,w2,w3       # add to allow list
-          • !automod <rule> remove  w1,w2       # remove from allow list
+          • !automod <rule>                   # show info
+          • !automod <rule> enable            # enable rule
+          • !automod <rule> disable           # disable rule
+          • !automod <rule> add    w1,w2,w3   # add allowed words
+          • !automod <rule> remove w1,w2      # remove allowed words
         """
+        # no args → help
         if not rule:
             return await ctx.send_help()
 
-        cmd = rule.lower()
-        # dispatch subcommands
-        if cmd == "list":
-            return await self.list_rules(ctx)
-        if cmd == "roles":
-            return await self.roles(ctx)
-        # next ones require admin perms
-        if cmd == "allowrole" or cmd == "removerole":
+        lower = rule.lower()
+        # global subcommands
+        if lower == "list":
+            return await self._list(ctx)
+        if lower == "roles":
+            return await self._list_roles(ctx)
+
+        # allowrole/removerole inherit different decorator, so show help
+        if lower in ("allowrole", "removerole"):
             return await ctx.send_help()
 
-        # everything else is a rule name or ID
+        # from here on we need permission
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
 
+        # find the rule ID
         sm = await self.get_shortname_mapping(ctx.guild)
-        rid = sm.get(rule) if not rule.isdigit() else int(rule)
-        if not rid:
-            return await ctx.send("❌ Rule not found. Use `!automod list`.")
         try:
-            rule_obj = await ctx.guild.fetch_automod_rule(rid)
+            rid = int(rule) if rule.isdigit() else sm[rule]
+        except Exception:
+            return await ctx.send("❌ Rule not found. Use `!automod list`.")
+
+        # fetch the rule
+        try:
+            r = await ctx.guild.fetch_automod_rule(rid)
         except Exception as e:
             return await ctx.send(f"❌ Could not fetch rule: {e}")
 
-        # render info embed
-        trig = rule_obj.trigger
+        # enable / disable
+        if action and action.lower() == "enable":
+            await r.edit(enabled=True)
+            return await ctx.send(f"✅ **{r.name}** enabled.")
+
+        if action and action.lower() == "disable":
+            await r.edit(enabled=False)
+            return await ctx.send(f"❌ **{r.name}** disabled.")
+
+        # add to allow list
+        if action and action.lower() == "add":
+            return await self._add_words(ctx, r, rest or "")
+
+        # remove from allow list
+        if action and action.lower() == "remove":
+            return await self._remove_words(ctx, r, rest or "")
+
+        # otherwise, just show info
+        return await self._show_info(ctx, r)
+
+    async def _show_info(self, ctx, r: discord.AutoModRule):
+        trig = r.trigger
         em = discord.Embed(
-            title=f"AutoMod Rule: {rule_obj.name}",
+            title=f"AutoMod Rule: {r.name}",
             colour=await ctx.embed_colour()
         )
         em.description = (
             f"**Type:** {trig.type.name}\n"
-            f"**Enabled:** {rule_obj.enabled}\n"
-            f"**Rule ID:** {rule_obj.id}"
+            f"**Enabled:** {r.enabled}\n"
+            f"**Rule ID:** {r.id}"
         )
         # metadata fields
         if getattr(trig, "keyword_filter", None):
-            em.add_field(
-                name="Keyword Filter",
-                value=", ".join(trig.keyword_filter), inline=False
-            )
+            em.add_field("Keyword Filter", ", ".join(trig.keyword_filter), inline=False)
         if getattr(trig, "allow_list", None):
-            em.add_field(
-                name="Allowed List",
-                value=", ".join(trig.allow_list), inline=False
-            )
+            em.add_field("Allowed List", ", ".join(trig.allow_list), inline=False)
         if getattr(trig, "regex_patterns", None):
-            em.add_field(
-                name="Regex Patterns",
-                value=", ".join(trig.regex_patterns), inline=False
-            )
+            em.add_field("Regex Patterns", ", ".join(trig.regex_patterns), inline=False)
         if getattr(trig, "mention_total_limit", None) is not None:
-            em.add_field(
-                name="Mention Limit",
-                value=str(trig.mention_total_limit), inline=False
-            )
+            em.add_field("Mention Limit", str(trig.mention_total_limit), inline=False)
         # actions
         lines = []
-        for a in rule_obj.actions:
-            part = f"- {a.type.name}"
+        for a in r.actions:
+            line = f"- {a.type.name}"
             if getattr(a, "channel_id", None):
-                part += f" → <#{a.channel_id}>"
+                line += f" → <#{a.channel_id}>"
             if getattr(a, "custom_message", None):
-                part += f"\n  • Msg: {a.custom_message}"
+                line += f"\n  • Msg: {a.custom_message}"
             if getattr(a, "duration", None):
-                part += f"\n  • Timeout: {a.duration}"
-            lines.append(part)
+                line += f"\n  • Timeout: {a.duration}"
+            lines.append(line)
         if lines:
-            em.add_field(name="Actions", value="\n".join(lines), inline=False)
-
-        # creator + exemptions
-        creator = rule_obj.creator.mention if rule_obj.creator else str(rule_obj.creator_id)
-        em.add_field(name="Created by", value=creator, inline=False)
-
-        if rule_obj.exempt_roles:
-            em.add_field(
-                name="Exempt Roles",
-                value="\n".join(r.mention for r in rule_obj.exempt_roles), inline=False
-            )
-        if rule_obj.exempt_channels:
-            em.add_field(
-                name="Exempt Channels",
-                value="\n".join(c.mention for c in rule_obj.exempt_channels), inline=False
-            )
-
+            em.add_field("Actions", "\n".join(lines), inline=False)
+        # creator & exemptions
+        creator = r.creator.mention if r.creator else str(r.creator_id)
+        em.add_field("Created by", creator, inline=False)
+        if r.exempt_roles:
+            em.add_field("Exempt Roles", "\n".join(x.mention for x in r.exempt_roles), inline=False)
+        if r.exempt_channels:
+            em.add_field("Exempt Channels", "\n".join(c.mention for c in r.exempt_channels), inline=False)
         return await ctx.send(embed=em)
 
-    @automod.command(name="list")
-    async def list_rules(self, ctx):
-        """List AutoMod rules + their short names."""
+    async def _list(self, ctx):
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
         try:
@@ -155,23 +161,21 @@ class D1AutoMod(commands.Cog):
         if not rules:
             return await ctx.send("No AutoMod rules.")
         sm = await self.get_shortname_mapping(ctx.guild)
-        lines = [
-            f"**{short}** — {discord.utils.get(rules, id=rid).name} (`{rid}`)"
-            for short, rid in sm.items()
-            if discord.utils.get(rules, id=rid)
-        ]
-        await ctx.send("**AutoMod rules:**\n" + "\n".join(lines))
+        lines = []
+        for short, rid in sm.items():
+            rule = discord.utils.get(rules, id=rid)
+            if rule:
+                lines.append(f"**{short}** — {rule.name} (`{rid}`)")
+        return await ctx.send("**AutoMod rules:**\n" + "\n".join(lines))
 
-    @automod.command(name="roles")
-    async def roles(self, ctx):
-        """List roles allowed to manage automod."""
+    async def _list_roles(self, ctx):
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
         allowed = await self.config.guild(ctx.guild).allowed_roles()
         if not allowed:
             return await ctx.send("No roles currently allowed.")
         mentions = [f"<@&{rid}>" for rid in allowed if ctx.guild.get_role(rid)]
-        await ctx.send("Allowed roles: " + ", ".join(mentions))
+        return await ctx.send("Allowed roles: " + ", ".join(mentions))
 
     @automod.command(name="allowrole")
     @commands.has_guild_permissions(administrator=True)
@@ -197,40 +201,12 @@ class D1AutoMod(commands.Cog):
         await g.allowed_roles.set(lst)
         await ctx.send(f"{role.mention} can no longer use automod commands.")
 
-    @automod.command(name="enable")
-    async def enable_rule(self, ctx, rule: str):
-        """Enable a rule."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        rid = (await self.get_shortname_mapping(ctx.guild)).get(rule) or int(rule)
-        r = await ctx.guild.fetch_automod_rule(rid)
-        await r.edit(enabled=True)
-        await ctx.send(f"✅ **{r.name}** enabled.")
-
-    @automod.command(name="disable")
-    async def disable_rule(self, ctx, rule: str):
-        """Disable a rule."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        rid = (await self.get_shortname_mapping(ctx.guild)).get(rule) or int(rule)
-        r = await ctx.guild.fetch_automod_rule(rid)
-        await r.edit(enabled=False)
-        await ctx.send(f"❌ **{r.name}** disabled.")
-
-    @automod.command(name="add")
-    async def add_words(self, ctx, rule: str, *, words: str):
-        """Add words to a keyword rule’s allow list."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        sm = await self.get_shortname_mapping(ctx.guild)
-        rid = sm.get(rule) or int(rule)
-        r = await ctx.guild.fetch_automod_rule(rid)
+    async def _add_words(self, ctx, r: discord.AutoModRule, words: str):
         if r.trigger.type is not discord.AutoModTriggerType.keyword:
             return await ctx.send("❌ Only keyword rules support an allow list.")
         new: Set[str] = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         old = set(r.trigger.allow_list or [])
         merged = old | new
-        # build a fresh trigger with updated allow_list
         new_trigger = discord.AutoModTrigger(
             keyword_filter=r.trigger.keyword_filter,
             regex_patterns=r.trigger.regex_patterns,
@@ -240,19 +216,12 @@ class D1AutoMod(commands.Cog):
         )
         await r.edit(trigger=new_trigger)
         added = new - old
-        await ctx.send(
+        return await ctx.send(
             f"✅ Added: {', '.join(added) or '— none —'}\n"
             f"Current allow list: {', '.join(sorted(merged)) or '— empty —'}"
         )
 
-    @automod.command(name="remove")
-    async def remove_words(self, ctx, rule: str, *, words: str):
-        """Remove words from a keyword rule’s allow list."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        sm = await self.get_shortname_mapping(ctx.guild)
-        rid = sm.get(rule) or int(rule)
-        r = await ctx.guild.fetch_automod_rule(rid)
+    async def _remove_words(self, ctx, r: discord.AutoModRule, words: str):
         if r.trigger.type is not discord.AutoModTriggerType.keyword:
             return await ctx.send("❌ Only keyword rules support an allow list.")
         to_rem = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
@@ -267,7 +236,7 @@ class D1AutoMod(commands.Cog):
         )
         await r.edit(trigger=new_trigger)
         removed = old & to_rem
-        await ctx.send(
+        return await ctx.send(
             f"✅ Removed: {', '.join(removed) or '— none —'}\n"
             f"Current allow list: {', '.join(sorted(merged)) or '— empty —'}"
         )
