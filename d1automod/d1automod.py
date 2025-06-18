@@ -71,6 +71,7 @@ class D1AutoMod(commands.Cog):
             return await ctx.send(f"Could not fetch rule: {e}")
 
         # Universal compatibility: py-cord and discord.py have different attribute names!
+        await ctx.send(f"DEBUG: {trigger_type=} {type(trigger_type)=} {getattr(discord, 'AutoModTriggerType', None)}")
         trigger_type = getattr(rule_obj, "trigger_type", getattr(rule_obj, "type", None))
         try:
             keyword_type = discord.AutoModTriggerType.keyword
