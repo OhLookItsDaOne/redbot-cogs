@@ -41,6 +41,7 @@ class D1AutoMod(commands.Cog):
             names_used.add(short)
         await self.config.guild(guild).shortnames.set(newmap)
         return newmap
+
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def automod(self, ctx, rule: str = None):
@@ -69,6 +70,12 @@ class D1AutoMod(commands.Cog):
             rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
+        import pprint
+        await ctx.send(f"dir: {dir(rule_obj)}")
+        try:
+            await ctx.send(f"dict: {rule_obj.__dict__}")
+        except Exception:
+            await ctx.send(f"vars: {vars(rule_obj)}")
 
         # Universal compatibility: py-cord and discord.py have different attribute names!
         trigger_type = getattr(rule_obj, "trigger_type", getattr(rule_obj, "type", None))
