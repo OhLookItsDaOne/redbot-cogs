@@ -41,17 +41,15 @@ class D1AutoMod(commands.Cog):
             names_used.add(short)
         await self.config.guild(guild).shortnames.set(newmap)
         return newmap
-
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def automod(self, ctx, rule: str = None):
         """
-        Manage AutoMod rules and allowed words/phrases interactively.
+        Manage Discord AutoMod rules interactively.
 
         Usage:
-        !automod <shortname> – manage a rule
+        !automod <shortname> – manage a rule (any type!)
         !automod list – list all rules
-        !automod allowrole/removerole/roles – role management
         """
         if rule is None:
             return await ctx.send_help()
@@ -70,21 +68,39 @@ class D1AutoMod(commands.Cog):
 
         trigger = getattr(rule_obj, "trigger", None)
         trigger_type = getattr(trigger, "type", None)
-        keyword_type = getattr(getattr(discord, "AutoModRuleTriggerType", None), "keyword", None)
+        readable_type = str(trigger_type)  # <AutoModRuleTriggerType.keyword: 1> oder als string
 
-        # Debug output for clarity (can be removed later)
-        await ctx.send(
-            f"DEBUG: trigger_type={trigger_type!r} (should be: {keyword_type!r}, str: '{str(trigger_type).lower()}')"
+        # Schönes Embed mit Typ und Basisdaten
+        embed = discord.Embed(
+            title=f"Edit AutoMod Rule: {rule_obj.name}",
+            description=f"Type: `{readable_type}`\n"
+                        f"Enabled: {getattr(rule_obj, 'enabled', None)}"
         )
 
-        if trigger_type != keyword_type and str(trigger_type).lower() != "keyword":
-            return await ctx.send("This rule is not a keyword rule (only keyword rules support allowed words/phrases).")
-
-        view = AllowWordsView(self, rule_obj)
-        await ctx.send(
-            embed=await view.get_embed(),
-            view=view
-        )
+        # Keyword: Zeige allowed words, spam: Zeige limit, etc.
+        if str(trigger_type).lower() == "keyword":
+            allow_list = getattr(getattr(rule_obj, "trigger_metadata", None), "allow_list", [])
+            embed.add_field(
+                name="Allowed Words/Phrases",
+                value="\n".join(allow_list) if allow_list else "*None*",
+                inline=False
+            )
+            # Du kannst Buttons/Modals zum Bearbeiten wie vorher anzeigen
+            view = AllowWordsView(self, rule_obj)
+            await ctx.send(embed=embed, view=view)
+        elif str(trigger_type).lower() in ("spam", "mention_spam"):
+            # Beispiel: Spam/Mention Spam limit anzeigen
+            meta = getattr(rule_obj, "trigger_metadata", None)
+            if meta:
+                limits = [
+                    f"Total limit: {getattr(meta, 'mention_total_limit', 'N/A')}",
+                    f"Raid protection: {getattr(meta, 'mention_raid_protection_enabled', 'N/A')}"
+                ]
+                embed.add_field(name="Spam/Mention Settings", value="\n".join(limits), inline=False)
+            await ctx.send(embed=embed)
+        else:
+            # Fallback: nur Basisdaten anzeigen, nicht editierbar
+            await ctx.send(embed=embed)
 
     @automod.command(name="list")
     async def list_rules(self, ctx):
