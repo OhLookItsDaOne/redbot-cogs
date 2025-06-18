@@ -52,11 +52,14 @@ class D1AutoMod(commands.Cog):
     @automod_manage_check()
     async def automod(self, ctx, rule: str = None, action: str = None, *args):
         """
-        Show info about an AutoMod rule. (All management via commands!)
+        Manage and inspect Discord AutoMod rules.
+
         Usage:
-        !automod <shortname> [enable|disable]
-        !automod <shortname> allow add word1,word2
-        !automod <shortname> allow remove word1,word2
+        !automod <shortname>
+        !automod <shortname> enable
+        !automod <shortname> disable
+        !automod <shortname> add word1,word2
+        !automod <shortname> remove word1,word2
         !automod list
         """
         if rule is None:
@@ -69,37 +72,115 @@ class D1AutoMod(commands.Cog):
                 "Rule not found by short name or ID.\n"
                 "Use `!automod list` to see available rules and their short names."
             )
+
         try:
             rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
 
-        trigger = getattr(rule_obj, "trigger", None)
-        trigger_type = getattr(trigger, "type", None)
-        readable_type = str(trigger_type)
-        enabled = getattr(rule_obj, "enabled", None)
-        rule_fields = []
-        if hasattr(rule_obj, "trigger_metadata"):
-            meta = rule_obj.trigger_metadata
-            if hasattr(meta, "keyword_filter"):
-                rule_fields.append(("Keyword Filter", ", ".join(meta.keyword_filter) or "*None*"))
-            if hasattr(meta, "allow_list"):
-                rule_fields.append(("Allowed List", ", ".join(meta.allow_list) or "*None*"))
-            if hasattr(meta, "regex_patterns"):
-                rule_fields.append(("Regex Patterns", ", ".join(meta.regex_patterns) or "*None*"))
-            if hasattr(meta, "mention_total_limit"):
-                rule_fields.append(("Mention Limit", str(meta.mention_total_limit)))
+        # --- Process action if present ---
+        performed_action = False
+        msg_action = ""
+        trigger_meta = getattr(rule_obj, "trigger_metadata", None)
+        allow_list_supported = hasattr(trigger_meta, "allow_list")
 
+        # Parse action for enable/disable/add/remove
+        if action is not None:
+            lower_action = action.lower()
+            if lower_action == "enable":
+                await rule_obj.edit(enabled=True)
+                msg_action = "Rule enabled."
+                performed_action = True
+            elif lower_action == "disable":
+                await rule_obj.edit(enabled=False)
+                msg_action = "Rule disabled."
+                performed_action = True
+            elif lower_action == "add" and allow_list_supported:
+                if not args:
+                    return await ctx.send("Please specify words to add: `!automod <rule> add word1,word2`")
+                added = [w.strip() for w in " ".join(args).replace("\n", ",").split(",") if w.strip()]
+                allow_list = set(trigger_meta.allow_list or [])
+                before = set(allow_list)
+                allow_list.update(added)
+                try:
+                    await rule_obj.edit(
+                        trigger_metadata=discord.AutoModRuleTriggerMetadata(
+                            allow_list=list(allow_list),
+                            keyword_filter=trigger_meta.keyword_filter
+                        )
+                    )
+                    msg_action = f"Added: {', '.join(set(added) - before)}" if set(added) - before else "No new words added."
+                except Exception as e:
+                    msg_action = f"Failed to update rule: {e}"
+                performed_action = True
+            elif lower_action == "remove" and allow_list_supported:
+                if not args:
+                    return await ctx.send("Please specify words to remove: `!automod <rule> remove word1,word2`")
+                to_remove = [w.strip() for w in " ".join(args).replace("\n", ",").split(",") if w.strip()]
+                allow_list = set(trigger_meta.allow_list or [])
+                before = set(allow_list)
+                allow_list.difference_update(to_remove)
+                try:
+                    await rule_obj.edit(
+                        trigger_metadata=discord.AutoModRuleTriggerMetadata(
+                            allow_list=list(allow_list),
+                            keyword_filter=trigger_meta.keyword_filter
+                        )
+                    )
+                    msg_action = f"Removed: {', '.join(before - set(allow_list))}" if before - set(allow_list) else "No words were removed."
+                except Exception as e:
+                    msg_action = f"Failed to update rule: {e}"
+                performed_action = True
+            elif lower_action in ("add", "remove") and not allow_list_supported:
+                return await ctx.send("This rule does not support allowed words/phrases.")
+            else:
+                return await ctx.send("Unknown action or unsupported for this rule. Use `enable`, `disable`, `add`, or `remove`.")
+
+            # Refresh rule object to show latest state
+            try:
+                rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
+            except Exception:
+                pass
+
+        # --- Compose embed like FUS RO DA BOT ---
         embed = discord.Embed(
             title=f"AutoMod Rule: {rule_obj.name}",
             description=(
-                f"Type: `{readable_type}`\n"
-                f"Enabled: {enabled}\n"
-                f"Rule ID: {rule_obj.id}"
+                f"**Type:** `{getattr(getattr(rule_obj, 'trigger', None), 'type', None)}`\n"
+                f"**Enabled:** `{getattr(rule_obj, 'enabled', None)}`\n"
+                f"**Rule ID:** `{rule_obj.id}`"
             ),
         )
-        for name, value in rule_fields:
-            embed.add_field(name=name, value=value, inline=False)
+
+        # List all info fields for known rule types
+        meta = getattr(rule_obj, "trigger_metadata", None)
+        trigger = getattr(rule_obj, "trigger", None)
+        if meta:
+            if hasattr(meta, "keyword_filter") and meta.keyword_filter:
+                embed.add_field(name="Keyword Filter", value=", ".join(meta.keyword_filter), inline=False)
+            if hasattr(meta, "allow_list") and meta.allow_list:
+                embed.add_field(name="Allowed List", value=", ".join(meta.allow_list), inline=False)
+            if hasattr(meta, "regex_patterns") and meta.regex_patterns:
+                embed.add_field(name="Regex Patterns", value=", ".join(meta.regex_patterns), inline=False)
+            if hasattr(meta, "mention_total_limit") and meta.mention_total_limit is not None:
+                embed.add_field(name="Mention Limit", value=str(meta.mention_total_limit), inline=False)
+            # Add other meta fields as you wish
+
+        # Show actions
+        if hasattr(rule_obj, "actions"):
+            acts = []
+            for act in rule_obj.actions:
+                acts.append(f"Type: {getattr(act, 'type', None)} Channel: {getattr(act, 'channel', None)} Duration: {getattr(act, 'duration', None)}")
+            if acts:
+                embed.add_field(name="Actions", value="\n".join(acts), inline=False)
+
+        # Show who created
+        if hasattr(rule_obj, "creator"):
+            embed.set_footer(text=f"Created by: {getattr(rule_obj.creator, 'name', '')} ({getattr(rule_obj, 'creator_id', '')})")
+
+        # Add last action msg if any
+        if performed_action:
+            embed.insert_field_at(0, name="Update", value=msg_action, inline=False)
 
         await ctx.send(embed=embed)
 
