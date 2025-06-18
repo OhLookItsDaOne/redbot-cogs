@@ -2,7 +2,7 @@ import discord
 from redbot.core import commands, Config
 
 class D1AutoMod(commands.Cog):
-    """AutoMod: Manage Discord AutoMod keyword rules and allowed words/phrases interactively."""
+    """AutoMod: Interactive Discord AutoMod rule management (all types)."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -17,7 +17,7 @@ class D1AutoMod(commands.Cog):
         return any(role.id in allowed_roles for role in ctx.author.roles)
 
     async def get_shortname_mapping(self, guild):
-        # Map shortnames (e.g. "spam") to rule IDs, update in config
+        """Maps shortnames to rule IDs and caches them in config."""
         mapping = await self.config.guild(guild).shortnames()
         try:
             rules = await guild.fetch_automod_rules()
@@ -41,6 +41,7 @@ class D1AutoMod(commands.Cog):
             names_used.add(short)
         await self.config.guild(guild).shortnames.set(newmap)
         return newmap
+
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def automod(self, ctx, rule: str = None):
@@ -48,7 +49,7 @@ class D1AutoMod(commands.Cog):
         Manage Discord AutoMod rules interactively.
 
         Usage:
-        !automod <shortname> – manage a rule (any type!)
+        !automod <shortname> – view/manage a rule
         !automod list – list all rules
         """
         if rule is None:
@@ -68,16 +69,15 @@ class D1AutoMod(commands.Cog):
 
         trigger = getattr(rule_obj, "trigger", None)
         trigger_type = getattr(trigger, "type", None)
-        readable_type = str(trigger_type)  # <AutoModRuleTriggerType.keyword: 1> oder als string
+        readable_type = str(trigger_type)  # e.g. "AutoModRuleTriggerType.keyword"
 
-        # Schönes Embed mit Typ und Basisdaten
+        # Build info embed for any rule type
         embed = discord.Embed(
-            title=f"Edit AutoMod Rule: {rule_obj.name}",
-            description=f"Type: `{readable_type}`\n"
-                        f"Enabled: {getattr(rule_obj, 'enabled', None)}"
+            title=f"AutoMod Rule: {rule_obj.name}",
+            description=f"Type: `{readable_type}`\nEnabled: `{getattr(rule_obj, 'enabled', None)}`\nRule ID: `{rule_obj.id}`"
         )
 
-        # Keyword: Zeige allowed words, spam: Zeige limit, etc.
+        # Add type-specific info fields
         if str(trigger_type).lower() == "keyword":
             allow_list = getattr(getattr(rule_obj, "trigger_metadata", None), "allow_list", [])
             embed.add_field(
@@ -85,12 +85,19 @@ class D1AutoMod(commands.Cog):
                 value="\n".join(allow_list) if allow_list else "*None*",
                 inline=False
             )
-            # GIBT VIEW MIT BUTTONS MIT!
+            # Add keyword triggers/regex too if you want
+            kw_filter = getattr(getattr(rule_obj, "trigger_metadata", None), "keyword_filter", [])
+            regex_patterns = getattr(getattr(rule_obj, "trigger_metadata", None), "regex_patterns", [])
+            if kw_filter:
+                embed.add_field(name="Keyword Filter", value="\n".join(kw_filter), inline=False)
+            if regex_patterns:
+                embed.add_field(name="Regex Patterns", value="\n".join(regex_patterns), inline=False)
             view = AllowWordsView(self, rule_obj)
             await ctx.send(embed=embed, view=view)
         else:
-            # Andere Typen: Einfaches Embed (oder später eigene Views)
+            # For any other rule type, just show info for now
             await ctx.send(embed=embed)
+
     @automod.command(name="list")
     async def list_rules(self, ctx):
         """List all AutoMod rules with their short names."""
