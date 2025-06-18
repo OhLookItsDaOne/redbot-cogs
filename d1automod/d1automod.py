@@ -68,12 +68,13 @@ class D1AutoMod(commands.Cog):
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
 
-        trigger_type = getattr(rule_obj, "trigger_type", None)
+        trigger = getattr(rule_obj, "trigger", None)
+        trigger_type = getattr(trigger, "type", None)
         keyword_type = getattr(getattr(discord, "AutoModRuleTriggerType", None), "keyword", None)
 
-        # Debug output for clarity (kannst du nach Test löschen)
+        # Debug output for clarity (can be removed later)
         await ctx.send(
-            f"DEBUG: rule_obj.trigger_type={trigger_type!r} (should be: {keyword_type!r}, str: '{str(trigger_type).lower()}')"
+            f"DEBUG: trigger_type={trigger_type!r} (should be: {keyword_type!r}, str: '{str(trigger_type).lower()}')"
         )
 
         if trigger_type != keyword_type and str(trigger_type).lower() != "keyword":
