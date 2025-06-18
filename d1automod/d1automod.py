@@ -82,7 +82,56 @@ class D1AutoMod(commands.Cog):
         performed_action = False
         msg_action = ""
         trigger_meta = getattr(rule_obj, "trigger_metadata", None)
-        allow_list_supported = hasattr(trigger_meta, "allow_list")
+        # Always allow add/remove for keyword rules, even if allow_list is missing!
+        is_keyword = getattr(getattr(rule_obj, "trigger", None), "type", None)
+        is_keyword_rule = (str(is_keyword).lower() == "keyword" or str(is_keyword).endswith(".keyword") or str(is_keyword).endswith(": 1>"))
+
+        if action is not None:
+            lower_action = action.lower()
+            if lower_action == "enable":
+                await rule_obj.edit(enabled=True)
+                msg_action = "Rule enabled."
+                performed_action = True
+            elif lower_action == "disable":
+                await rule_obj.edit(enabled=False)
+                msg_action = "Rule disabled."
+                performed_action = True
+            elif lower_action in ("add", "remove") and is_keyword_rule:
+                if not args:
+                    return await ctx.send(f"Please specify words to {lower_action}: `!automod <rule> {lower_action} word1,word2`")
+                added_or_removed = [w.strip() for w in " ".join(args).replace("\n", ",").split(",") if w.strip()]
+                # Always default to empty if missing!
+                allow_list = set(getattr(trigger_meta, "allow_list", []) or [])
+                before = set(allow_list)
+                if lower_action == "add":
+                    allow_list.update(added_or_removed)
+                else:
+                    allow_list.difference_update(added_or_removed)
+                try:
+                    await rule_obj.edit(
+                        trigger_metadata=discord.AutoModRuleTriggerMetadata(
+                            allow_list=list(allow_list),
+                            keyword_filter=getattr(trigger_meta, "keyword_filter", [])
+                        )
+                    )
+                    if lower_action == "add":
+                        msg_action = f"Added: {', '.join(set(added_or_removed) - before)}" if set(added_or_removed) - before else "No new words added."
+                    else:
+                        msg_action = f"Removed: {', '.join(before - set(allow_list))}" if before - set(allow_list) else "No words were removed."
+                except Exception as e:
+                    msg_action = f"Failed to update rule: {e}"
+                performed_action = True
+            elif lower_action in ("add", "remove"):
+                return await ctx.send("This rule does not support allowed words/phrases.")
+            else:
+                return await ctx.send("Unknown action or unsupported for this rule. Use `enable`, `disable`, `add`, or `remove`.")
+            # Refresh for updated state!
+            try:
+                rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
+                trigger_meta = getattr(rule_obj, "trigger_metadata", None)
+            except Exception:
+                pass
+
 
         # Parse action for enable/disable/add/remove
         if action is not None:
