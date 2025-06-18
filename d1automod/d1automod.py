@@ -41,7 +41,6 @@ class D1AutoMod(commands.Cog):
             names_used.add(short)
         await self.config.guild(guild).shortnames.set(newmap)
         return newmap
-
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def automod(self, ctx, rule: str = None):
@@ -51,14 +50,13 @@ class D1AutoMod(commands.Cog):
         Usage:
         !automod <shortname> – manage a rule
         !automod list – list all rules
-        !automod allowrole/removeole/roles – role management
+        !automod allowrole/removerole/roles – role management
         """
         if rule is None:
             return await ctx.send_help()
 
         # If user types a subcommand (list, allowrole etc), the respective subcommand will trigger.
         # Only when none is found, we continue here and treat as shortname.
-        # Red handles subcommands automatically.
         shortmap = await self.get_shortname_mapping(ctx.guild)
         rule_id = shortmap.get(rule) if not rule.isdigit() else int(rule)
         if not rule_id:
@@ -72,7 +70,17 @@ class D1AutoMod(commands.Cog):
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
 
-        if rule_obj.trigger_type != discord.AutoModTriggerType.keyword:
+        # Universal compatibility: py-cord and discord.py have different attribute names!
+        trigger_type = getattr(rule_obj, "trigger_type", getattr(rule_obj, "type", None))
+        try:
+            keyword_type = discord.AutoModTriggerType.keyword
+        except AttributeError:
+            # Fallback for py-cord: might be discord.AutoModRuleTriggerType
+            keyword_type = getattr(discord, "AutoModRuleTriggerType", None)
+            if keyword_type:
+                keyword_type = keyword_type.keyword
+
+        if trigger_type != keyword_type:
             return await ctx.send("This rule is not a keyword rule (only keyword rules support allowed words/phrases).")
 
         view = AllowWordsView(self, rule_obj)
