@@ -2,7 +2,7 @@ import discord
 from redbot.core import commands, Config
 
 class D1AutoMod(commands.Cog):
-    """AutoMod: Interactive Discord AutoMod rule management (all types)."""
+    """AutoMod: Manage Discord AutoMod keyword rules and allowed words/phrases interactively."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -17,7 +17,7 @@ class D1AutoMod(commands.Cog):
         return any(role.id in allowed_roles for role in ctx.author.roles)
 
     async def get_shortname_mapping(self, guild):
-        """Maps shortnames to rule IDs and caches them in config."""
+        # Map shortnames (e.g. "spam") to rule IDs, update in config
         mapping = await self.config.guild(guild).shortnames()
         try:
             rules = await guild.fetch_automod_rules()
@@ -41,16 +41,17 @@ class D1AutoMod(commands.Cog):
             names_used.add(short)
         await self.config.guild(guild).shortnames.set(newmap)
         return newmap
-
+    
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
-    async def automod(self, ctx, rule: str = None):
+    async def automod(self, ctx, rule: str = None, action: str = None, *args):
         """
-        Manage Discord AutoMod rules interactively.
-
+        Show info about an AutoMod rule. (All management via commands!)
         Usage:
-        !automod <shortname> – view/manage a rule
-        !automod list – list all rules
+        !automod <shortname> [enable|disable]
+        !automod <shortname> allow add word1,word2
+        !automod <shortname> allow remove word1,word2
+        !automod list
         """
         if rule is None:
             return await ctx.send_help()
@@ -69,34 +70,34 @@ class D1AutoMod(commands.Cog):
 
         trigger = getattr(rule_obj, "trigger", None)
         trigger_type = getattr(trigger, "type", None)
-        readable_type = str(trigger_type)  # e.g. "AutoModRuleTriggerType.keyword"
+        readable_type = str(trigger_type)
+        enabled = getattr(rule_obj, "enabled", None)
+        rule_fields = []
+        if hasattr(rule_obj, "trigger_metadata"):
+            meta = rule_obj.trigger_metadata
+            # Add fields as present (for keyword rules: show lists, for others: show meta if any)
+            if hasattr(meta, "keyword_filter"):
+                rule_fields.append(("Keyword Filter", ", ".join(meta.keyword_filter) or "*None*"))
+            if hasattr(meta, "allow_list"):
+                rule_fields.append(("Allowed List", ", ".join(meta.allow_list) or "*None*"))
+            if hasattr(meta, "regex_patterns"):
+                rule_fields.append(("Regex Patterns", ", ".join(meta.regex_patterns) or "*None*"))
+            if hasattr(meta, "mention_total_limit"):
+                rule_fields.append(("Mention Limit", str(meta.mention_total_limit)))
+            # Add more as needed for other types
 
-        # Build info embed for any rule type
         embed = discord.Embed(
             title=f"AutoMod Rule: {rule_obj.name}",
-            description=f"Type: `{readable_type}`\nEnabled: `{getattr(rule_obj, 'enabled', None)}`\nRule ID: `{rule_obj.id}`"
+            description=(
+                f"Type: `{readable_type}`\n"
+                f"Enabled: {enabled}\n"
+                f"Rule ID: {rule_obj.id}"
+            ),
         )
+        for name, value in rule_fields:
+            embed.add_field(name=name, value=value, inline=False)
 
-        # Add type-specific info fields
-        if str(trigger_type).lower() == "keyword":
-            allow_list = getattr(getattr(rule_obj, "trigger_metadata", None), "allow_list", [])
-            embed.add_field(
-                name="Allowed Words/Phrases",
-                value="\n".join(allow_list) if allow_list else "*None*",
-                inline=False
-            )
-            # Add keyword triggers/regex too if you want
-            kw_filter = getattr(getattr(rule_obj, "trigger_metadata", None), "keyword_filter", [])
-            regex_patterns = getattr(getattr(rule_obj, "trigger_metadata", None), "regex_patterns", [])
-            if kw_filter:
-                embed.add_field(name="Keyword Filter", value="\n".join(kw_filter), inline=False)
-            if regex_patterns:
-                embed.add_field(name="Regex Patterns", value="\n".join(regex_patterns), inline=False)
-            view = AllowWordsView(self, rule_obj)
-            await ctx.send(embed=embed, view=view)
-        else:
-            # For any other rule type, just show info for now
-            await ctx.send(embed=embed)
+        await ctx.send(embed=embed)
 
     @automod.command(name="list")
     async def list_rules(self, ctx):
