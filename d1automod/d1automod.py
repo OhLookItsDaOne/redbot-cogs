@@ -62,7 +62,7 @@ class D1AutoMod(commands.Cog):
         if cmd in ("allowrole", "removerole"):
             return await ctx.send_help()
 
-        # from here on, it's a per‐rule action
+        # rule-specific
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
 
@@ -174,29 +174,36 @@ class D1AutoMod(commands.Cog):
         creator = r.creator.mention if r.creator else str(r.creator_id)
         em.add_field(name="Created by", value=creator, inline=False)
         if r.exempt_roles:
-            em.add_field(name="Exempt Roles",
-                         value="\n".join(r.mention for r in r.exempt_roles), inline=False)
+            em.add_field(
+                name="Exempt Roles",
+                value="\n".join(role.mention for role in r.exempt_roles),
+                inline=False
+            )
         if r.exempt_channels:
-            em.add_field(name="Exempt Channels",
-                         value="\n".join(c.mention for c in r.exempt_channels), inline=False)
+            em.add_field(
+                name="Exempt Channels",
+                value="\n".join(chan.mention for chan in r.exempt_channels),
+                inline=False
+            )
         return await ctx.send(embed=em)
 
     async def _add_words(self, ctx, r, words: str):
-        # only keyword‐style triggers store allow_list
         old = set(getattr(r.trigger, "allow_list", []))
         if old is None:
             return await ctx.send("❌ Only keyword‐style rules support an allow list.")
         new = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         merged = old | new
-        # rebuild trigger preserving everything
-        nt = dict(
-            keyword_filter=getattr(r.trigger, "keyword_filter", None),
-            regex_patterns=getattr(r.trigger, "regex_patterns", None),
-            allow_list=list(merged),
-            presets=getattr(r.trigger, "presets", None),
-            mention_limit=getattr(r.trigger, "mention_total_limit", None),
+
+        # rebuild just the keyword fields
+        kt = r.trigger.keyword_filter if hasattr(r.trigger, "keyword_filter") else None
+        rp = r.trigger.regex_patterns if hasattr(r.trigger, "regex_patterns") else None
+        await r.edit(
+            trigger=discord.AutoModTrigger(
+                keyword_filter=kt,
+                allow_list=list(merged),
+                regex_patterns=rp
+            )
         )
-        await r.edit(trigger=discord.AutoModTrigger(**{k: v for k, v in nt.items() if v is not None}))
         added = sorted(new - old)
         return await ctx.send(
             f"✅ Added: {', '.join(added) or '— none —'}\n"
@@ -209,14 +216,16 @@ class D1AutoMod(commands.Cog):
             return await ctx.send("❌ Only keyword‐style rules support an allow list.")
         rem = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         kept = old - rem
-        nt = dict(
-            keyword_filter=getattr(r.trigger, "keyword_filter", None),
-            regex_patterns=getattr(r.trigger, "regex_patterns", None),
-            allow_list=list(kept),
-            presets=getattr(r.trigger, "presets", None),
-            mention_limit=getattr(r.trigger, "mention_total_limit", None),
+
+        kt = r.trigger.keyword_filter if hasattr(r.trigger, "keyword_filter") else None
+        rp = r.trigger.regex_patterns if hasattr(r.trigger, "regex_patterns") else None
+        await r.edit(
+            trigger=discord.AutoModTrigger(
+                keyword_filter=kt,
+                allow_list=list(kept),
+                regex_patterns=rp
+            )
         )
-        await r.edit(trigger=discord.AutoModTrigger(**{k: v for k, v in nt.items() if v is not None}))
         gone = sorted(old & rem)
         return await ctx.send(
             f"✅ Removed: {', '.join(gone) or '— none —'}\n"
