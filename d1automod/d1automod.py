@@ -2,7 +2,7 @@ import discord
 from redbot.core import commands, Config
 
 class D1AutoMod(commands.Cog):
-    """AutoMod: Manage rules and allowed words/phrases interactively."""
+    """AutoMod: Manage Discord AutoMod keyword rules and allowed words/phrases interactively."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -17,8 +17,12 @@ class D1AutoMod(commands.Cog):
         return any(role.id in allowed_roles for role in ctx.author.roles)
 
     async def get_shortname_mapping(self, guild):
+        # Map shortnames (e.g. "spam") to rule IDs, update in config
         mapping = await self.config.guild(guild).shortnames()
-        rules = await guild.fetch_automod_rules()
+        try:
+            rules = await guild.fetch_automod_rules()
+        except Exception:
+            return {}
         names_used = set()
         newmap = {}
         for rule in rules:
@@ -41,24 +45,30 @@ class D1AutoMod(commands.Cog):
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def automod(self, ctx, rule: str = None):
-        """Manage AutoMod rules and allowed words/phrases interactively.
-        
-        Just use: !automod <shortname>
-        Example: !automod spam
+        """
+        Manage AutoMod rules and allowed words/phrases interactively.
+
+        Usage:
+        !automod <shortname> – manage a rule
+        !automod list – list all rules
+        !automod allowrole/removeole/roles – role management
         """
         if rule is None:
             return await ctx.send_help()
 
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("You do not have permission to use this command.")
-
+        # If user types a subcommand (list, allowrole etc), the respective subcommand will trigger.
+        # Only when none is found, we continue here and treat as shortname.
+        # Red handles subcommands automatically.
         shortmap = await self.get_shortname_mapping(ctx.guild)
         rule_id = shortmap.get(rule) if not rule.isdigit() else int(rule)
         if not rule_id:
-            return await ctx.send("Rule not found by short name or ID.")
+            return await ctx.send(
+                "Rule not found by short name or ID.\n"
+                "Use `!automod list` to see available rules and their short names."
+            )
 
         try:
-            rule_obj = await ctx.guild.fetch_auto_moderation_rule(rule_id)
+            rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
 
@@ -71,12 +81,24 @@ class D1AutoMod(commands.Cog):
             view=view
         )
 
-    @automod.command(name="automoddebug")
-    @commands.has_guild_permissions(administrator=True)
-    async def automoddebug(self, ctx):
-        """Debug: Zeigt, ob die fetch_auto_moderation_rules Methode verfügbar ist."""
-        has_attr = hasattr(ctx.guild, "fetch_auto_moderation_rules")
-        await ctx.send(f"fetch_auto_moderation_rules available: {has_attr}")
+    @automod.command(name="list")
+    async def list_rules(self, ctx):
+        """List all AutoMod rules with their short names."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("You do not have permission to use this command.")
+        try:
+            rules = await ctx.guild.fetch_automod_rules()
+        except Exception as e:
+            return await ctx.send(f"Failed to fetch rules: {e}")
+        if not rules:
+            return await ctx.send("No AutoMod rules found.")
+        shortmap = await self.get_shortname_mapping(ctx.guild)
+        msg = ""
+        for shortname, ruleid in shortmap.items():
+            rule = discord.utils.get(rules, id=ruleid)
+            if rule:
+                msg += f"**{shortname}** — {rule.name} (ID: `{rule.id}`)\n"
+        await ctx.send(f"**AutoMod rules and short names:**\n{msg or 'None'}")
 
     @automod.command(name="allowrole")
     @commands.has_guild_permissions(administrator=True)
@@ -110,25 +132,6 @@ class D1AutoMod(commands.Cog):
             return await ctx.send("No roles are currently allowed to use automod management commands.")
         mentions = [f"<@&{role_id}>" for role_id in allowed_roles if ctx.guild.get_role(role_id)]
         await ctx.send("Allowed roles: " + ", ".join(mentions) if mentions else "No valid roles found.")
-
-    @automod.command(name="list")
-    async def list_rules(self, ctx):
-        """List all AutoMod rules with their short names."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("You do not have permission to use this command.")
-        try:
-            rules = await guild.fetch_automod_rules()
-        except Exception as e:
-            return await ctx.send(f"Failed to fetch rules: {e}")
-        if not rules:
-            return await ctx.send("No AutoMod rules found.")
-        shortmap = await self.get_shortname_mapping(ctx.guild)
-        msg = ""
-        for shortname, ruleid in shortmap.items():
-            rule = discord.utils.get(rules, id=ruleid)
-            if rule:
-                msg += f"**{shortname}** — {rule.name} (ID: `{rule.id}`)\n"
-        await ctx.send(f"**AutoMod rules and short names:**\n{msg}")
 
 class AllowWordsView(discord.ui.View):
     def __init__(self, cog, rule_obj):
@@ -182,7 +185,7 @@ class AddWordModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         added = [w.strip() for w in self.children[0].value.replace("\n", ",").split(",") if w.strip()]
         allow_list = set(self.rule_obj.trigger_metadata.allow_list or [])
-        before = list(allow_list)
+        before = set(allow_list)
         allow_list.update(added)
         try:
             await self.rule_obj.edit(
@@ -191,7 +194,7 @@ class AddWordModal(discord.ui.Modal):
                     keyword_filter=self.rule_obj.trigger_metadata.keyword_filter
                 )
             )
-            msg = f"Added: {', '.join(set(added) - set(before))}" if set(added) - set(before) else "No new words added."
+            msg = f"Added: {', '.join(set(added) - before)}" if set(added) - before else "No new words added."
         except Exception as e:
             msg = f"Failed to update rule: {e}"
         await interaction.response.send_message(msg, ephemeral=True)
@@ -226,4 +229,3 @@ class RemoveWordModal(discord.ui.Modal):
 
 async def setup(bot):
     await bot.add_cog(D1AutoMod(bot))
-
