@@ -85,23 +85,12 @@ class D1AutoMod(commands.Cog):
                 value="\n".join(allow_list) if allow_list else "*None*",
                 inline=False
             )
-            # Du kannst Buttons/Modals zum Bearbeiten wie vorher anzeigen
+            # GIBT VIEW MIT BUTTONS MIT!
             view = AllowWordsView(self, rule_obj)
             await ctx.send(embed=embed, view=view)
-        elif str(trigger_type).lower() in ("spam", "mention_spam"):
-            # Beispiel: Spam/Mention Spam limit anzeigen
-            meta = getattr(rule_obj, "trigger_metadata", None)
-            if meta:
-                limits = [
-                    f"Total limit: {getattr(meta, 'mention_total_limit', 'N/A')}",
-                    f"Raid protection: {getattr(meta, 'mention_raid_protection_enabled', 'N/A')}"
-                ]
-                embed.add_field(name="Spam/Mention Settings", value="\n".join(limits), inline=False)
-            await ctx.send(embed=embed)
         else:
-            # Fallback: nur Basisdaten anzeigen, nicht editierbar
+            # Andere Typen: Einfaches Embed (oder später eigene Views)
             await ctx.send(embed=embed)
-
     @automod.command(name="list")
     async def list_rules(self, ctx):
         """List all AutoMod rules with their short names."""
