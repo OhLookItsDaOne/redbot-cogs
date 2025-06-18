@@ -70,26 +70,33 @@ class D1AutoMod(commands.Cog):
             return await ctx.send(f"Could not fetch rule: {e}")
 
         # DEBUG: Gebe möglichst viele Infos zum Objekt und zum Typ
-        await ctx.send(f"dir: {dir(rule_obj)}")
-        try:
-            await ctx.send(f"dict: {rule_obj.__dict__}")
-        except Exception:
-            await ctx.send(f"vars: {vars(rule_obj)}")
+        # Debug: Gibt Attribute und den Inhalt von .to_dict() aus!
+        fields = [a for a in dir(rule_obj) if not a.startswith('_')]
+        for f in fields:
+            v = getattr(rule_obj, f)
+            # Für lange Listen/Objekte machen wir sie kurz lesbar
+            if isinstance(v, list):
+                v = f"list[{len(v)}] {v[:3]}..." if len(v) > 3 else v
+            elif isinstance(v, dict):
+                v = dict(list(v.items())[:3])  # nur die ersten 3 Einträge
+            await ctx.send(f"{f}: {repr(v)}")
 
-        # Trigger-Objekt ausgeben, falls vorhanden
+        # Gibt das gesamte Dict als JSON aus (gecuttet)
+        try:
+            data = rule_obj.to_dict()
+            await ctx.send(f"to_dict: {str(data)[:1500]}...")  # Discord-Limit!
+        except Exception:
+            await ctx.send("Could not call to_dict()!")
+            
         trigger = getattr(rule_obj, "trigger", None)
-        await ctx.send(f"trigger: {trigger!r}")
         trigger_type = getattr(trigger, "type", None)
-        await ctx.send(f"trigger type: {trigger_type!r}")
+        await ctx.send(f"trigger_type: {trigger_type!r}")
+        if str(trigger_type).lower() != "keyword":
+            return await ctx.send("This rule is not a keyword rule (only keyword rules support allowed words/phrases).")
 
-        # Versuche als dict auszugeben, falls möglich
-        try:
-            await ctx.send(f"trigger as dict: {trigger.__dict__}")
-        except Exception:
-            await ctx.send(f"trigger as str: {str(trigger)}")
 
-        # NUR für Debug! Danach: Hier return nutzen, um Abbruch zu erzwingen!
-        return  # NACH DEM TESTEN WIEDER ENTFERNEN!
+
+
 
         # === AB HIER NUR WENN DU WEITERMACHEN WILLST ===
         # (Nach Debug entfernen oder als Extra-Block machen)
