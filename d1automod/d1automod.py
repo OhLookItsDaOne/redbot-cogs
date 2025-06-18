@@ -56,8 +56,6 @@ class D1AutoMod(commands.Cog):
         if rule is None:
             return await ctx.send_help()
 
-        # If user types a subcommand (list, allowrole etc), the respective subcommand will trigger.
-        # Only when none is found, we continue here and treat as shortname.
         shortmap = await self.get_shortname_mapping(ctx.guild)
         rule_id = shortmap.get(rule) if not rule.isdigit() else int(rule)
         if not rule_id:
@@ -70,25 +68,34 @@ class D1AutoMod(commands.Cog):
             rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
-        import pprint
+
+        # DEBUG: Gebe möglichst viele Infos zum Objekt und zum Typ
         await ctx.send(f"dir: {dir(rule_obj)}")
         try:
             await ctx.send(f"dict: {rule_obj.__dict__}")
         except Exception:
             await ctx.send(f"vars: {vars(rule_obj)}")
 
-        # Universal compatibility: py-cord and discord.py have different attribute names!
-        trigger_type = getattr(rule_obj, "trigger_type", getattr(rule_obj, "type", None))
-        try:
-            keyword_type = discord.AutoModTriggerType.keyword
-        except AttributeError:
-            # Fallback for py-cord: might be discord.AutoModRuleTriggerType
-            keyword_type = getattr(discord, "AutoModRuleTriggerType", None)
-            if keyword_type:
-                keyword_type = keyword_type.keyword
+        # Trigger-Objekt ausgeben, falls vorhanden
+        trigger = getattr(rule_obj, "trigger", None)
+        await ctx.send(f"trigger: {trigger!r}")
+        trigger_type = getattr(trigger, "type", None)
+        await ctx.send(f"trigger type: {trigger_type!r}")
 
-        if trigger_type != keyword_type:
-            await ctx.send(f"DEBUG: {trigger_type=} {type(trigger_type)=} {getattr(discord, 'AutoModTriggerType', None)}")
+        # Versuche als dict auszugeben, falls möglich
+        try:
+            await ctx.send(f"trigger as dict: {trigger.__dict__}")
+        except Exception:
+            await ctx.send(f"trigger as str: {str(trigger)}")
+
+        # NUR für Debug! Danach: Hier return nutzen, um Abbruch zu erzwingen!
+        return  # NACH DEM TESTEN WIEDER ENTFERNEN!
+
+        # === AB HIER NUR WENN DU WEITERMACHEN WILLST ===
+        # (Nach Debug entfernen oder als Extra-Block machen)
+
+        # Weiter mit Prüfung:
+        if str(trigger_type).lower() != "keyword":
             return await ctx.send("This rule is not a keyword rule (only keyword rules support allowed words/phrases).")
 
         view = AllowWordsView(self, rule_obj)
