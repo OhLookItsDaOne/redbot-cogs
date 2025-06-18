@@ -63,46 +63,20 @@ class D1AutoMod(commands.Cog):
                 "Rule not found by short name or ID.\n"
                 "Use `!automod list` to see available rules and their short names."
             )
-
         try:
             rule_obj = await ctx.guild.fetch_automod_rule(rule_id)
         except Exception as e:
             return await ctx.send(f"Could not fetch rule: {e}")
 
-        # DEBUG: Gebe möglichst viele Infos zum Objekt und zum Typ
-        # Debug: Gibt Attribute und den Inhalt von .to_dict() aus!
-        fields = [a for a in dir(rule_obj) if not a.startswith('_')]
-        for f in fields:
-            v = getattr(rule_obj, f)
-            # Für lange Listen/Objekte machen wir sie kurz lesbar
-            if isinstance(v, list):
-                v = f"list[{len(v)}] {v[:3]}..." if len(v) > 3 else v
-            elif isinstance(v, dict):
-                v = dict(list(v.items())[:3])  # nur die ersten 3 Einträge
-            await ctx.send(f"{f}: {repr(v)}")
+        trigger_type = getattr(rule_obj, "trigger_type", None)
+        keyword_type = getattr(getattr(discord, "AutoModRuleTriggerType", None), "keyword", None)
 
-        # Gibt das gesamte Dict als JSON aus (gecuttet)
-        try:
-            data = rule_obj.to_dict()
-            await ctx.send(f"to_dict: {str(data)[:1500]}...")  # Discord-Limit!
-        except Exception:
-            await ctx.send("Could not call to_dict()!")
-            
-        trigger = getattr(rule_obj, "trigger", None)
-        trigger_type = getattr(trigger, "type", None)
-        await ctx.send(f"trigger_type: {trigger_type!r}")
-        if str(trigger_type).lower() != "keyword":
-            return await ctx.send("This rule is not a keyword rule (only keyword rules support allowed words/phrases).")
+        # Debug output for clarity (kannst du nach Test löschen)
+        await ctx.send(
+            f"DEBUG: rule_obj.trigger_type={trigger_type!r} (should be: {keyword_type!r}, str: '{str(trigger_type).lower()}')"
+        )
 
-
-
-
-
-        # === AB HIER NUR WENN DU WEITERMACHEN WILLST ===
-        # (Nach Debug entfernen oder als Extra-Block machen)
-
-        # Weiter mit Prüfung:
-        if str(trigger_type).lower() != "keyword":
+        if trigger_type != keyword_type and str(trigger_type).lower() != "keyword":
             return await ctx.send("This rule is not a keyword rule (only keyword rules support allowed words/phrases).")
 
         view = AllowWordsView(self, rule_obj)
