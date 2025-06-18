@@ -18,7 +18,7 @@ class D1AutoMod(commands.Cog):
 
     async def get_shortname_mapping(self, guild):
         mapping = await self.config.guild(guild).shortnames()
-        rules = await ctx.guild.fetch_auto_moderation_rules()
+        rules = await ctx.guild.fetch_automod_rules()
         names_used = set()
         newmap = {}
         for rule in rules:
@@ -117,7 +117,7 @@ class D1AutoMod(commands.Cog):
         if not await self.has_automod_permission(ctx):
             return await ctx.send("You do not have permission to use this command.")
         try:
-            rules = await ctx.guild.fetch_auto_moderation_rules()
+            rules = await ctx.guild.fetch_automod_rules()
         except Exception as e:
             return await ctx.send(f"Failed to fetch rules: {e}")
         if not rules:
