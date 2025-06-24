@@ -313,8 +313,8 @@ class FusRohCog(commands.Cog):
                 raise BadArgument("vec zwischen 0 und 1")
             await self.config.vec_thr.set(vec)
         if ce is not None:
-            if not 0 <= vec < 1:
-                raise BadArgument("vec zwischen 0 und 1 (0.0 erlaubt)")
+            if not 0 <= ce < 1:
+                raise BadArgument("ce zwischen 0 und 1 (0.0 erlaubt)")
             await self.config.ce_thr.set(ce)
         await ctx.send("✅ Schwellen gespeichert.")
 
