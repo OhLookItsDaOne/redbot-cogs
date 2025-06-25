@@ -185,6 +185,43 @@ class FusRohCog(commands.Cog):
     async def _ce_thr(self) -> float:
         return await self.config.ce_thr()
 
+    async def _rank_hits(self, query: str, hits: List[dict]) -> List[dict]:
+        """Re-rank vector search hits using the cross encoder."""
+        if not hits:
+            return []
+        pairs = [[query, h["payload"]["text"]] for h in hits]
+        scores = self._ce.predict(pairs)
+        scored = sorted(zip(hits, scores), key=lambda t: t[1], reverse=True)
+        thr = await self._ce_thr()
+        return [h for h, s in scored if s >= thr]
+
+    async def _build_knowledge(self, qd: QdrantClient, hits: List[dict]) -> str:
+        """Gather document chunks and build the knowledge block."""
+        kb_texts = []
+        for h in hits:
+            doc_id = h["payload"]["doc_id"]
+            chunks = await qd.scroll(limit=100, qfilter={"must": [{"key": "doc_id", "match": {"value": doc_id}}]})
+            chunks.sort(key=lambda c: c["id"])
+            kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
+        return "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
+
+    async def _answer(self, query: str, ctx_msgs: List[dict] | None = None) -> str:
+        qd = await self._qd_client()
+        query_vec = await self._embed(query)
+        hits = await qd.search(query_vec, limit=8)
+        vec_thr = await self._vec_thr()
+        hits = [h for h in hits if h["score"] >= vec_thr]
+        hits = await self._rank_hits(query, hits)
+        if not hits:
+            return "I’m not sure."
+        kb = await self._build_knowledge(qd, hits)
+        messages = list(ctx_msgs) if ctx_msgs else []
+        messages.append({"role": "system", "content": f"Knowledge:\n{kb}"})
+        messages.append({"role": "user", "content": query})
+        raw = await self._chat(messages)
+        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
+        return reply or "I’m not sure."
+
     @staticmethod
     def _split_tags(raw: str) -> tuple[list[str], str]:
         """
@@ -235,7 +272,7 @@ class FusRohCog(commands.Cog):
     @commands.command()
     async def fusget(self, ctx, point_id: int):
         qd = await self._qd_client()
-        res = await qd.scroll(limit=1, offset=0)         
+        res = await qd.scroll(limit=1, offset=0)
         res = [p for p in res if p["id"] == point_id]
         if not res:
             return await ctx.send("ID not found.")
@@ -243,6 +280,18 @@ class FusRohCog(commands.Cog):
         text = payload["text"]
         links = "\n".join(payload.get("links", []))
         await self._chunk_send(ctx, f"**{point_id}**\n{text}\n{links}")
+
+    @commands.command()
+    async def fusask(self, ctx, *, question: str):
+        """Ask the knowledge base and get an LLM generated answer."""
+        history = [m async for m in ctx.channel.history(limit=3)]
+        history.reverse()
+        ctx_msgs = [
+            {"role": "user" if m.author == ctx.author else "assistant", "content": m.clean_content}
+            for m in history
+        ]
+        reply = await self._answer(question, ctx_msgs)
+        await ctx.send(reply)
 
     @commands.command()
     @commands.has_permissions(administrator=True)
@@ -347,8 +396,8 @@ class FusRohCog(commands.Cog):
                 if resp.status >= 400:
                     raise RuntimeError(await resp.text())
                 data = await resp.json()
-        return data["message"]["content"]    
-    
+        return data["message"]["content"]
+
     @commands.Cog.listener()
     async def on_message_without_command(self, message):
         if not message.guild or message.author.bot or message.author == self.bot.user:
@@ -356,84 +405,21 @@ class FusRohCog(commands.Cog):
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return
-    
+
         autos = await self.config.autotype_channels()
         if message.channel.id not in autos and self.bot.user not in message.mentions:
             return
-        qd = await self._qd_client()
+
         history = [m async for m in message.channel.history(limit=5)]
         history.reverse()
         ctx_msgs = [
             {"role": "user" if m.author == message.author else "assistant", "content": m.clean_content}
             for m in history
         ]
-        query_vec = await self._embed(message.clean_content)
-        all_points = await qd.scroll(limit=100)
-        alle_tags = {t for p in all_points for t in p["payload"].get("tags", [])}
-        await message.channel.send(f"🏷️ Verfügbare Tags in DB: {sorted(alle_tags)}")
-        word_tokens = set(re.findall(r"[A-Za-z0-9_\-]+", message.clean_content.lower()))
-        want_tags = [t for t in word_tokens if t in alle_tags]
-        await message.channel.send(f"🎯 Gesuchte Tags aus Frage: {want_tags}")
-        hits = await qd.search(query_vec, limit=8)
-        for h in hits:
-            txt = h["payload"]["text"][:60].replace("\n", " ")
-            tags = h["payload"].get("tags", [])
-            score = round(h.get("score", 0), 3)
-            await message.channel.send(f"id={h['id']} score={score} tags={tags} text=\"{txt}…\"")
-        selected = None
-        prompt_note = ""
-        if want_tags:
-            points = await qd.scroll(limit=200)
-            # exakte Treffer: alle Tags müssen drin sein
-            direct = [
-                p for p in points
-                if all(t in p["payload"].get("tags", []) for t in want_tags)
-            ]
-            if direct:
-                selected = direct
-                prompt_note = f"Treffer mit allen Tags: {', '.join(want_tags)}."
-            else:
-                # Fallback: mindestens ein Tag
-                fallback = [
-                    p for p in points
-                    if any(t in p["payload"].get("tags", []) for t in want_tags)
-                ]
-                if fallback:
-                    selected = fallback
-                    prompt_note = (
-                        f"Keine exakten Tag-Treffer; nutze Einträge mit einem der Tags: "
-                        f"{', '.join(want_tags)}."
-                    )
-        
-        # 2) Vektor-Fallback nur, wenn überhaupt keine Tag-Treffer
-        if selected is None:
-            # Wir haben ja schon das erste `hits = await qd.search(...)`
-            # und den Debug ausgegeben – also nur noch filtern:
-            vec_thr = await self._vec_thr()
-            hits = [h for h in hits if h["score"] >= vec_thr]
-            if not hits:
-                return await message.channel.send("I’m not sure.")
-            selected = hits
-            prompt_note = "Nutze semantisch ähnliche Einträge (Vektorsuche)."
-        
-        # 3) Chunks laden und Knowledge-Block bauen
-        kb_texts = []
-        for h in selected:
-            doc_id = h["payload"]["doc_id"]
-            chunks = await qd.scroll(
-                limit=100,
-                qfilter={"must":[{"key":"doc_id","match":{"value":doc_id}}]},
-            )
-            chunks.sort(key=lambda c: c["id"])
-            kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
-        
-        kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
-        ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
-        
-        # 4) Einmalige LLM-Abfrage und Antwort versenden
-        raw = await self._chat(ctx_msgs)
-        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
-        await message.channel.send(reply or "I’m not sure.")
+
+        reply = await self._answer(message.clean_content, ctx_msgs)
+        await message.channel.send(reply)
+    
 
 async def setup(bot: Red):
     await bot.add_cog(FusRohCog(bot))
