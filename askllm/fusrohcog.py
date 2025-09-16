@@ -1,439 +1,472 @@
-from __future__ import annotations
-import logging
-import re
-import time
-from typing import Any, Dict, List, Optional
-
 import aiohttp
-import numpy as np
-from redbot.core import Config, commands
-from redbot.core.bot import Red
-from redbot.core.commands import BadArgument
-from sentence_transformers import CrossEncoder
-try:
-    from sentence_transformers import SentenceTransformer 
-    import torch 
-except ImportError:
-    SentenceTransformer = None
-    torch = None 
+import aiofiles
+import asyncio
+import json
+import os
+from typing import Optional, List, Dict
+from pathlib import Path
+from urllib.parse import urlparse
+from datetime import datetime, timedelta
 
-EMBED_MODEL = "intfloat/e5-large-v2"
-EMBED_DIM = 1024
-logger = logging.getLogger("red.fusrohcog")
-DEFAULT_COLLECTION = "fusroh_support"
+import discord
+from redbot.core import commands, Config
+from redbot.core.data_manager import cog_data_path
 
-class QdrantClient:
-    def __init__(self, url: str, collection: str = DEFAULT_COLLECTION):
-        self.base = url.rstrip("/")
-        self.collection = collection
+class DeepSeekCog(commands.Cog):
+    """A Cog that uses DeepSeek API for specific topic queries with RAG learning functionality."""
 
-    async def _request(self, method: str, path: str, **kwargs):
-        url = f"{self.base}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.request(method, url, **kwargs) as resp:
-                if resp.status >= 400:
-                    txt = await resp.text()
-                    raise RuntimeError(
-                        f"Qdrant {method} {path} {resp.status}: {txt}"
-                    )
-                return await resp.json()
-                
-    async def recreate_collection(self):
-        try:
-            await self._request("DELETE", f"/collections/{self.collection}")
-        except RuntimeError:
-            pass
-        schema = {"vectors": {"size": EMBED_DIM, "distance": "Dot"}}
-        await self._request("PUT", f"/collections/{self.collection}", json=schema)
-        logger.info("Created collection %s (%d‑dims)", self.collection, EMBED_DIM)
-
-    async def ensure(self):
-        try:
-            await self._request("GET", f"/collections/{self.collection}")
-        except RuntimeError:
-            await self.recreate_collection()
-
-    async def drop_all(self):
-        res = await self._request("GET", "/collections")
-        for c in [c["name"] for c in res.get("result", {}).get("collections", [])]:
-            await self._request("DELETE", f"/collections/{c}")
-        logger.warning("Dropped all collections")
-
-    async def upsert(self, pid: int, vec: List[float], payload: Dict[str, Any]):
-        await self._request(
-            "PUT",
-            f"/collections/{self.collection}/points",
-            json={"points": [{"id": pid, "vector": vec, "payload": payload}]},
-        )
-
-    async def delete(self, pid: int):
-        await self._request(
-            "DELETE", f"/collections/{self.collection}/points", json={"points": [pid]}
-        )
-
-    async def search(
-        self,
-        vec: List[float],
-        limit: int = 5,
-        qfilter: Optional[Dict[str, Any]] = None,
-    ):
-        body = {
-            "vector": vec,
-            "limit": limit,
-            "with_payload": True,
-            "with_vectors": True,
-        }
-        if qfilter:
-            body["filter"] = qfilter
-        res = await self._request(
-            "POST", f"/collections/{self.collection}/points/search", json=body
-        )
-        return res.get("result", [])
-
-    async def scroll(self, limit: int = 10, offset: int = 0, qfilter: dict | None = None):
-        body = {"limit": limit, "with_payload": True}
-        if offset:
-            body["offset"] = offset
-        if qfilter:
-            body["filter"] = qfilter
-        try:
-            res = await self._request(
-                "POST", f"/collections/{self.collection}/points/scroll", json=body
-            )
-        except RuntimeError as exc:
-            if "404" in str(exc):
-                return []
-            raise
-
-        data = res.get("result", {})
-        if isinstance(data, dict) and "points" in data:
-            return data["points"]
-        return data
-
-class FusRohCog(commands.Cog):
-    def __init__(self, bot: Red):
+    def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xF0F5F5)
-        self.config.register_global(
-            chat_model="deepseek-r1:14b",
-            api_url="http://192.168.10.5:11434",
-            qdrant_url="http://192.168.10.5:6333",
-            autotype_channels=[],
-            vec_thr=0.25,
-            ce_thr=0.20,
-        )
-        self._qd: QdrantClient | None = None
-        self._st: SentenceTransformer | None = None
-        device = "cuda" if torch and torch.cuda.is_available() else "cpu"
-        self._ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device=device)
-        logger.info("Loaded Cross‑Encoder on %s", device)
-
-    async def _qd_client(self) -> QdrantClient:
-        if self._qd is None:
-            self._qd = QdrantClient(await self.config.qdrant_url())
-            await self._qd.ensure()
-        return self._qd
-
-    async def _embed(self, text: str) -> List[float]:
-        if SentenceTransformer is None:
-            raise RuntimeError("Please `pip install sentence-transformers` to use this cog.")
-        if self._st is None:
-            device = "cuda" if torch and torch.cuda.is_available() else "cpu"
-            self._st = SentenceTransformer(EMBED_MODEL, device=device)
-            logger.info("Loaded %s on %s", EMBED_MODEL, device)
-        return self._st.encode(text, convert_to_numpy=True).tolist()
-
-    async def _chunk_send(self, ctx: commands.Context, text: str):
-        for i in range(0, len(text), 1990):
-            await ctx.send(f"```{text[i:i+1990]}```")
-
-    @staticmethod
-    def chunk_text(text: str, tokens: int = 80, overlap: int = 15):
-        words = text.split()
-        step = tokens - overlap
-        for i in range(0, len(words), step):
-            yield " ".join(words[i : i + tokens])
-
-    @staticmethod
-    def clean_discord_text(txt: str) -> str:
-        txt = re.sub(r'^>.*$', '', txt, flags=re.M)          
-        txt = re.sub(r'^#+\\s+', '', txt, flags=re.M)        
-        txt = re.sub(r'^\\s*\\w{2,20}:\\s*', '', txt)        
-        return txt.strip()
-
-    @staticmethod
-    def mmr(query_vec, doc_vecs, k: int = 3, λ: float = 0.7):
-        query = np.asarray(query_vec)
-        sim = [np.dot(query, d) / (np.linalg.norm(query) * np.linalg.norm(d)) for d in doc_vecs]
-        selected, selected_ids = [], set()
-        for _ in range(min(k, len(doc_vecs))):
-            mmr_scores = [
-                λ * s - (1 - λ) * max(
-                    np.dot(d, doc_vecs[j]) / (np.linalg.norm(d) * np.linalg.norm(doc_vecs[j]))
-                    for j in selected_ids
-                ) if i not in selected_ids else -1
-                for i, (s, d) in enumerate(zip(sim, doc_vecs))
-            ]
-            nxt = int(np.argmax(mmr_scores))
-            selected.append(nxt)
-            selected_ids.add(nxt)
-        return selected
-
-    async def _vec_thr(self) -> float:
-        return await self.config.vec_thr()
-
-    async def _ce_thr(self) -> float:
-        return await self.config.ce_thr()
-
-    @staticmethod
-    def _split_tags(raw: str) -> tuple[list[str], str]:
-        """
-        [tag1 tag2] eigentlicher Text  →  (['tag1','tag2'], 'eig. Text')
-        """
-        m = re.match(r"\s*\[([^]]+)]\s*(.+)", raw, flags=re.S)
-        if not m:
-            return [], raw.strip()
-        tag_str, body = m.groups()
-        tags = re.split(r"[,\s]+", tag_str.strip())
-        return [t.lower() for t in tags if t], body.strip()
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def fusknow(self, ctx, *, text: str):
-        """Fügt Wissen hinzu – Tags optional in eckigen Klammern."""
-        doc_id = int(time.time() * 1000)
-        tags, clean = self._split_tags(text)
-        for chunk in self.chunk_text(clean):
-            pid = int(time.time() * 1000)
-            vec = await self._embed(chunk)
-            payload = {
-                "text": chunk,
-                "author": str(ctx.author),
-                "source": ctx.message.jump_url,
-                "doc_id": doc_id,            
-            }
-            if tags:
-                payload["tags"] = tags
-            await (await self._qd_client()).upsert(pid, vec, payload)
-        await ctx.send("✅ Added.")
-        
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def fusshow(self, ctx, count: int = 10, offset: int = 0, *, flag: str = ""):
-        full = "--full" in flag
-        rows = await (await self._qd_client()).scroll(count, offset)
-        if not rows:
-            return await ctx.send("No entries.")
-    
-        lines = []
-        for r in rows:
-            txt = r["payload"]["text"]
-            if not full:
-                txt = txt[:150] + ("…" if len(txt) > 150 else "")
-            lines.append(f"• **{r['id']}** – {txt}")
-        await self._chunk_send(ctx, "\n".join(lines))
-    @commands.command()
-    async def fusget(self, ctx, point_id: int):
-        qd = await self._qd_client()
-        res = await qd.scroll(limit=1, offset=0)         
-        res = [p for p in res if p["id"] == point_id]
-        if not res:
-            return await ctx.send("ID not found.")
-        payload = res[0]["payload"]
-        text = payload["text"]
-        links = "\n".join(payload.get("links", []))
-        await self._chunk_send(ctx, f"**{point_id}**\n{text}\n{links}")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def fusknowdel(self, ctx, point_id: int):
-        await (await self._qd_client()).delete(point_id)
-        await ctx.send("🗑️ Deleted.")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def learn(self, ctx, count: int = 5):
-        if not 1 <= count <= 20:
-            raise BadArgument("Count 1‑20")
-        msgs = [
-            m async for m in ctx.channel.history(limit=count + 1)
-            if m.id != ctx.message.id
-        ]
-        msgs.reverse()
-
-        clean_lines, links = [], []
-        for m in msgs:
-            clean_lines.append(self.clean_discord_text(m.clean_content))
-            links += re.findall(r'https?://\S+', m.content)  
-
-        bundle = "\n".join(clean_lines)                   
-        payload = {"text": bundle, "learned": True}
-        if links:
-            payload["links"] = links
-
-        pid = int(time.time() * 1000)
-        await (await self._qd_client()).upsert(
-            pid, await self._embed(bundle), payload
-        )
-        await ctx.send(f"📚 Learned `{pid}`")
-
-    @commands.command()
-    async def autotype(self, ctx, mode: str | None = None):
-        cid = ctx.channel.id
-        autos = await self.config.autotype_channels()
-        if mode is None:
-            return await ctx.send(
-                f"Auto‑typing is **{'on' if cid in autos else 'off'}** here."
-            )
-        mode = mode.lower()
-        if mode == "on":
-            if cid not in autos:
-                autos.append(cid)
-                await self.config.autotype_channels.set(autos)
-            await ctx.send("Auto‑typing enabled.")
-        elif mode == "off":
-            if cid in autos:
-                autos.remove(cid)
-                await self.config.autotype_channels.set(autos)
-            await ctx.send("Auto‑typing disabled.")
-        else:
-            raise BadArgument("Use on/off")
-
-    @commands.command()
-    async def fusthreshold(
-        self, ctx, vec: float | None = None, ce: float | None = None
-    ):
-        """`!fusthreshold` → zeigt;  `!fusthreshold 0.22 0.18` → setzt."""
-        if vec is None and ce is None:
-            v, c = await self._vec_thr(), await self._ce_thr()
-            await ctx.send(f"Vector‑Thr **{v:.2f}**, CE‑Thr **{c:.2f}**")
-            return
-        if vec is not None:
-            if not 0 < vec < 1:
-                raise BadArgument("vec zwischen 0 und 1")
-            await self.config.vec_thr.set(vec)
-        if ce is not None:
-            if not 0 <= ce < 1:
-                raise BadArgument("ce zwischen 0 und 1 (0.0 erlaubt)")
-            await self.config.ce_thr.set(ce)
-        await ctx.send("✅ Schwellen gespeichert.")
-
-    @commands.is_owner()
-    @commands.command()
-    async def fuswipe(self, ctx):
-        qd = await self._qd_client()
-        await qd.drop_all()
-        await qd.recreate_collection()
-        await ctx.send("💥 Qdrant wiped and fresh collection created.")
-        
-    async def _chat(self, messages):
-        sys_prompt = (
-            "You are a SkyrimVR-support assistant using only the provided Knowledge.\n"
-            "1) Read the Knowledge facts and pick the relevant ones.\n"
-            "2) Formulate a concise answer without repeating all facts verbatim.\n"
-            "3) If you lack enough information, reply exactly “I’m not sure.”\n"
-            "Cite each fact you use with [#] based on its position in the Knowledge block."
-            
-        )
-        body = {
-            "model": await self.config.chat_model(),
-            "stream": False,
-            "messages": [{"role": "system", "content": sys_prompt}, *messages],
+        self.config = Config.get_conf(self, identifier=1234567890)
+        default_global = {
+            "api_key": None,
+            "base_url": "https://api.deepseek.com/v1",
+            "context_data": "",
+            "context_source": "internal",
+            "github_url": None,
+            "github_branch": "main",
+            "github_path": "",
+            "cache_duration": 300,
+            "timeout": 30,
+            "rag_context_messages": 15,
+            "learning_enabled": True
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{(await self.config.api_url()).rstrip('/')}/api/chat", json=body
-            ) as resp:
-                if resp.status >= 400:
-                    raise RuntimeError(await resp.text())
-                data = await resp.json()
-        return data["message"]["content"]    
-    
-    @commands.Cog.listener()
-    async def on_message_without_command(self, message):
-        if not message.guild or message.author.bot or message.author == self.bot.user:
-            return
-        ctx = await self.bot.get_context(message)
-        if ctx.valid:
-            return
-    
-        autos = await self.config.autotype_channels()
-        if message.channel.id not in autos and self.bot.user not in message.mentions:
-            return
-        qd = await self._qd_client()
-        history = [m async for m in message.channel.history(limit=5)]
-        history.reverse()
-        ctx_msgs = [
-            {"role": "user" if m.author == message.author else "assistant", "content": m.clean_content}
-            for m in history
-        ]
-        query_vec = await self._embed(message.clean_content)
-        all_points = await qd.scroll(limit=100)
-        alle_tags = {t for p in all_points for t in p["payload"].get("tags", [])}
-        await message.channel.send(f"🏷️ Verfügbare Tags in DB: {sorted(alle_tags)}")
-        word_tokens = set(re.findall(r"[A-Za-z0-9_\-]+", message.clean_content.lower()))
-        want_tags = [t for t in word_tokens if t in alle_tags]
-        await message.channel.send(f"🎯 Gesuchte Tags aus Frage: {want_tags}")
-        hits = await qd.search(query_vec, limit=8)
-        for h in hits:
-            txt = h["payload"]["text"][:60].replace("\n", " ")
-            tags = h["payload"].get("tags", [])
-            score = round(h.get("score", 0), 3)
-            await message.channel.send(f"id={h['id']} score={score} tags={tags} text=\"{txt}…\"")
-        selected = None
-        prompt_note = ""
-        if want_tags:
-            points = await qd.scroll(limit=200)
-            # exakte Treffer: alle Tags müssen drin sein
-            direct = [
-                p for p in points
-                if all(t in p["payload"].get("tags", []) for t in want_tags)
-            ]
-            if direct:
-                selected = direct
-                prompt_note = f"Treffer mit allen Tags: {', '.join(want_tags)}."
-            else:
-                # Fallback: mindestens ein Tag
-                fallback = [
-                    p for p in points
-                    if any(t in p["payload"].get("tags", []) for t in want_tags)
-                ]
-                if fallback:
-                    selected = fallback
-                    prompt_note = (
-                        f"Keine exakten Tag-Treffer; nutze Einträge mit einem der Tags: "
-                        f"{', '.join(want_tags)}."
-                    )
         
-        # 2) Vektor-Fallback nur, wenn überhaupt keine Tag-Treffer
-        if selected is None:
-            # Wir haben ja schon das erste `hits = await qd.search(...)`
-            # und den Debug ausgegeben – also nur noch filtern:
-            vec_thr = await self._vec_thr()
-            hits = [h for h in hits if h["score"] >= vec_thr]
-            if not hits:
-                return await message.channel.send("I’m not sure.")
-            selected = hits
-            prompt_note = "Nutze semantisch ähnliche Einträge (Vektorsuche)."
+        default_guild = {
+            "learned_solutions": {},
+            "learning_role": None
+        }
         
-        # 3) Chunks laden und Knowledge-Block bauen
-        kb_texts = []
-        for h in selected:
-            doc_id = h["payload"]["doc_id"]
-            chunks = await qd.scroll(
-                limit=100,
-                qfilter={"must":[{"key":"doc_id","match":{"value":doc_id}}]},
-            )
-            chunks.sort(key=lambda c: c["id"])
-            kb_texts.append(" ".join(c["payload"]["text"] for c in chunks))
+        self.config.register_global(**default_global)
+        self.config.register_guild(**default_guild)
         
-        kb = prompt_note + "\n\n" + "\n\n".join(f"* {txt[:500]}…" for txt in kb_texts)
-        ctx_msgs.append({"role":"system","content":f"Knowledge:\n{kb}"})
-        
-        # 4) Einmalige LLM-Abfrage und Antwort versenden
-        raw = await self._chat(ctx_msgs)
-        reply = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
-        await message.channel.send(reply or "I’m not sure.")
+        self.data_path = cog_data_path(self) / "context_data.txt"
+        self.learned_db_path = cog_data_path(self) / "learned_solutions.json"
+        self.session = None
+        self.cache = {"data": "", "timestamp": None}
+        self.learned_data = {}
 
-async def setup(bot: Red):
-    await bot.add_cog(FusRohCog(bot))
+    async def cog_load(self):
+        """Called when the cog is loaded."""
+        timeout = aiohttp.ClientTimeout(total=await self.config.timeout())
+        self.session = aiohttp.ClientSession(timeout=timeout)
+        await self.load_learned_data()
+
+    async def cog_unload(self):
+        """Called when the cog is unloaded."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+        await self.save_learned_data()
+
+    async def load_learned_data(self):
+        """Loads learned solutions."""
+        try:
+            if self.learned_db_path.exists():
+                async with aiofiles.open(self.learned_db_path, 'r', encoding='utf-8') as f:
+                    self.learned_data = json.loads(await f.read())
+        except Exception as e:
+            print(f"Error loading learned data: {e}")
+            self.learned_data = {}
+
+    async def save_learned_data(self):
+        """Saves learned solutions."""
+        try:
+            async with aiofiles.open(self.learned_db_path, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps(self.learned_data, indent=2, ensure_ascii=False))
+        except Exception as e:
+            print(f"Error saving learned data: {e}")
+
+    async def get_github_raw_content(self, url: str) -> str:
+        """Fetches raw content from GitHub."""
+        try:
+            if "github.com" in url and "raw.githubusercontent.com" not in url:
+                url = url.replace("github.com", "raw.githubusercontent.com")
+                url = url.replace("/blob/", "/")
+            
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await response.text()
+                else:
+                    return f"Error: GitHub responded with status {response.status}"
+        except Exception as e:
+            return f"Error fetching GitHub content: {str(e)}"
+
+    async def get_github_repo_content(self, repo_url: str, path: str = "", branch: str = "main") -> str:
+        """Fetches content from a GitHub repository with rate limit handling."""
+        try:
+            parsed = urlparse(repo_url)
+            path_parts = parsed.path.strip('/').split('/')
+            
+            if len(path_parts) < 2:
+                return "Invalid GitHub URL"
+            
+            user, repo = path_parts[0], path_parts[1]
+            api_url = f"https://api.github.com/repos/{user}/{repo}/contents/{path}?ref={branch}"
+            
+            headers = {}
+            if os.environ.get('GITHUB_TOKEN'):
+                headers['Authorization'] = f"token {os.environ['GITHUB_TOKEN']}"
+            
+            async with self.session.get(api_url, headers=headers) as response:
+                response_text = await response.text()
+                
+                if response.status == 403 and 'rate limit' in response_text.lower():
+                    return "GitHub rate limit reached. Please try again later."
+                
+                if response.status == 200:
+                    content = json.loads(response_text)
+                    
+                    if isinstance(content, dict) and content.get('type') == 'file':
+                        download_url = content.get('download_url')
+                        if download_url:
+                            async with self.session.get(download_url) as file_response:
+                                if file_response.status == 200:
+                                    return await file_response.text()
+                    
+                    elif isinstance(content, list):
+                        file_contents = []
+                        for item in content:
+                            if item.get('type') == 'file' and item.get('name', '').endswith(('.txt', '.md', '.json')):
+                                file_url = item.get('download_url')
+                                if file_url:
+                                    async with self.session.get(file_url) as file_response:
+                                        if file_response.status == 200:
+                                            file_contents.append(await file_response.text())
+                                        await asyncio.sleep(0.1)
+                        
+                        return "\n\n".join(file_contents) if file_contents else "No suitable files found."
+                    
+                    return "Could not extract content."
+                else:
+                    return f"Error: GitHub API responded with status {response.status}"
+        except Exception as e:
+            return f"Error fetching repository content: {str(e)}"
+
+    async def get_context_data(self) -> str:
+        """Fetches context data from configured source with caching."""
+        cache_duration = await self.config.cache_duration()
+        if (self.cache["timestamp"] and 
+            datetime.now() - self.cache["timestamp"] < timedelta(seconds=cache_duration)):
+            return self.cache["data"]
+        
+        source = await self.config.context_source()
+        result = ""
+        
+        if source == "github_raw":
+            github_url = await self.config.github_url()
+            if github_url:
+                result = await self.get_github_raw_content(github_url)
+        
+        elif source == "github":
+            github_url = await self.config.github_url()
+            github_path = await self.config.github_path()
+            github_branch = await self.config.github_branch()
+            if github_url:
+                result = await self.get_github_repo_content(github_url, github_path, github_branch)
+        
+        elif source == "txt":
+            if self.data_path.exists():
+                async with aiofiles.open(self.data_path, 'r', encoding='utf-8') as f:
+                    result = await f.read()
+        
+        else:
+            result = await self.config.context_data()
+        
+        self.cache = {"data": result, "timestamp": datetime.now()}
+        return result
+
+    async def get_message_context(self, message: discord.Message, context_messages: int = 15) -> List[Dict]:
+        """Gets message context around a specific message."""
+        try:
+            messages_before = []
+            async for msg in message.channel.history(limit=context_messages//2, before=message, oldest_first=False):
+                messages_before.append({
+                    "author": msg.author.display_name,
+                    "content": msg.clean_content,
+                    "timestamp": msg.created_at.isoformat()
+                })
+            
+            messages_after = []
+            async for msg in message.channel.history(limit=context_messages//2, after=message, oldest_first=True):
+                messages_after.append({
+                    "author": msg.author.display_name,
+                    "content": msg.clean_content,
+                    "timestamp": msg.created_at.isoformat()
+                })
+            
+            all_messages = messages_before[::-1] + [{
+                "author": message.author.display_name,
+                "content": message.clean_content,
+                "timestamp": message.created_at.isoformat(),
+                "is_target": True
+            }] + messages_after
+            
+            return all_messages
+            
+        except Exception as e:
+            print(f"Error fetching message context: {e}")
+            return []
+
+    async def can_learn(self, user: discord.Member) -> bool:
+        """Checks if a user can learn."""
+        app_info = await self.bot.application_info()
+        if user.id == app_info.owner.id:
+            return True
+        
+        if user.guild_permissions.administrator:
+            return True
+        
+        learning_role_id = await self.config.guild(user.guild).learning_role()
+        if learning_role_id:
+            learning_role = user.guild.get_role(learning_role_id)
+            if learning_role and learning_role in user.roles:
+                return True
+        
+        return False
+
+    async def learn_solution(self, problem_message: discord.Message, solution: str, learner: discord.Member) -> Dict:
+        """Saves a learned solution."""
+        try:
+            context_messages = await self.config.rag_context_messages()
+            message_context = await self.get_message_context(problem_message, context_messages)
+            
+            problem_key = problem_message.clean_content[:100].lower().strip()
+            
+            learned_entry = {
+                "problem": problem_message.clean_content,
+                "solution": solution,
+                "context": message_context,
+                "learned_by": learner.display_name,
+                "learned_at": datetime.now().isoformat(),
+                "message_id": problem_message.id,
+                "channel_id": problem_message.channel.id,
+                "guild_id": problem_message.guild.id if problem_message.guild else None
+            }
+            
+            self.learned_data[problem_key] = learned_entry
+            await self.save_learned_data()
+            
+            return learned_entry
+            
+        except Exception as e:
+            print(f"Error saving solution: {e}")
+            return None
+
+    async def find_solution(self, question: str) -> Optional[Dict]:
+        """Finds a matching solution for a question."""
+        question_lower = question.lower().strip()
+        
+        for problem_key, solution_data in self.learned_data.items():
+            if problem_key in question_lower or any(keyword in question_lower for keyword in problem_key.split()[:3]):
+                return solution_data
+        
+        return None
+
+    def split_message(self, text: str, max_length: int = 2000) -> list:
+        """Splits a message intelligently without breaking markdown."""
+        if len(text) <= max_length:
+            return [text]
+        
+        chunks = []
+        current_chunk = ""
+        
+        paragraphs = text.split('\n\n')
+        
+        for paragraph in paragraphs:
+            if len(current_chunk) + len(paragraph) + 2 > max_length:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = paragraph
+            else:
+                if current_chunk:
+                    current_chunk += '\n\n'
+                current_chunk += paragraph
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+
+    @commands.group()
+    @commands.is_owner()
+    async def deepseek(self, ctx):
+        """Settings for the DeepSeek Cog."""
+        pass
+
+    @deepseek.command()
+    async def apikey(self, ctx, api_key: str):
+        """Sets the DeepSeek API key."""
+        await self.config.api_key.set(api_key)
+        await ctx.send("API key has been set.")
+
+    @deepseek.command()
+    async def context(self, ctx, *, text: str):
+        """Sets the context text for queries."""
+        await self.config.context_data.set(text)
+        self.cache = {"data": "", "timestamp": None}
+        await ctx.send("Context has been updated.")
+
+    @deepseek.command()
+    async def source(self, ctx, source_type: str):
+        """Sets the data source (internal, txt, github, github_raw)."""
+        if source_type.lower() in ["internal", "txt", "github", "github_raw"]:
+            await self.config.context_source.set(source_type.lower())
+            self.cache = {"data": "", "timestamp": None}
+            await ctx.send(f"Data source set to {source_type}.")
+        else:
+            await ctx.send("Invalid source. Allowed: internal, txt, github, github_raw")
+
+    @deepseek.command()
+    async def github(self, ctx, url: str):
+        """Sets the GitHub URL for data."""
+        await self.config.github_url.set(url)
+        self.cache = {"data": "", "timestamp": None}
+        await ctx.send("GitHub URL has been set.")
+
+    @deepseek.command()
+    async def branch(self, ctx, branch: str):
+        """Sets the GitHub branch (default: main)."""
+        await self.config.github_branch.set(branch)
+        self.cache = {"data": "", "timestamp": None}
+        await ctx.send(f"GitHub branch set to {branch}.")
+
+    @deepseek.command()
+    async def path(self, ctx, path: str):
+        """Sets the path in the GitHub repository."""
+        await self.config.github_path.set(path)
+        self.cache = {"data": "", "timestamp": None}
+        await ctx.send(f"GitHub path set to {path}.")
+
+    @deepseek.command()
+    async def cache(self, ctx, duration: int):
+        """Sets cache duration in seconds (0 disables cache)."""
+        await self.config.cache_duration.set(duration)
+        self.cache = {"data": "", "timestamp": None}
+        await ctx.send(f"Cache duration set to {duration} seconds.")
+
+    @deepseek.command()
+    async def timeout(self, ctx, timeout: int):
+        """Sets timeout for API requests in seconds."""
+        await self.config.timeout.set(timeout)
+        if self.session and not self.session.closed:
+            await self.session.close()
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        self.session = aiohttp.ClientSession(timeout=timeout_obj)
+        await ctx.send(f"Timeout set to {timeout} seconds.")
+
+    @deepseek.command()
+    async def contextmessages(self, ctx, count: int):
+        """Sets the number of context messages for RAG."""
+        if 5 <= count <= 50:
+            await self.config.rag_context_messages.set(count)
+            await ctx.send(f"Context messages set to {count}.")
+        else:
+            await ctx.send("Please enter a number between 5 and 50.")
+
+    @deepseek.command()
+    @commands.admin_or_permissions(administrator=True)
+    async def learnrole(self, ctx, role: discord.Role = None):
+        """Sets a role that can learn."""
+        if role:
+            await self.config.guild(ctx.guild).learning_role.set(role.id)
+            await ctx.send(f"Learning role set to {role.name}.")
+        else:
+            await self.config.guild(ctx.guild).learning_role.set(None)
+            await ctx.send("Learning role has been removed.")
+
+    @deepseek.command()
+    async def learning(self, ctx, enabled: bool):
+        """Enables/disables the learning function."""
+        await self.config.learning_enabled.set(enabled)
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"Learning function {status}.")
+
+    @deepseek.command()
+    async def reload(self, ctx):
+        """Reloads the context data."""
+        self.cache = {"data": "", "timestamp": None}
+        data = await self.get_context_data()
+        await ctx.send(f"Context data reloaded. Length: {len(data)} characters.")
+
+    @commands.command()
+    @commands.guild_only()
+    async def learn(self, ctx, *, solution: str):
+        """Saves a solution for the previous problem."""
+        if not await self.config.learning_enabled():
+            await ctx.send("The learning function is disabled.")
+            return
+        
+        if not await self.can_learn(ctx.author):
+            await ctx.send("You don't have permission to learn.")
+            return
+        
+        target_message = None
+        if ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                target_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            except discord.NotFound:
+                await ctx.send("Reference message not found.")
+                return
+        else:
+            async for message in ctx.channel.history(limit=10, before=ctx.message):
+                if message.author != ctx.author and not message.author.bot:
+                    target_message = message
+                    break
+        
+        if not target_message:
+            await ctx.send("No suitable message found for learning.")
+            return
+        
+        learned_entry = await self.learn_solution(target_message, solution, ctx.author)
+        
+        if learned_entry:
+            context_preview = "\n".join([
+                f"{msg['author']}: {msg['content'][:50]}..."
+                for msg in learned_entry['context'][-3:]
+            ])
+            
+            embed = discord.Embed(
+                title="✅ Solution Saved",
+                description=f"**Problem:** {learned_entry['problem'][:100]}...",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Solution", value=learned_entry['solution'][:500] + "..." if len(learned_entry['solution']) > 500 else learned_entry['solution'], inline=False)
+            embed.add_field(name="Context", value=context_preview or "No context", inline=False)
+            embed.add_field(name="Learned by", value=learned_entry['learned_by'], inline=True)
+            
+            await ctx.send(embed=embed)
+        else:
+            await ctx.send("Error saving the solution.")
+
+    @commands.command()
+    async def ask(self, ctx, *, question: str):
+        """Asks a question about the specific topic."""
+        if await self.config.learning_enabled():
+            solution = await self.find_solution(question)
+            if solution:
+                embed = discord.Embed(
+                    title="🎓 Learned Solution",
+                    description=solution['solution'],
+                    color=discord.Color.blue()
+                )
+                embed.set_footer(text=f"Learned by {solution['learned_by']}")
+                await ctx.send(embed=embed)
+                return
+        
+        api_key = await self.config.api_key()
+        if not api_key:
+            await ctx.send("API key is not configured.")
+            return
+
+        if not self.session or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=await self.config.timeout())
+            self.session = aiohttp.ClientSession(timeout=timeout)
+
+        context_data = await self.get_context_data()
+        
+        prompt = f"""
+        Based on the following information about FUS SkyrimVR modlist:
+        
+        {context_data}
+        
+        Answer this question: {question}
