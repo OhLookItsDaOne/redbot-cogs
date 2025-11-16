@@ -123,12 +123,12 @@ class ImageSpam(commands.Cog):
     async def list_settings(self, ctx):
         guild_conf = await self.config.guild(ctx.guild).all()
         max_images = guild_conf["max_images"]
-        excluded = guild_conf["excluded_channels"]
+        excluded = set(guild_conf["excluded_channels"])
         log_id = guild_conf["log_channel_id"]
         log_channel = ctx.guild.get_channel(log_id) if log_id else None
         monitor_all = guild_conf["monitor_all"]
         monitor_admins = guild_conf["monitor_admins"]
-        monitored = guild_conf["monitored_channels"]
+        monitored = set(guild_conf["monitored_channels"]) - excluded  # ignore excluded channels in list
 
         excluded_names = [ctx.guild.get_channel(c).mention if ctx.guild.get_channel(c) else str(c) for c in excluded]
         monitored_names = [ctx.guild.get_channel(c).mention if ctx.guild.get_channel(c) else str(c) for c in monitored]
