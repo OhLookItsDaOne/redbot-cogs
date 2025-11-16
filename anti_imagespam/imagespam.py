@@ -236,10 +236,14 @@ class ImageSpam(commands.Cog):
                 f"⚠️ Admins: Logging channel is not set. Please configure using `!imageprevent channel #channel`.",
                 delete_after=10
             )
-        # CASE 1: Excluded channel → log only
+        # CASE 1: Excluded channel → log only if images exist or admin monitoring enabled
         if is_excluded:
             # Skip logging for admins if monitoring is off
             if message.author.guild_permissions.administrator and not monitor_admins:
+                return
+
+            # Skip logging if there are no images
+            if img_count == 0:
                 return
 
             if log_channel:
