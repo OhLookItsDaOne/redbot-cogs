@@ -236,9 +236,12 @@ class ImageSpam(commands.Cog):
                 f"⚠️ Admins: Logging channel is not set. Please configure using `!imageprevent channel #channel`.",
                 delete_after=10
             )
-
         # CASE 1: Excluded channel → log only
         if is_excluded:
+            # Skip logging for admins if monitoring is off
+            if message.author.guild_permissions.administrator and not monitor_admins:
+                return
+
             if log_channel:
                 embed = self.make_embed(
                     title="Excluded Channel Post Logged",
@@ -253,12 +256,16 @@ class ImageSpam(commands.Cog):
 
         # CASE 2: Exceeded image limit
         if img_count > max_images:
+            # Skip deletion for admin if monitoring is off
+            if message.author.guild_permissions.administrator and not monitor_admins:
+                return
+
             try:
                 await message.delete()
             except discord.Forbidden:
                 pass
 
-            # Log
+            # Log the violation
             if log_channel:
                 embed = self.make_embed(
                     title="Image Spam Blocked",
