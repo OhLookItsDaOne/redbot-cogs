@@ -7,24 +7,20 @@ import datetime
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 class ImageSpam(commands.Cog):
-    """Anti-image-spam system with per-guild settings."""
+    """Anti-image-spam system with per-guild settings, including thread support."""
 
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=9876543210123, force_registration=True)
 
-        # Default per-guild config
         default_guild = {
             "max_images": 3,
             "excluded_channels": [],
             "log_channel_id": None,
             "monitor_all": True,
-            "monitored_channels": [],
             "monitor_admins": False
         }
         self.config.register_guild(**default_guild)
-        
-        # Offense tracking per guild/user
         self.offenses = {}  # {guild_id: {user_id: [timestamps]}}
 
     # -------------------------------
@@ -39,63 +35,24 @@ class ImageSpam(commands.Cog):
     @imageprevent.command(name="help")
     @commands.admin()
     async def imageprevent_help(self, ctx):
-        """Show Image Prevention commands in a nice embed (Admin only)."""
+        """Show Image Prevention commands (Admin only)."""
         embed = discord.Embed(
             title="Image Prevention Commands",
-            description="Manage and configure the image spam prevention system.",
+            description="Manage the image spam prevention system.",
             color=discord.Color.blurple()
         )
-        embed.add_field(
-            name="!imageprevent image <amount>",
-            value="Set the maximum allowed images per message (default: 3).",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent channel <#channel>",
-            value="Set the channel where violations and logs are posted.",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent exclude <#channel>",
-            value="Exclude a channel from monitoring.",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent include <#channel>",
-            value="Remove a channel from the exclusion list.",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent monitorall <True/False>",
-            value="Toggle whether all non-excluded channels are monitored.",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent list",
-            value="List the current configuration for the server.",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent help",
-            value="Show this help embed with available commands (Admin only).",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent monitorallchannels <add/remove>",
-            value="Add or remove all text channels in the server to the monitored channels list.",
-            inline=False
-        )
-        embed.add_field(
-            name="!imageprevent monitoradmins <True/False>",
-            value="Toggle whether messages from admins are also monitored and deleted if they exceed the image limit.",
-            inline=False
-        )
+        embed.add_field(name="!imageprevent image <amount>", value="Set the maximum allowed images per message.", inline=False)
+        embed.add_field(name="!imageprevent channel <#channel>", value="Set the channel where violations and logs are posted.", inline=False)
+        embed.add_field(name="!imageprevent exclude <#channel> [#channel ...]", value="Exclude one or multiple channels from monitoring.", inline=False)
+        embed.add_field(name="!imageprevent include <#channel> [#channel ...]", value="Include one or multiple previously excluded channels.", inline=False)
+        embed.add_field(name="!imageprevent monitorall <True/False>", value="Toggle whether all non-excluded channels are monitored.", inline=False)
+        embed.add_field(name="!imageprevent monitoradmins <True/False>", value="Toggle whether messages from admins are also monitored.", inline=False)
+        embed.add_field(name="!imageprevent list", value="List the current configuration for the server.", inline=False)
         await ctx.send(embed=embed)
 
     @imageprevent.command(name="image")
     @commands.admin()
     async def set_max_images(self, ctx, amount: int):
-        """Set maximum allowed images per message."""
         if amount < 1:
             await ctx.send("Must allow at least 1 image.")
             return
@@ -105,60 +62,32 @@ class ImageSpam(commands.Cog):
     @imageprevent.command(name="channel")
     @commands.admin()
     async def set_log_channel(self, ctx, channel: discord.TextChannel):
-        """Set the logging channel."""
         await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
         await ctx.send(f"Logging channel set to {channel.mention}.")
 
     @imageprevent.command(name="exclude")
     @commands.admin()
-    async def add_excluded_channel(self, ctx, channel: discord.TextChannel):
-        """Exclude a channel from monitoring."""
-        excluded = await self.config.guild(ctx.guild).excluded_channels()
-        if channel.id in excluded:
-            await ctx.send(f"{channel.mention} is already excluded.")
-            return
-        excluded.append(channel.id)
-        await self.config.guild(ctx.guild).excluded_channels.set(excluded)
-        await ctx.send(f"{channel.mention} is now excluded.")
-
-    @imageprevent.command(name="monitorallchannels")
-    @commands.admin()
-    async def monitor_all_channels(self, ctx, action: str):
-        """
-        Add or remove all text channels in the server to the monitored channels list.
-        Usage: !imageprevent monitorallchannels add
-               !imageprevent monitorallchannels remove
-        """
-        guild_conf = await self.config.guild(ctx.guild).all()
-        monitored_channels = set(guild_conf["monitored_channels"])
-
-        if action.lower() == "add":
-            for ch in ctx.guild.text_channels:
-                monitored_channels.add(ch.id)
-            await self.config.guild(ctx.guild).monitored_channels.set(list(monitored_channels))
-            await ctx.send(f"✅ All text channels have been added to the monitored channels list.")
-        elif action.lower() == "remove":
-            await self.config.guild(ctx.guild).monitored_channels.set([])
-            await ctx.send(f"✅ All text channels have been removed from the monitored channels list.")
-        else:
-            await ctx.send("❌ Invalid action. Use `add` or `remove`.")
+    async def add_excluded_channels(self, ctx, *channels: discord.abc.GuildChannel):
+        """Exclude one or multiple channels from monitoring."""
+        excluded = set(await self.config.guild(ctx.guild).excluded_channels())
+        for channel in channels:
+            excluded.add(channel.id)
+        await self.config.guild(ctx.guild).excluded_channels.set(list(excluded))
+        await ctx.send(f"Excluded channels: {', '.join(c.name for c in channels)}")
 
     @imageprevent.command(name="include")
     @commands.admin()
-    async def remove_excluded_channel(self, ctx, channel: discord.TextChannel):
-        """Remove a channel from the exclusion list."""
-        excluded = await self.config.guild(ctx.guild).excluded_channels()
-        if channel.id not in excluded:
-            await ctx.send(f"{channel.mention} is not excluded.")
-            return
-        excluded.remove(channel.id)
-        await self.config.guild(ctx.guild).excluded_channels.set(excluded)
-        await ctx.send(f"{channel.mention} is no longer excluded.")
+    async def remove_excluded_channels(self, ctx, *channels: discord.abc.GuildChannel):
+        """Include one or multiple previously excluded channels."""
+        excluded = set(await self.config.guild(ctx.guild).excluded_channels())
+        for channel in channels:
+            excluded.discard(channel.id)
+        await self.config.guild(ctx.guild).excluded_channels.set(list(excluded))
+        await ctx.send(f"Included channels: {', '.join(c.name for c in channels)}")
 
     @imageprevent.command(name="monitorall")
     @commands.admin()
     async def toggle_monitor_all(self, ctx, value: bool):
-        """Toggle whether all non-excluded channels are monitored."""
         await self.config.guild(ctx.guild).monitor_all.set(value)
         status = "enabled" if value else "disabled"
         await ctx.send(f"Monitoring all non-excluded channels is now {status}.")
@@ -166,7 +95,6 @@ class ImageSpam(commands.Cog):
     @imageprevent.command(name="monitoradmins")
     @commands.admin()
     async def toggle_monitor_admins(self, ctx, value: bool):
-        """Toggle whether admin messages are also monitored and deleted if they exceed the image limit."""
         await self.config.guild(ctx.guild).monitor_admins.set(value)
         status = "enabled" if value else "disabled"
         await ctx.send(f"Monitoring admin messages is now {status}.")
@@ -174,18 +102,15 @@ class ImageSpam(commands.Cog):
     @imageprevent.command(name="list")
     @commands.admin()
     async def list_settings(self, ctx):
-        """List the current settings."""
         guild_conf = await self.config.guild(ctx.guild).all()
         max_images = guild_conf["max_images"]
         excluded = guild_conf["excluded_channels"]
         log_id = guild_conf["log_channel_id"]
         log_channel = ctx.guild.get_channel(log_id) if log_id else None
         monitor_all = guild_conf["monitor_all"]
-        monitor_admins = guild_conf["monitor_admins"]
-        monitored = guild_conf["monitored_channels"]
+        monitor_admins = guild_conf.get("monitor_admins", False)
 
         excluded_names = [ctx.guild.get_channel(c).mention if ctx.guild.get_channel(c) else str(c) for c in excluded]
-        monitored_names = [ctx.guild.get_channel(c).mention if ctx.guild.get_channel(c) else str(c) for c in monitored]
 
         msg = (
             f"**Image Prevention Settings:**\n"
@@ -193,8 +118,7 @@ class ImageSpam(commands.Cog):
             f"- Log channel: {log_channel.mention if log_channel else 'Not set'}\n"
             f"- Monitor all non-excluded channels: {monitor_all}\n"
             f"- Monitor admin messages: {monitor_admins}\n"
-            f"- Excluded channels: {', '.join(excluded_names) if excluded_names else 'None'}\n"
-            f"- Explicitly monitored channels: {', '.join(monitored_names) if monitored_names else 'None'}"
+            f"- Excluded channels: {', '.join(excluded_names) if excluded_names else 'None'}"
         )
         for page in pagify(msg):
             await ctx.send(page)
@@ -210,17 +134,16 @@ class ImageSpam(commands.Cog):
         guild_conf = await self.config.guild(message.guild).all()
         max_images = guild_conf["max_images"]
         excluded_channels = set(guild_conf["excluded_channels"])
-        monitored_channels = set(guild_conf["monitored_channels"])
         monitor_all = guild_conf["monitor_all"]
         monitor_admins = guild_conf.get("monitor_admins", False)
         log_channel_id = guild_conf["log_channel_id"]
 
-        channel_id = message.channel.id
-        is_excluded = channel_id in excluded_channels
-        is_monitored = monitor_all or (channel_id in monitored_channels)
+        # Determine if message should be monitored
+        is_excluded = message.channel.id in excluded_channels
+        should_monitor = (monitor_all and not is_excluded) or (monitor_admins and message.author.guild_permissions.administrator)
 
-        # Skip messages unless the channel is monitored OR admin monitoring is enabled
-        if not is_monitored and not (monitor_admins and message.author.guild_permissions.administrator):
+        # Skip if not monitored
+        if not should_monitor:
             return
 
         # Count images
@@ -229,28 +152,19 @@ class ImageSpam(commands.Cog):
             if (a.content_type and a.content_type.startswith("image/")) or a.filename.lower().endswith(IMAGE_EXTENSIONS)
         )
 
-        # Determine log channel
         log_channel = message.guild.get_channel(log_channel_id) if log_channel_id else None
         if log_channel is None:
             await message.channel.send(
                 f"⚠️ Admins: Logging channel is not set. Please configure using `!imageprevent channel #channel`.",
                 delete_after=10
             )
-        # CASE 1: Excluded channel → log only if images exist or admin monitoring enabled
-        if is_excluded:
-            # Skip logging for admins if monitoring is off
-            if message.author.guild_permissions.administrator and not monitor_admins:
-                return
 
-            # Skip logging if there are no images
-            if img_count == 0:
-                return
-
+        # CASE 1: Excluded channel → log only if admin monitoring is enabled
+        if is_excluded and monitor_admins and message.author.guild_permissions.administrator:
             if log_channel:
                 embed = self.make_embed(
                     title="Excluded Channel Post Logged",
-                    description=f"Message posted in **#{message.channel.name}** (excluded).\nImages: {img_count}" +
-                                (" ⚠️ User is an admin" if message.author.guild_permissions.administrator else ""),
+                    description=f"Message posted in **#{message.channel.name}** (excluded).\nImages: {img_count} ⚠️ User is an admin",
                     user=message.author,
                     color=discord.Color.orange()
                 )
@@ -260,16 +174,14 @@ class ImageSpam(commands.Cog):
 
         # CASE 2: Exceeded image limit
         if img_count > max_images:
-            # Skip deletion for admin if monitoring is off
             if message.author.guild_permissions.administrator and not monitor_admins:
                 return
-
             try:
                 await message.delete()
             except discord.Forbidden:
                 pass
 
-            # Log the violation
+            # Log violation
             if log_channel:
                 embed = self.make_embed(
                     title="Image Spam Blocked",
@@ -289,15 +201,13 @@ class ImageSpam(commands.Cog):
             user_offenses.append(now)
             guild_offenses[message.author.id] = user_offenses
 
-            if len(user_offenses) >= 3:  # More than 2 offenses in 1 minute
+            if len(user_offenses) >= 3:
                 try:
                     until = now + datetime.timedelta(minutes=5)
                     await message.author.timeout(until, reason="Triggered image spam prevention")
-                    # DM user
                     try:
                         await message.author.send(
-                            f"⚠️ You have been timed out for 5 minutes for exceeding the image limit in {message.guild.name}. "
-                            "Please reduce the number of images you post per message."
+                            f"⚠️ You have been timed out for 5 minutes for exceeding the image limit in {message.guild.name}."
                         )
                     except discord.Forbidden:
                         pass
