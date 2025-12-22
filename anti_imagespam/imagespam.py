@@ -22,12 +22,13 @@ class ImageSpam(commands.Cog):
             "exclude_forum_threads": True,
             "admin_role_id": None,
             "notification_on_delete": True,
-            "user_notification": True,
+            "ephemeral_notify": True,    # Neue Einstellung für ephemerale Nachrichten
+            "dm_notify": False,          # Neue Einstellung für DM-Fallback
             "user_message": "Your message in {channel} was deleted because it contained {image_count} images (maximum allowed: {max_images}).",
             "log_message": "🚫 **Image Spam Blocked**\nUser: {user_mention}\nChannel: {channel_mention}\nImages: {image_count}/{max_images}",
             "timeout_message": "⏰ **User Timed Out**\n{user_mention} has been timed out for 5 minutes due to repeated violations.",
             "placeholder_info": "Available placeholders:\n{user} - Username\n{user_mention} - @User\n{channel} - Channel name\n{channel_mention} - #channel\n{max_images} - Max allowed images\n{image_count} - Images in message\n{guild} - Server name",
-            "count_discord_links": True  # Neue Einstellung für Discord-Links
+            "count_discord_links": True
         }
         self.config.register_guild(**default_guild)
         self.offenses = {}
@@ -36,7 +37,6 @@ class ImageSpam(commands.Cog):
         self.discord_cdn_pattern = re.compile(
             r'https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/attachments/\d+/\d+/[^\s]+'
         )
-        
         # Regex für allgemeine Bild-URLs mit Erweiterungen
         self.image_url_pattern = re.compile(
             r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|tiff)(?:\?[^\s]*)?',
@@ -59,7 +59,6 @@ class ImageSpam(commands.Cog):
     def count_images_in_message(self, message: discord.Message, conf: dict) -> int:
         """Count images in a message, including attachments and Discord CDN links."""
         img_count = 0
-        
         # 1. Count attachments (Dateianhänge)
         for attachment in message.attachments:
             if attachment.content_type and attachment.content_type.startswith("image/"):
@@ -137,6 +136,31 @@ class ImageSpam(commands.Cog):
         except discord.Forbidden:
             await ctx.send(f"{ctx.author.mention} (Only you can see this): {content}", delete_after=10.0, **kwargs)
 
+    async def notify_user_ephemeral(self, message: discord.Message, user_msg: str):
+        """Send ephemeral notification to user (brief channel message + optional DM)."""
+        # 1. Sehr kurze, unauffällige Channel-Nachricht (1.5 Sekunden)
+        try:
+            await message.channel.send(
+                f"||{message.author.mention}|| 📸",  # Versteckte Erwähnung + Emoji
+                delete_after=1.5
+            )
+        except Exception:
+            pass  # Ignoriere Fehler bei der ephemeralen Nachricht
+
+    async def notify_user_dm(self, message: discord.Message, user_msg: str):
+        """Send DM notification to user."""
+        try:
+            await message.author.send(f"📸 {user_msg}")
+        except discord.Forbidden:
+            # Falls DMs deaktiviert sind, sende eine längere Channel-Nachricht als Fallback
+            try:
+                await message.channel.send(
+                    f"{message.author.mention} 📸 (Check DMs for details)",
+                    delete_after=5.0
+                )
+            except Exception:
+                pass
+
     @commands.group(name="imageprevent", invoke_without_command=True)
     @commands.guild_only()
     async def imageprevent(self, ctx):
@@ -162,11 +186,12 @@ class ImageSpam(commands.Cog):
         )
         
         embed.add_field(
-            name="💬 Message Settings",
-            value="• `!imageprevent usermessage <text>` - Set user notification message\n"
+            name="🔔 Notification Settings",
+            value="• `!imageprevent ephemeral <on/off>` - Toggle ephemeral notifications\n"
+                  "• `!imageprevent dm <on/off>` - Toggle DM notifications\n"
+                  "• `!imageprevent usermessage <text>` - Set user notification message\n"
                   "• `!imageprevent logmessage <text>` - Set log channel message\n"
                   "• `!imageprevent timeoutmessage <text>` - Set timeout notification message\n"
-                  "• `!imageprevent usernotify <on/off>` - Toggle user notifications\n"
                   "• `!imageprevent placeholders` - Show available placeholders",
             inline=False
         )
@@ -192,7 +217,8 @@ class ImageSpam(commands.Cog):
             value="• `!imageprevent list` - Show settings\n"
                   "• `!imageprevent channels` - Show all text channels and their status\n"
                   "• `!imageprevent status` - Check channel status\n"
-                  "• `!imageprevent test <message>` - Test image counting in a message",
+                  "• `!imageprevent test <message>` - Test image counting in a message\n"
+                  "• `!imageprevent previewnotify` - Preview notification styles",
             inline=False
         )
         
@@ -203,7 +229,7 @@ class ImageSpam(commands.Cog):
             inline=False
         )
         
-        embed.set_footer(text="Use !imageprevent placeholders to see available message placeholders")
+        embed.set_footer(text="Ephemeral: brief channel flash | DM: detailed message in DMs")
         await ctx.send(embed=embed)
 
     async def check_admin_or_role(self, ctx):
@@ -212,6 +238,76 @@ class ImageSpam(commands.Cog):
             await self.send_ephemeral(ctx, "❌ You need administrator permissions or the configured admin role to use this command.")
             return False
         return True
+
+    @imageprevent.command(name="ephemeral")
+    async def toggle_ephemeral_notify(self, ctx, state: str):
+        """Toggle ephemeral notifications (brief channel flash)."""
+        if not await self.check_admin_or_role(ctx):
+            return
+        
+        if state.lower() in ["on", "true", "yes", "enable"]:
+            await self.config.guild(ctx.guild).ephemeral_notify.set(True)
+            await ctx.send("✅ **Ephemeral notifications are now ON.** Users will see a brief flash in the channel when their message is deleted.")
+        elif state.lower() in ["off", "false", "no", "disable"]:
+            await self.config.guild(ctx.guild).ephemeral_notify.set(False)
+            await ctx.send("✅ **Ephemeral notifications are now OFF.** No brief channel notifications will be shown.")
+        else:
+            await ctx.send("❌ Please use `on` or `off`.")
+
+    @imageprevent.command(name="dm")
+    async def toggle_dm_notify(self, ctx, state: str):
+        """Toggle DM notifications (detailed message in DMs)."""
+        if not await self.check_admin_or_role(ctx):
+            return
+        
+        if state.lower() in ["on", "true", "yes", "enable"]:
+            await self.config.guild(ctx.guild).dm_notify.set(True)
+            await ctx.send("✅ **DM notifications are now ON.** Users will receive detailed messages in their DMs when their message is deleted.")
+        elif state.lower() in ["off", "false", "no", "disable"]:
+            await self.config.guild(ctx.guild).dm_notify.set(False)
+            await ctx.send("✅ **DM notifications are now OFF.** No DMs will be sent to users.")
+        else:
+            await ctx.send("❌ Please use `on` or `off`.")
+
+    @imageprevent.command(name="previewnotify")
+    async def preview_notification(self, ctx):
+        """Preview the current notification settings."""
+        conf = await self.config.guild(ctx.guild).all()
+        
+        embed = discord.Embed(
+            title="🔔 Notification Settings Preview",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(name="Ephemeral Notifications", value=f"**{'ON 🟢' if conf['ephemeral_notify'] else 'OFF 🔴'}**", inline=True)
+        embed.add_field(name="DM Notifications", value=f"**{'ON 🟢' if conf['dm_notify'] else 'OFF 🔴'}**", inline=True)
+        embed.add_field(name="Log Notifications", value=f"**{'ON 🟢' if conf['notification_on_delete'] else 'OFF 🔴'}**", inline=True)
+        
+        description = ""
+        if conf["ephemeral_notify"]:
+            description += "• **Ephemeral**: Users will see `||@User|| 📸` for 1.5 seconds in the channel\n"
+        if conf["dm_notify"]:
+            description += "• **DM**: Users will receive a detailed message in their DMs\n"
+        if not conf["ephemeral_notify"] and not conf["dm_notify"]:
+            description += "• **No user notifications** - users won't know why their message was deleted\n"
+        
+        embed.add_field(name="What users will see:", value=description, inline=False)
+        
+        # Beispiel-Nachricht
+        example_msg = conf["user_message"].format(
+            user=ctx.author,
+            user_mention=ctx.author.mention,
+            channel="#test-channel",
+            channel_mention="#test-channel",
+            max_images=conf["max_images"],
+            image_count=conf["max_images"] + 1,
+            guild=ctx.guild.name
+        )
+        
+        embed.add_field(name="Example DM Message", value=f"```{example_msg[:200]}...```", inline=False)
+        
+        embed.set_footer(text="Use !imageprevent ephemeral/dm <on/off> to change settings")
+        await ctx.send(embed=embed)
 
     @imageprevent.command(name="discordlinks")
     async def toggle_discord_links(self, ctx, state: str):
@@ -320,21 +416,6 @@ class ImageSpam(commands.Cog):
         placeholders = await self.config.guild(ctx.guild).placeholder_info()
         example = "Your message in {{channel}} was deleted for having {{image_count}}/{{max_images}} images."
         await ctx.send(f"📝 **Available Placeholders**\n```{placeholders}```\n\n**Example:**\n`{example}`")
-
-    @imageprevent.command(name="usernotify")
-    async def toggle_user_notification(self, ctx, state: str):
-        """Toggle notifications sent to users (on/off)."""
-        if not await self.check_admin_or_role(ctx):
-            return
-        
-        if state.lower() in ["on", "true", "yes", "enable"]:
-            await self.config.guild(ctx.guild).user_notification.set(True)
-            await ctx.send("✅ User notifications are now **ON**. Users will receive a temporary ephemeral message when their message is deleted.")
-        elif state.lower() in ["off", "false", "no", "disable"]:
-            await self.config.guild(ctx.guild).user_notification.set(False)
-            await ctx.send("✅ User notifications are now **OFF**. Users will not receive notifications.")
-        else:
-            await ctx.send("❌ Please use `on` or `off`.")
 
     @imageprevent.command(name="channel")
     async def set_log_channel(self, ctx, channel: discord.TextChannel):
@@ -493,7 +574,12 @@ class ImageSpam(commands.Cog):
         
         embed.add_field(name="Discord Links", value=f"**{'Counted' if conf.get('count_discord_links', True) else 'Ignored'}**", inline=True)
         embed.add_field(name="Excluded Channels", value=f"**{len(conf['excluded_channels'])}** channels", inline=True)
-        embed.add_field(name="Notifications", value=f"Log: **{'ON' if conf['notification_on_delete'] else 'OFF'}**\nUser: **{'ON' if conf['user_notification'] else 'OFF'}**", inline=True)
+        
+        # Neue Notification-Einstellungen
+        notification_text = f"Ephemeral: **{'ON 🟢' if conf['ephemeral_notify'] else 'OFF 🔴'}**\n"
+        notification_text += f"DM: **{'ON 🟢' if conf['dm_notify'] else 'OFF 🔴'}**\n"
+        notification_text += f"Log: **{'ON 🟢' if conf['notification_on_delete'] else 'OFF 🔴'}**"
+        embed.add_field(name="🔔 Notifications", value=notification_text, inline=True)
         
         # Zeige die ersten 5 exkludierten Channels
         excluded_list = []
@@ -529,7 +615,6 @@ class ImageSpam(commands.Cog):
         
         # Debug-Ausgabe
         print(f"[ImagePrevent] Detected {img_count} images in message from {message.author} in #{message.channel.name}")
-        print(f"[ImagePrevent] Message content: {message.content[:100]}...")
         
         # Nachricht löschen
         delete_success = False
@@ -544,8 +629,8 @@ class ImageSpam(commands.Cog):
             print(f"[ImagePrevent] Error deleting message: {e}")
             delete_success = False
         
-        # Benutzer benachrichtigen (ephemeral-like)
-        if conf["user_notification"] and delete_success:
+        # Benutzer benachrichtigen
+        if delete_success:
             user_msg = self.format_message(
                 conf["user_message"],
                 message,
@@ -553,16 +638,13 @@ class ImageSpam(commands.Cog):
                 conf
             )
             
-            try:
-                await message.author.send(user_msg)
-            except discord.Forbidden:
-                try:
-                    temp_msg = await message.channel.send(
-                        f"{message.author.mention} (Only you can see this): {user_msg}",
-                        delete_after=10.0
-                    )
-                except Exception:
-                    pass
+            # Ephemerale Benachrichtigung (Hauptmethode)
+            if conf["ephemeral_notify"]:
+                await self.notify_user_ephemeral(message, user_msg)
+            
+            # DM Benachrichtigung (Fallback/Zusatz)
+            if conf["dm_notify"]:
+                await self.notify_user_dm(message, user_msg)
         
         # Logge in Log-Channel
         if conf["log_channel_id"] and conf["notification_on_delete"]:
@@ -601,7 +683,7 @@ class ImageSpam(commands.Cog):
             try:
                 timeout_duration = datetime.timedelta(minutes=5)
                 await message.author.timeout(
-                    until=datetime.datetime.utcnow() + timeout_duration, 
+                    until=datetime.datetime.utcnow() + timeout_duration,
                     reason="Repeated image spam violations"
                 )
                 
