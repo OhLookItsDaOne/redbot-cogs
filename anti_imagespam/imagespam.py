@@ -3,6 +3,7 @@ from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import pagify, box
 import datetime
 from typing import Optional, List
+import re
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff")
 
@@ -25,10 +26,22 @@ class ImageSpam(commands.Cog):
             "user_message": "Your message in {channel} was deleted because it contained {image_count} images (maximum allowed: {max_images}).",
             "log_message": "🚫 **Image Spam Blocked**\nUser: {user_mention}\nChannel: {channel_mention}\nImages: {image_count}/{max_images}",
             "timeout_message": "⏰ **User Timed Out**\n{user_mention} has been timed out for 5 minutes due to repeated violations.",
-            "placeholder_info": "Available placeholders:\n{user} - Username\n{user_mention} - @User\n{channel} - Channel name\n{channel_mention} - #channel\n{max_images} - Max allowed images\n{image_count} - Images in message\n{guild} - Server name"
+            "placeholder_info": "Available placeholders:\n{user} - Username\n{user_mention} - @User\n{channel} - Channel name\n{channel_mention} - #channel\n{max_images} - Max allowed images\n{image_count} - Images in message\n{guild} - Server name",
+            "count_discord_links": True  # Neue Einstellung für Discord-Links
         }
         self.config.register_guild(**default_guild)
         self.offenses = {}
+        
+        # Regex für Discord-CDN-Links
+        self.discord_cdn_pattern = re.compile(
+            r'https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/attachments/\d+/\d+/[^\s]+'
+        )
+        
+        # Regex für allgemeine Bild-URLs mit Erweiterungen
+        self.image_url_pattern = re.compile(
+            r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|tiff)(?:\?[^\s]*)?',
+            re.IGNORECASE
+        )
 
     def is_admin_or_role(self, ctx):
         """Check if user has admin permissions or the configured admin role."""
@@ -43,37 +56,42 @@ class ImageSpam(commands.Cog):
         
         return False
 
+    def count_images_in_message(self, message: discord.Message, conf: dict) -> int:
+        """Count images in a message, including attachments and Discord CDN links."""
+        img_count = 0
+        
+        # 1. Count attachments (Dateianhänge)
+        for attachment in message.attachments:
+            if attachment.content_type and attachment.content_type.startswith("image/"):
+                img_count += 1
+            elif any(attachment.filename.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
+                img_count += 1
+        
+        # 2. Count Discord CDN links if enabled
+        if conf.get("count_discord_links", True):
+            # Discord CDN links (like your example)
+            discord_links = self.discord_cdn_pattern.findall(message.content)
+            img_count += len(discord_links)
+            
+            # General image URLs with extensions
+            image_urls = self.image_url_pattern.findall(message.content)
+            # Filter out URLs that are already counted as Discord CDN links
+            image_urls = [url for url in image_urls if not any(url.startswith(cdn_url) for cdn_url in discord_links)]
+            img_count += len(image_urls)
+        
+        return img_count
+
     def get_monitored_channels(self, guild: discord.Guild, conf: dict) -> List[int]:
         """Get list of channel IDs that are currently being monitored."""
         monitored = []
         
         if conf["monitor_all"]:
             for channel in guild.text_channels:
-                # Nur Text-Channels, keine Forum-Channels oder Threads
                 if isinstance(channel, discord.TextChannel):
                     if channel.id not in conf["excluded_channels"]:
                         monitored.append(channel.id)
-        else:
-            # In diesem Modus wird nichts überwacht
-            monitored = []
         
         return monitored
-
-    def get_unmonitored_channels(self, guild: discord.Guild, conf: dict) -> List[int]:
-        """Get list of text channel IDs that are NOT being monitored."""
-        unmonitored = []
-        
-        # Alle Text-Channels im Server
-        all_text_channels = [ch.id for ch in guild.text_channels if isinstance(ch, discord.TextChannel)]
-        
-        if conf["monitor_all"]:
-            # Wenn alle überwacht werden, sind nur exkludierte Channels unmonitored
-            unmonitored = [cid for cid in all_text_channels if cid in conf["excluded_channels"]]
-        else:
-            # Wenn monitor_all aus ist, sind alle Channels unmonitored
-            unmonitored = all_text_channels
-        
-        return unmonitored
 
     def should_monitor_message(self, message: discord.Message, conf: dict) -> bool:
         """Determine if a message should be monitored."""
@@ -157,7 +175,8 @@ class ImageSpam(commands.Cog):
             name="📋 Monitoring Settings",
             value="• `!imageprevent monitorall <on/off>` - Monitor all non-excluded\n"
                   "• `!imageprevent monitoradmins <on/off>` - Monitor admins\n"
-                  "• `!imageprevent forumthreads <on/off>` - Auto-exclude forum threads",
+                  "• `!imageprevent forumthreads <on/off>` - Auto-exclude forum threads\n"
+                  "• `!imageprevent discordlinks <on/off>` - Count Discord CDN image links",
             inline=False
         )
         
@@ -172,7 +191,8 @@ class ImageSpam(commands.Cog):
             name="📊 Information",
             value="• `!imageprevent list` - Show settings\n"
                   "• `!imageprevent channels` - Show all text channels and their status\n"
-                  "• `!imageprevent status` - Check channel status",
+                  "• `!imageprevent status` - Check channel status\n"
+                  "• `!imageprevent test <message>` - Test image counting in a message",
             inline=False
         )
         
@@ -192,6 +212,68 @@ class ImageSpam(commands.Cog):
             await self.send_ephemeral(ctx, "❌ You need administrator permissions or the configured admin role to use this command.")
             return False
         return True
+
+    @imageprevent.command(name="discordlinks")
+    async def toggle_discord_links(self, ctx, state: str):
+        """Toggle whether to count Discord CDN image links (on/off)."""
+        if not await self.check_admin_or_role(ctx):
+            return
+        
+        if state.lower() in ["on", "true", "yes", "enable"]:
+            await self.config.guild(ctx.guild).count_discord_links.set(True)
+            await ctx.send("✅ **Discord CDN link counting is now ON.** Discord image links will be counted as images.")
+        elif state.lower() in ["off", "false", "no", "disable"]:
+            await self.config.guild(ctx.guild).count_discord_links.set(False)
+            await ctx.send("✅ **Discord CDN link counting is now OFF.** Only image attachments will be counted.")
+        else:
+            await ctx.send("❌ Please use `on` or `off`.")
+
+    @imageprevent.command(name="test")
+    async def test_image_counting(self, ctx, *, message: str):
+        """Test how many images would be counted in a message."""
+        conf = await self.config.guild(ctx.guild).all()
+        
+        class MockMessage:
+            def __init__(self, content, channel, guild, author):
+                self.content = content
+                self.channel = channel
+                self.guild = guild
+                self.author = author
+                self.attachments = []
+        
+        mock_msg = MockMessage(message, ctx.channel, ctx.guild, ctx.author)
+        img_count = self.count_images_in_message(mock_msg, conf)
+        
+        # Extrahiere alle gefundenen Links
+        discord_links = self.discord_cdn_pattern.findall(message)
+        image_urls = self.image_url_pattern.findall(message)
+        
+        embed = discord.Embed(
+            title="🔍 Image Counting Test",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(name="Test Message", value=f"```{message[:500]}{'...' if len(message) > 500 else ''}```", inline=False)
+        embed.add_field(name="Images Counted", value=f"**{img_count}**", inline=True)
+        embed.add_field(name="Max Allowed", value=f"**{conf['max_images']}**", inline=True)
+        embed.add_field(name="Would be deleted?", value=f"**{'Yes ✅' if img_count > conf['max_images'] else 'No ❌'}**", inline=True)
+        
+        if discord_links:
+            embed.add_field(
+                name=f"Discord CDN Links ({len(discord_links)})",
+                value="\n".join([f"• {link[:50]}..." if len(link) > 50 else f"• {link}" for link in discord_links[:3]]),
+                inline=False
+            )
+        
+        if image_urls:
+            embed.add_field(
+                name=f"Image URLs ({len(image_urls)})",
+                value="\n".join([f"• {url[:50]}..." if len(url) > 50 else f"• {url}" for url in image_urls[:3]]),
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Discord link counting: {'ON' if conf.get('count_discord_links', True) else 'OFF'}")
+        await ctx.send(embed=embed)
 
     @imageprevent.command(name="usermessage")
     async def set_user_message(self, ctx, *, message: str):
@@ -342,7 +424,6 @@ class ImageSpam(commands.Cog):
         if not await self.check_admin_or_role(ctx):
             return
         
-        # Prüfe ob es ein Text-Channel ist
         if not isinstance(channel, discord.TextChannel):
             await ctx.send("❌ You can only exclude text channels.")
             return
@@ -395,7 +476,6 @@ class ImageSpam(commands.Cog):
         admin_role = ctx.guild.get_role(conf["admin_role_id"]) if conf["admin_role_id"] else None
         
         monitored_count = len(self.get_monitored_channels(ctx.guild, conf))
-        unmonitored_count = len(self.get_unmonitored_channels(ctx.guild, conf))
         
         embed = discord.Embed(
             title="🛡️ Image Prevention Settings",
@@ -411,7 +491,7 @@ class ImageSpam(commands.Cog):
         embed.add_field(name="Admin Monitoring", value=f"**{'ON' if conf['monitor_admins'] else 'OFF'}**", inline=True)
         embed.add_field(name="Forum Threads", value=f"**{'Auto-excluded' if conf['exclude_forum_threads'] else 'Monitored'}**", inline=True)
         
-        embed.add_field(name="Channel Stats", value=f"Monitored: **{monitored_count}**\nUnmonitored: **{unmonitored_count}**", inline=True)
+        embed.add_field(name="Discord Links", value=f"**{'Counted' if conf.get('count_discord_links', True) else 'Ignored'}**", inline=True)
         embed.add_field(name="Excluded Channels", value=f"**{len(conf['excluded_channels'])}** channels", inline=True)
         embed.add_field(name="Notifications", value=f"Log: **{'ON' if conf['notification_on_delete'] else 'OFF'}**\nUser: **{'ON' if conf['user_notification'] else 'OFF'}**", inline=True)
         
@@ -430,172 +510,6 @@ class ImageSpam(commands.Cog):
         
         await ctx.send(embed=embed)
 
-    @imageprevent.command(name="channels")
-    async def list_all_channels(self, ctx):
-        """Show all text channels and their monitoring status."""
-        conf = await self.config.guild(ctx.guild).all()
-        
-        # Hole alle Text-Channels (keine Threads, keine Forum-Channels)
-        text_channels = []
-        for channel in ctx.guild.text_channels:
-            if isinstance(channel, discord.TextChannel):
-                text_channels.append(channel)
-        
-        # Sortiere alphabetisch
-        text_channels.sort(key=lambda x: x.name.lower())
-        
-        if not text_channels:
-            await ctx.send("❌ No text channels found in this server.")
-            return
-        
-        # Kategorisiere Channels
-        monitored_channels = []
-        excluded_channels = []
-        unmonitored_channels = []
-        
-        for channel in text_channels:
-            if channel.id in conf["excluded_channels"]:
-                excluded_channels.append(channel)
-            elif conf["monitor_all"]:
-                monitored_channels.append(channel)
-            else:
-                unmonitored_channels.append(channel)
-        
-        # Baue die Nachricht auf
-        description = ""
-        
-        # Monitored Channels
-        if monitored_channels:
-            description += "**🟢 MONITORED** (Images will be deleted if over limit):\n"
-            for i, channel in enumerate(monitored_channels[:20], 1):
-                description += f"{i}. {channel.mention}\n"
-            if len(monitored_channels) > 20:
-                description += f"*... and {len(monitored_channels) - 20} more*\n"
-            description += "\n"
-        
-        # Excluded Channels
-        if excluded_channels:
-            description += "**🔴 EXCLUDED** (No image limit):\n"
-            for i, channel in enumerate(excluded_channels[:20], 1):
-                description += f"{i}. {channel.mention}\n"
-            if len(excluded_channels) > 20:
-                description += f"*... and {len(excluded_channels) - 20} more*\n"
-            description += "\n"
-        
-        # Unmonitored Channels (wenn monitor_all = False)
-        if unmonitored_channels:
-            description += "**🟡 UNMONITORED** (No monitoring - monitorall is OFF):\n"
-            for i, channel in enumerate(unmonitored_channels[:20], 1):
-                description += f"{i}. {channel.mention}\n"
-            if len(unmonitored_channels) > 20:
-                description += f"*... and {len(unmonitored_channels) - 20} more*\n"
-        
-        if not monitored_channels and not excluded_channels and not unmonitored_channels:
-            description = "No text channels to display."
-        
-        embed = discord.Embed(
-            title="📊 Text Channel Monitoring Status",
-            description=description,
-            color=discord.Color.blue()
-        )
-        
-        stats = []
-        if monitored_channels:
-            stats.append(f"🟢 Monitored: **{len(monitored_channels)}**")
-        if excluded_channels:
-            stats.append(f"🔴 Excluded: **{len(excluded_channels)}**")
-        if unmonitored_channels:
-            stats.append(f"🟡 Unmonitored: **{len(unmonitored_channels)}**")
-        
-        embed.add_field(
-            name="📈 Statistics",
-            value=" | ".join(stats),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="⚙️ Current Mode",
-            value=f"`monitorall` = **{'ON' if conf['monitor_all'] else 'OFF'}**",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="📏 Max Images",
-            value=f"**{conf['max_images']}** per message",
-            inline=True
-        )
-        
-        embed.set_footer(text=f"Total text channels: {len(text_channels)} | Use !imageprevent status to check a specific channel")
-        
-        await ctx.send(embed=embed)
-
-    @imageprevent.command(name="status")
-    async def channel_status(self, ctx, channel: Optional[discord.TextChannel] = None):
-        """Check monitoring status of a specific channel."""
-        channel = channel or ctx.channel
-        
-        # Prüfe ob es ein Text-Channel ist
-        if not isinstance(channel, discord.TextChannel):
-            await ctx.send("❌ This command only works for text channels.")
-            return
-        
-        conf = await self.config.guild(ctx.guild).all()
-        
-        # Erstelle Mock-Nachricht für die Überprüfung
-        class MockMessage:
-            def __init__(self, ch, guild, author):
-                self.channel = ch
-                self.guild = guild
-                self.author = author
-        
-        mock_msg = MockMessage(channel, ctx.guild, ctx.author)
-        is_monitored = self.should_monitor_message(mock_msg, conf)
-        
-        # Bestimme den Status-Text
-        if channel.id in conf["excluded_channels"]:
-            status = "🔴 EXCLUDED"
-            reason = "Channel is in the exclusion list"
-        elif not conf["monitor_all"]:
-            status = "🟡 UNMONITORED"
-            reason = "`monitorall` is OFF (no channels are monitored)"
-        elif is_monitored:
-            status = "🟢 MONITORED"
-            reason = "Channel is being monitored"
-        else:
-            status = "🔴 UNMONITORED"
-            reason = "Channel is not being monitored"
-        
-        embed = discord.Embed(
-            title=f"📊 Channel Monitoring Status",
-            color=discord.Color.green() if is_monitored else discord.Color.red()
-        )
-        
-        embed.add_field(name="Channel", value=channel.mention, inline=True)
-        embed.add_field(name="Status", value=f"**{status}**", inline=True)
-        embed.add_field(name="Channel ID", value=f"`{channel.id}`", inline=True)
-        
-        embed.add_field(name="Reason", value=reason, inline=False)
-        
-        embed.add_field(name="Max Images", value=f"**{conf['max_images']}** allowed", inline=True)
-        embed.add_field(name="Admin Monitoring", value=f"**{'ON' if conf['monitor_admins'] else 'OFF'}**", inline=True)
-        
-        if is_monitored:
-            embed.add_field(name="What happens?", value="• Images will be counted\n• Messages with >{max_images} images will be deleted\n• User will be notified".format(max_images=conf['max_images']), inline=False)
-        else:
-            embed.add_field(name="What happens?", value="• No image limit\n• No automatic deletion\n• Users can post unlimited images", inline=False)
-        
-        await ctx.send(embed=embed)
-
-    async def send_ephemeral_to_user(self, user: discord.Member, channel: discord.TextChannel, content: str):
-        """Send an ephemeral-like message to a user."""
-        try:
-            await user.send(content)
-        except discord.Forbidden:
-            try:
-                temp_msg = await channel.send(f"{user.mention} (Only you can see this notification): {content}", delete_after=10.0)
-            except Exception:
-                pass
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Monitor messages for image spam."""
@@ -607,25 +521,27 @@ class ImageSpam(commands.Cog):
         if not self.should_monitor_message(message, conf):
             return
         
-        img_count = 0
-        for attachment in message.attachments:
-            if attachment.content_type and attachment.content_type.startswith("image/"):
-                img_count += 1
-            elif any(attachment.filename.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
-                img_count += 1
+        # Bilder zählen (inklusive Discord-Links)
+        img_count = self.count_images_in_message(message, conf)
         
         if img_count <= conf["max_images"]:
             return
+        
+        # Debug-Ausgabe
+        print(f"[ImagePrevent] Detected {img_count} images in message from {message.author} in #{message.channel.name}")
+        print(f"[ImagePrevent] Message content: {message.content[:100]}...")
         
         # Nachricht löschen
         delete_success = False
         try:
             await message.delete()
             delete_success = True
-        except (discord.Forbidden, discord.NotFound):
+            print(f"[ImagePrevent] Deleted message with {img_count} images (max: {conf['max_images']})")
+        except (discord.Forbidden, discord.NotFound) as e:
             delete_success = False
+            print(f"[ImagePrevent] Failed to delete message: {e}")
         except Exception as e:
-            print(f"Error deleting message: {e}")
+            print(f"[ImagePrevent] Error deleting message: {e}")
             delete_success = False
         
         # Benutzer benachrichtigen (ephemeral-like)
@@ -637,7 +553,16 @@ class ImageSpam(commands.Cog):
                 conf
             )
             
-            await self.send_ephemeral_to_user(message.author, message.channel, user_msg)
+            try:
+                await message.author.send(user_msg)
+            except discord.Forbidden:
+                try:
+                    temp_msg = await message.channel.send(
+                        f"{message.author.mention} (Only you can see this): {user_msg}",
+                        delete_after=10.0
+                    )
+                except Exception:
+                    pass
         
         # Logge in Log-Channel
         if conf["log_channel_id"] and conf["notification_on_delete"]:
@@ -654,7 +579,7 @@ class ImageSpam(commands.Cog):
                     await log_channel.send(log_msg)
                     
                 except Exception as e:
-                    print(f"Error sending log: {e}")
+                    print(f"[ImagePrevent] Error sending log: {e}")
         
         # Timeout-Logik
         now = datetime.datetime.utcnow()
@@ -675,7 +600,12 @@ class ImageSpam(commands.Cog):
         if len(user_offenses) >= 3:
             try:
                 timeout_duration = datetime.timedelta(minutes=5)
-                await message.author.timeout(until=datetime.datetime.utcnow() + timeout_duration, reason="Repeated image spam violations")
+                await message.author.timeout(
+                    until=datetime.datetime.utcnow() + timeout_duration, 
+                    reason="Repeated image spam violations"
+                )
+                
+                print(f"[ImagePrevent] Timed out {message.author} for repeated violations")
                 
                 if conf["log_channel_id"] and conf["notification_on_delete"]:
                     log_channel = message.guild.get_channel(conf["log_channel_id"])
@@ -691,9 +621,9 @@ class ImageSpam(commands.Cog):
                 self.offenses[guild_id][user_id] = []
                 
             except discord.Forbidden:
-                pass
+                print(f"[ImagePrevent] No permission to timeout {message.author}")
             except Exception as e:
-                print(f"Error applying timeout: {e}")
+                print(f"[ImagePrevent] Error applying timeout: {e}")
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))
