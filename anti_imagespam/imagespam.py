@@ -22,16 +22,22 @@ class ImageSpam(commands.Cog):
             "exclude_forum_threads": True,
             "admin_role_id": None,
             "notification_on_delete": True,
-            "ephemeral_notify": True,    # Neue Einstellung für ephemerale Nachrichten
-            "dm_notify": False,          # Neue Einstellung für DM-Fallback
+            "channel_message_enabled": True,           # Umbenannt von ephemeral_notify
+            "channel_message_text": "⚠️ {user} - Too many images ({image_count}/{max_images})",  # Neue Einstellung
+            "channel_message_duration": 3.0,           # Anzeigedauer in Sekunden
             "user_message": "Your message in {channel} was deleted because it contained {image_count} images (maximum allowed: {max_images}).",
             "log_message": "🚫 **Image Spam Blocked**\nUser: {user_mention}\nChannel: {channel_mention}\nImages: {image_count}/{max_images}",
             "timeout_message": "⏰ **User Timed Out**\n{user_mention} has been timed out for 5 minutes due to repeated violations.",
             "placeholder_info": "Available placeholders:\n{user} - Username\n{user_mention} - @User\n{channel} - Channel name\n{channel_mention} - #channel\n{max_images} - Max allowed images\n{image_count} - Images in message\n{guild} - Server name",
-            "count_discord_links": True
+            "count_discord_links": True,
+            "repeated_offense_timeout": True,          # Timeout bei wiederholten Verstößen
+            "timeout_duration": 5,                     # Timeout-Dauer in Minuten
+            "timeout_threshold": 3,                    # Anzahl Verstöße für Timeout
+            "timeout_window": 300                      # Zeitfenster in Sekunden (5 Minuten)
         }
         self.config.register_guild(**default_guild)
         self.offenses = {}
+        self.recent_notifications = {}  # Track recent notifications per user
         
         # Regex für Discord-CDN-Links
         self.discord_cdn_pattern = re.compile(
@@ -129,37 +135,24 @@ class ImageSpam(commands.Cog):
         formatted = formatted.replace("{guild}", message_obj.guild.name)
         return formatted
 
-    async def send_ephemeral(self, ctx, content: str, **kwargs):
-        """Send an ephemeral message (only visible to the user)."""
+    async def send_channel_message(self, message: discord.Message, conf: dict, img_count: int):
+        """Send channel message notification to user."""
+        if not conf["channel_message_enabled"]:
+            return
+        
+        # Format the message
+        channel_msg = self.format_message(
+            conf["channel_message_text"],
+            message,
+            img_count,
+            conf
+        )
+        
         try:
-            await ctx.author.send(content)
-        except discord.Forbidden:
-            await ctx.send(f"{ctx.author.mention} (Only you can see this): {content}", delete_after=10.0, **kwargs)
-
-    async def notify_user_ephemeral(self, message: discord.Message, user_msg: str):
-        """Send ephemeral notification to user (brief channel message + optional DM)."""
-        # 1. Sehr kurze, unauffällige Channel-Nachricht (1.5 Sekunden)
-        try:
-            await message.channel.send(
-                f"||{message.author.mention}|| 📸",  # Versteckte Erwähnung + Emoji
-                delete_after=1.5
-            )
-        except Exception:
-            pass  # Ignoriere Fehler bei der ephemeralen Nachricht
-
-    async def notify_user_dm(self, message: discord.Message, user_msg: str):
-        """Send DM notification to user."""
-        try:
-            await message.author.send(f"📸 {user_msg}")
-        except discord.Forbidden:
-            # Falls DMs deaktiviert sind, sende eine längere Channel-Nachricht als Fallback
-            try:
-                await message.channel.send(
-                    f"{message.author.mention} 📸 (Check DMs for details)",
-                    delete_after=5.0
-                )
-            except Exception:
-                pass
+            # Send the message and delete it after specified duration
+            await message.channel.send(channel_msg, delete_after=conf["channel_message_duration"])
+        except Exception as e:
+            print(f"[ImagePrevent] Error sending channel message: {e}")
 
     @commands.group(name="imageprevent", invoke_without_command=True)
     @commands.guild_only()
@@ -186,13 +179,23 @@ class ImageSpam(commands.Cog):
         )
         
         embed.add_field(
-            name="🔔 Notification Settings",
-            value="• `!imageprevent ephemeral <on/off>` - Toggle ephemeral notifications\n"
-                  "• `!imageprevent dm <on/off>` - Toggle DM notifications\n"
-                  "• `!imageprevent usermessage <text>` - Set user notification message\n"
+            name="🔔 Channel Message Settings",
+            value="• `!imageprevent channelmessage <on/off>` - Toggle channel messages\n"
+                  "• `!imageprevent channeltext <text>` - Set channel message text\n"
+                  "• `!imageprevent channelduration <seconds>` - Set message display duration\n"
+                  "• `!imageprevent usermessage <text>` - Set log user message\n"
                   "• `!imageprevent logmessage <text>` - Set log channel message\n"
                   "• `!imageprevent timeoutmessage <text>` - Set timeout notification message\n"
                   "• `!imageprevent placeholders` - Show available placeholders",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⏰ Timeout Settings",
+            value="• `!imageprevent timeouttoggle <on/off>` - Toggle repeated offense timeouts\n"
+                  "• `!imageprevent timeoutthreshold <number>` - Set violations needed for timeout\n"
+                  "• `!imageprevent timeoutduration <minutes>` - Set timeout duration\n"
+                  "• `!imageprevent timeoutwindow <seconds>` - Set timeout window (default: 300s = 5min)",
             inline=False
         )
         
@@ -217,8 +220,7 @@ class ImageSpam(commands.Cog):
             value="• `!imageprevent list` - Show settings\n"
                   "• `!imageprevent channels` - Show all text channels and their status\n"
                   "• `!imageprevent status` - Check channel status\n"
-                  "• `!imageprevent test <message>` - Test image counting in a message\n"
-                  "• `!imageprevent previewnotify` - Preview notification styles",
+                  "• `!imageprevent test <message>` - Test image counting in a message",
             inline=False
         )
         
@@ -229,85 +231,113 @@ class ImageSpam(commands.Cog):
             inline=False
         )
         
-        embed.set_footer(text="Ephemeral: brief channel flash | DM: detailed message in DMs")
+        embed.set_footer(text="Use !imageprevent placeholders to see available message placeholders")
         await ctx.send(embed=embed)
 
     async def check_admin_or_role(self, ctx):
         """Check if user has permission to use admin commands."""
         if not self.is_admin_or_role(ctx):
-            await self.send_ephemeral(ctx, "❌ You need administrator permissions or the configured admin role to use this command.")
+            try:
+                await ctx.author.send("❌ You need administrator permissions or the configured admin role to use this command.")
+            except discord.Forbidden:
+                await ctx.send(f"{ctx.author.mention} ❌ You need administrator permissions or the configured admin role to use this command.", delete_after=10.0)
             return False
         return True
 
-    @imageprevent.command(name="ephemeral")
-    async def toggle_ephemeral_notify(self, ctx, state: str):
-        """Toggle ephemeral notifications (brief channel flash)."""
+    @imageprevent.command(name="channelmessage")
+    async def toggle_channel_message(self, ctx, state: str):
+        """Toggle channel messages (on/off)."""
         if not await self.check_admin_or_role(ctx):
             return
         
         if state.lower() in ["on", "true", "yes", "enable"]:
-            await self.config.guild(ctx.guild).ephemeral_notify.set(True)
-            await ctx.send("✅ **Ephemeral notifications are now ON.** Users will see a brief flash in the channel when their message is deleted.")
+            await self.config.guild(ctx.guild).channel_message_enabled.set(True)
+            await ctx.send("✅ **Channel messages are now ON.** Users will see a brief message in the channel when their message is deleted.")
         elif state.lower() in ["off", "false", "no", "disable"]:
-            await self.config.guild(ctx.guild).ephemeral_notify.set(False)
-            await ctx.send("✅ **Ephemeral notifications are now OFF.** No brief channel notifications will be shown.")
+            await self.config.guild(ctx.guild).channel_message_enabled.set(False)
+            await ctx.send("✅ **Channel messages are now OFF.** No channel notifications will be shown.")
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
-    @imageprevent.command(name="dm")
-    async def toggle_dm_notify(self, ctx, state: str):
-        """Toggle DM notifications (detailed message in DMs)."""
+    @imageprevent.command(name="channeltext")
+    async def set_channel_text(self, ctx, *, text: str):
+        """Set the channel message text."""
+        if not await self.check_admin_or_role(ctx):
+            return
+        
+        if len(text) > 200:
+            await ctx.send("❌ Message too long. Maximum 200 characters.")
+            return
+        
+        await self.config.guild(ctx.guild).channel_message_text.set(text)
+        await ctx.send(f"✅ Channel message text set to:\n```{text}```")
+
+    @imageprevent.command(name="channelduration")
+    async def set_channel_duration(self, ctx, duration: float):
+        """Set channel message display duration in seconds (0.5-30)."""
+        if not await self.check_admin_or_role(ctx):
+            return
+        
+        if duration < 0.5 or duration > 30:
+            await ctx.send("❌ Duration must be between 0.5 and 30 seconds.")
+            return
+        
+        await self.config.guild(ctx.guild).channel_message_duration.set(duration)
+        await ctx.send(f"✅ Channel message duration set to **{duration} seconds**.")
+
+    @imageprevent.command(name="timeouttoggle")
+    async def toggle_timeout(self, ctx, state: str):
+        """Toggle timeout for repeated offenses (on/off)."""
         if not await self.check_admin_or_role(ctx):
             return
         
         if state.lower() in ["on", "true", "yes", "enable"]:
-            await self.config.guild(ctx.guild).dm_notify.set(True)
-            await ctx.send("✅ **DM notifications are now ON.** Users will receive detailed messages in their DMs when their message is deleted.")
+            await self.config.guild(ctx.guild).repeated_offense_timeout.set(True)
+            await ctx.send("✅ **Repeated offense timeouts are now ON.** Users will be timed out for repeated violations.")
         elif state.lower() in ["off", "false", "no", "disable"]:
-            await self.config.guild(ctx.guild).dm_notify.set(False)
-            await ctx.send("✅ **DM notifications are now OFF.** No DMs will be sent to users.")
+            await self.config.guild(ctx.guild).repeated_offense_timeout.set(False)
+            await ctx.send("✅ **Repeated offense timeouts are now OFF.** No timeouts will be applied.")
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
-    @imageprevent.command(name="previewnotify")
-    async def preview_notification(self, ctx):
-        """Preview the current notification settings."""
-        conf = await self.config.guild(ctx.guild).all()
+    @imageprevent.command(name="timeoutthreshold")
+    async def set_timeout_threshold(self, ctx, threshold: int):
+        """Set number of violations needed for timeout (1-10)."""
+        if not await self.check_admin_or_role(ctx):
+            return
         
-        embed = discord.Embed(
-            title="🔔 Notification Settings Preview",
-            color=discord.Color.blue()
-        )
+        if threshold < 1 or threshold > 10:
+            await ctx.send("❌ Threshold must be between 1 and 10.")
+            return
         
-        embed.add_field(name="Ephemeral Notifications", value=f"**{'ON 🟢' if conf['ephemeral_notify'] else 'OFF 🔴'}**", inline=True)
-        embed.add_field(name="DM Notifications", value=f"**{'ON 🟢' if conf['dm_notify'] else 'OFF 🔴'}**", inline=True)
-        embed.add_field(name="Log Notifications", value=f"**{'ON 🟢' if conf['notification_on_delete'] else 'OFF 🔴'}**", inline=True)
+        await self.config.guild(ctx.guild).timeout_threshold.set(threshold)
+        await ctx.send(f"✅ Timeout threshold set to **{threshold}** violations.")
+
+    @imageprevent.command(name="timeoutduration")
+    async def set_timeout_duration(self, ctx, duration: int):
+        """Set timeout duration in minutes (1-1440)."""
+        if not await self.check_admin_or_role(ctx):
+            return
         
-        description = ""
-        if conf["ephemeral_notify"]:
-            description += "• **Ephemeral**: Users will see `||@User|| 📸` for 1.5 seconds in the channel\n"
-        if conf["dm_notify"]:
-            description += "• **DM**: Users will receive a detailed message in their DMs\n"
-        if not conf["ephemeral_notify"] and not conf["dm_notify"]:
-            description += "• **No user notifications** - users won't know why their message was deleted\n"
+        if duration < 1 or duration > 1440:
+            await ctx.send("❌ Duration must be between 1 and 1440 minutes (24 hours).")
+            return
         
-        embed.add_field(name="What users will see:", value=description, inline=False)
+        await self.config.guild(ctx.guild).timeout_duration.set(duration)
+        await ctx.send(f"✅ Timeout duration set to **{duration} minutes**.")
+
+    @imageprevent.command(name="timeoutwindow")
+    async def set_timeout_window(self, ctx, seconds: int):
+        """Set timeout window in seconds (10-3600)."""
+        if not await self.check_admin_or_role(ctx):
+            return
         
-        # Beispiel-Nachricht
-        example_msg = conf["user_message"].format(
-            user=ctx.author,
-            user_mention=ctx.author.mention,
-            channel="#test-channel",
-            channel_mention="#test-channel",
-            max_images=conf["max_images"],
-            image_count=conf["max_images"] + 1,
-            guild=ctx.guild.name
-        )
+        if seconds < 10 or seconds > 3600:
+            await ctx.send("❌ Window must be between 10 and 3600 seconds (1 hour).")
+            return
         
-        embed.add_field(name="Example DM Message", value=f"```{example_msg[:200]}...```", inline=False)
-        
-        embed.set_footer(text="Use !imageprevent ephemeral/dm <on/off> to change settings")
-        await ctx.send(embed=embed)
+        await self.config.guild(ctx.guild).timeout_window.set(seconds)
+        await ctx.send(f"✅ Timeout window set to **{seconds} seconds**.")
 
     @imageprevent.command(name="discordlinks")
     async def toggle_discord_links(self, ctx, state: str):
@@ -373,7 +403,7 @@ class ImageSpam(commands.Cog):
 
     @imageprevent.command(name="usermessage")
     async def set_user_message(self, ctx, *, message: str):
-        """Set the message sent to users when their message is deleted."""
+        """Set the message sent to log channel for user violations."""
         if not await self.check_admin_or_role(ctx):
             return
         
@@ -382,7 +412,7 @@ class ImageSpam(commands.Cog):
             return
         
         await self.config.guild(ctx.guild).user_message.set(message)
-        await ctx.send(f"✅ User notification message set to:\n```{message}```")
+        await ctx.send(f"✅ User log message set to:\n```{message}```")
 
     @imageprevent.command(name="logmessage")
     async def set_log_message(self, ctx, *, message: str):
@@ -532,7 +562,10 @@ class ImageSpam(commands.Cog):
     async def set_admin_role(self, ctx, role: discord.Role):
         """Set a role that can use imageprevent commands."""
         if not ctx.author.guild_permissions.administrator:
-            await self.send_ephemeral(ctx, "❌ You need administrator permissions to set the admin role.")
+            try:
+                await ctx.author.send("❌ You need administrator permissions to set the admin role.")
+            except discord.Forbidden:
+                await ctx.send(f"{ctx.author.mention} ❌ You need administrator permissions to set the admin role.", delete_after=10.0)
             return
         
         await self.config.guild(ctx.guild).admin_role_id.set(role.id)
@@ -542,7 +575,10 @@ class ImageSpam(commands.Cog):
     async def clear_admin_role(self, ctx):
         """Clear the admin role setting."""
         if not ctx.author.guild_permissions.administrator:
-            await self.send_ephemeral(ctx, "❌ You need administrator permissions to clear the admin role.")
+            try:
+                await ctx.author.send("❌ You need administrator permissions to clear the admin role.")
+            except discord.Forbidden:
+                await ctx.send(f"{ctx.author.mention} ❌ You need administrator permissions to clear the admin role.", delete_after=10.0)
             return
         
         await self.config.guild(ctx.guild).admin_role_id.set(None)
@@ -575,11 +611,20 @@ class ImageSpam(commands.Cog):
         embed.add_field(name="Discord Links", value=f"**{'Counted' if conf.get('count_discord_links', True) else 'Ignored'}**", inline=True)
         embed.add_field(name="Excluded Channels", value=f"**{len(conf['excluded_channels'])}** channels", inline=True)
         
-        # Neue Notification-Einstellungen
-        notification_text = f"Ephemeral: **{'ON 🟢' if conf['ephemeral_notify'] else 'OFF 🔴'}**\n"
-        notification_text += f"DM: **{'ON 🟢' if conf['dm_notify'] else 'OFF 🔴'}**\n"
-        notification_text += f"Log: **{'ON 🟢' if conf['notification_on_delete'] else 'OFF 🔴'}**"
-        embed.add_field(name="🔔 Notifications", value=notification_text, inline=True)
+        # Channel Message Settings
+        channel_msg_text = conf["channel_message_text"][:30] + "..." if len(conf["channel_message_text"]) > 30 else conf["channel_message_text"]
+        embed.add_field(
+            name="🔔 Channel Message", 
+            value=f"Enabled: **{'ON 🟢' if conf['channel_message_enabled'] else 'OFF 🔴'}**\nDuration: **{conf['channel_message_duration']}s**\nText: `{channel_msg_text}`", 
+            inline=False
+        )
+        
+        # Timeout Settings
+        timeout_text = f"Enabled: **{'ON 🟢' if conf['repeated_offense_timeout'] else 'OFF 🔴'}**\n"
+        timeout_text += f"Threshold: **{conf['timeout_threshold']}** violations\n"
+        timeout_text += f"Duration: **{conf['timeout_duration']}** minutes\n"
+        timeout_text += f"Window: **{conf['timeout_window']}** seconds"
+        embed.add_field(name="⏰ Timeout Settings", value=timeout_text, inline=False)
         
         # Zeige die ersten 5 exkludierten Channels
         excluded_list = []
@@ -629,22 +674,9 @@ class ImageSpam(commands.Cog):
             print(f"[ImagePrevent] Error deleting message: {e}")
             delete_success = False
         
-        # Benutzer benachrichtigen
+        # Channel-Nachricht senden
         if delete_success:
-            user_msg = self.format_message(
-                conf["user_message"],
-                message,
-                img_count,
-                conf
-            )
-            
-            # Ephemerale Benachrichtigung (Hauptmethode)
-            if conf["ephemeral_notify"]:
-                await self.notify_user_ephemeral(message, user_msg)
-            
-            # DM Benachrichtigung (Fallback/Zusatz)
-            if conf["dm_notify"]:
-                await self.notify_user_dm(message, user_msg)
+            await self.send_channel_message(message, conf, img_count)
         
         # Logge in Log-Channel
         if conf["log_channel_id"] and conf["notification_on_delete"]:
@@ -663,49 +695,58 @@ class ImageSpam(commands.Cog):
                 except Exception as e:
                     print(f"[ImagePrevent] Error sending log: {e}")
         
-        # Timeout-Logik
-        now = datetime.datetime.utcnow()
-        guild_id = message.guild.id
-        user_id = message.author.id
-        
-        if guild_id not in self.offenses:
-            self.offenses[guild_id] = {}
-        
-        if user_id not in self.offenses[guild_id]:
-            self.offenses[guild_id][user_id] = []
-        
-        user_offenses = self.offenses[guild_id][user_id]
-        user_offenses[:] = [t for t in user_offenses if (now - t).total_seconds() <= 60]
-        user_offenses.append(now)
-        
-        # Timeout bei 3+ Verstößen in 60 Sekunden
-        if len(user_offenses) >= 3:
-            try:
-                timeout_duration = datetime.timedelta(minutes=5)
-                await message.author.timeout(
-                    until=datetime.datetime.utcnow() + timeout_duration,
-                    reason="Repeated image spam violations"
-                )
-                
-                print(f"[ImagePrevent] Timed out {message.author} for repeated violations")
-                
-                if conf["log_channel_id"] and conf["notification_on_delete"]:
-                    log_channel = message.guild.get_channel(conf["log_channel_id"])
-                    if log_channel:
-                        timeout_msg = self.format_message(
-                            conf["timeout_message"],
-                            message,
-                            img_count,
-                            conf
-                        )
-                        await log_channel.send(timeout_msg)
-                
+        # Timeout-Logik für wiederholte Verstöße (5 Minuten Fenster)
+        if conf["repeated_offense_timeout"] and delete_success:
+            now = datetime.datetime.utcnow()
+            guild_id = message.guild.id
+            user_id = message.author.id
+            
+            if guild_id not in self.offenses:
+                self.offenses[guild_id] = {}
+            
+            if user_id not in self.offenses[guild_id]:
                 self.offenses[guild_id][user_id] = []
-                
-            except discord.Forbidden:
-                print(f"[ImagePrevent] No permission to timeout {message.author}")
-            except Exception as e:
-                print(f"[ImagePrevent] Error applying timeout: {e}")
+            
+            user_offenses = self.offenses[guild_id][user_id]
+            
+            # Alte Verstöße bereinigen (älter als das konfigurierte Zeitfenster)
+            window_seconds = conf.get("timeout_window", 300)
+            user_offenses[:] = [t for t in user_offenses if (now - t).total_seconds() <= window_seconds]
+            
+            # Aktuellen Verstoß hinzufügen
+            user_offenses.append(now)
+            
+            # Prüfe ob Timeout-Schwelle erreicht ist
+            threshold = conf.get("timeout_threshold", 3)
+            if len(user_offenses) >= threshold:
+                try:
+                    timeout_duration = datetime.timedelta(minutes=conf.get("timeout_duration", 5))
+                    await message.author.timeout(
+                        until=datetime.datetime.utcnow() + timeout_duration,
+                        reason=f"Repeated image spam violations ({len(user_offenses)} in {window_seconds}s)"
+                    )
+                    
+                    print(f"[ImagePrevent] Timed out {message.author} for {conf['timeout_duration']} minutes (repeated violations)")
+                    
+                    # Logge Timeout im Log-Channel
+                    if conf["log_channel_id"] and conf["notification_on_delete"]:
+                        log_channel = message.guild.get_channel(conf["log_channel_id"])
+                        if log_channel:
+                            timeout_msg = self.format_message(
+                                conf["timeout_message"],
+                                message,
+                                img_count,
+                                conf
+                            )
+                            await log_channel.send(timeout_msg)
+                    
+                    # Offenses zurücksetzen
+                    self.offenses[guild_id][user_id] = []
+                    
+                except discord.Forbidden:
+                    print(f"[ImagePrevent] No permission to timeout {message.author}")
+                except Exception as e:
+                    print(f"[ImagePrevent] Error applying timeout: {e}")
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))
