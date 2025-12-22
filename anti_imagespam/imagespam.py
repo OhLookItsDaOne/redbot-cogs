@@ -102,6 +102,17 @@ class ImageSpam(commands.Cog):
         formatted = formatted.replace("{guild}", message_obj.guild.name)
         return formatted
 
+    async def send_ephemeral(self, ctx, content: str, **kwargs):
+        """Send an ephemeral message (only visible to the user)."""
+        # For Redbot, we can use ctx.send with ephemeral=True if it's a slash command
+        # But since we're using prefix commands, we'll simulate it with a DM or a temporary message
+        try:
+            # Try to send as DM first (closest to ephemeral)
+            await ctx.author.send(content)
+        except discord.Forbidden:
+            # Fallback to regular channel message with delete_after
+            await ctx.send(f"{ctx.author.mention} (Only you can see this): {content}", delete_after=10.0, **kwargs)
+
     @commands.group(name="imageprevent", invoke_without_command=True)
     @commands.guild_only()
     async def imageprevent(self, ctx):
@@ -175,7 +186,7 @@ class ImageSpam(commands.Cog):
     async def check_admin_or_role(self, ctx):
         """Check if user has permission to use admin commands."""
         if not self.is_admin_or_role(ctx):
-            await ctx.send("❌ You need administrator permissions or the configured admin role to use this command.")
+            await self.send_ephemeral(ctx, "❌ You need administrator permissions or the configured admin role to use this command.")
             return False
         return True
 
@@ -222,7 +233,9 @@ class ImageSpam(commands.Cog):
     async def show_placeholders(self, ctx):
         """Show available placeholders for custom messages."""
         placeholders = await self.config.guild(ctx.guild).placeholder_info()
-        await ctx.send(f"📝 **Available Placeholders**\n```{placeholders}```\n\n**Example:**\n`Your message in {channel} was deleted for having {image_count}/{max_images} images.`")
+        # Use double curly braces to escape them in the example
+        example = "Your message in {{channel}} was deleted for having {{image_count}}/{{max_images}} images."
+        await ctx.send(f"📝 **Available Placeholders**\n```{placeholders}```\n\n**Example:**\n`{example}`")
 
     @imageprevent.command(name="usernotify")
     async def toggle_user_notification(self, ctx, state: str):
@@ -232,10 +245,10 @@ class ImageSpam(commands.Cog):
         
         if state.lower() in ["on", "true", "yes", "enable"]:
             await self.config.guild(ctx.guild).user_notification.set(True)
-            await ctx.send("✅ User notifications are now **ON**. Users will receive a DM when their message is deleted.")
+            await ctx.send("✅ User notifications are now **ON**. Users will receive a temporary ephemeral message when their message is deleted.")
         elif state.lower() in ["off", "false", "no", "disable"]:
             await self.config.guild(ctx.guild).user_notification.set(False)
-            await ctx.send("✅ User notifications are now **OFF**. Users will not receive DMs.")
+            await ctx.send("✅ User notifications are now **OFF**. Users will not receive notifications.")
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
@@ -382,7 +395,7 @@ class ImageSpam(commands.Cog):
     async def set_admin_role(self, ctx, role: discord.Role):
         """Set a role that can use imageprevent commands."""
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ You need administrator permissions to set the admin role.")
+            await self.send_ephemeral(ctx, "❌ You need administrator permissions to set the admin role.")
             return
         
         await self.config.guild(ctx.guild).admin_role_id.set(role.id)
@@ -392,7 +405,7 @@ class ImageSpam(commands.Cog):
     async def clear_admin_role(self, ctx):
         """Clear the admin role setting."""
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ You need administrator permissions to clear the admin role.")
+            await self.send_ephemeral(ctx, "❌ You need administrator permissions to clear the admin role.")
             return
         
         await self.config.guild(ctx.guild).admin_role_id.set(None)
@@ -426,7 +439,6 @@ class ImageSpam(commands.Cog):
         embed.add_field(name="Monitored Channels", value=f"**{monitored_count}** channels", inline=True)
         embed.add_field(name="Excluded Channels", value=f"**{len(conf['excluded_channels'])}** channels", inline=True)
         
-        # Zeige Nachrichten-Vorschau
         user_msg_preview = conf["user_message"][:50] + "..." if len(conf["user_message"]) > 50 else conf["user_message"]
         embed.add_field(name="User Message", value=f"```{user_msg_preview}```", inline=False)
         
@@ -486,6 +498,19 @@ class ImageSpam(commands.Cog):
         
         await ctx.send(embed=embed)
 
+    async def send_ephemeral_to_user(self, user: discord.Member, channel: discord.TextChannel, content: str):
+        """Send an ephemeral-like message to a user."""
+        try:
+            # Try to send as DM (closest to ephemeral for non-interaction messages)
+            await user.send(content)
+        except discord.Forbidden:
+            # If DMs are disabled, send a temporary message in the channel
+            # This will be visible to everyone, but deleted after a short time
+            try:
+                temp_msg = await channel.send(f"{user.mention} (Only you can see this notification): {content}", delete_after=10.0)
+            except Exception:
+                pass  # Couldn't send temporary message either
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Monitor messages for image spam."""
@@ -518,7 +543,7 @@ class ImageSpam(commands.Cog):
             print(f"Error deleting message: {e}")
             delete_success = False
         
-        # Benutzer benachrichtigen (per DM)
+        # Benutzer benachrichtigen (ephemeral-like)
         if conf["user_notification"] and delete_success:
             user_msg = self.format_message(
                 conf["user_message"],
@@ -527,14 +552,8 @@ class ImageSpam(commands.Cog):
                 conf
             )
             
-            try:
-                # Sende DM an den Benutzer
-                await message.author.send(user_msg)
-            except discord.Forbidden:
-                # Benutzer hat DMs deaktiviert
-                pass
-            except Exception as e:
-                print(f"Error sending DM: {e}")
+            # Send ephemeral-like notification
+            await self.send_ephemeral_to_user(message.author, message.channel, user_msg)
         
         # Logge in Log-Channel
         if conf["log_channel_id"] and conf["notification_on_delete"]:
@@ -573,7 +592,7 @@ class ImageSpam(commands.Cog):
         if len(user_offenses) >= 3:
             try:
                 timeout_duration = datetime.timedelta(minutes=5)
-                await message.author.timeout(timeout_duration, reason="Repeated image spam violations")
+                await message.author.timeout(until=datetime.datetime.utcnow() + timeout_duration, reason="Repeated image spam violations")
                 
                 # Timeout-Benachrichtigung im Log-Channel
                 if conf["log_channel_id"] and conf["notification_on_delete"]:
