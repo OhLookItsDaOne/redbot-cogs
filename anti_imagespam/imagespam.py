@@ -172,10 +172,8 @@ class ImageSpam(commands.Cog):
         
         embed.add_field(
             name="📝 health check",
-            value="• `!imageprevent health` - checks if all required permissions are set\n"
+            value=" `!imageprevent health` - checks if all required permissions are set\n"
             inline=False
-        
-        
         )
         
         embed.add_field(
@@ -964,6 +962,7 @@ class ImageSpam(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))
+
 
 
 
