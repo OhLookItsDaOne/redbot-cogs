@@ -167,6 +167,15 @@ class ImageSpam(commands.Cog):
             title="🛡️ Image Prevention Commands",
             description="Manage the image spam prevention system.",
             color=discord.Color.blue()
+
+        )
+        
+        embed.add_field(
+            name="📝 health check",
+            value="• `!imageprevent health` - checks if all required permissions are set\n"
+            inline=False
+        )
+        
         )
         
         embed.add_field(
@@ -204,6 +213,14 @@ class ImageSpam(commands.Cog):
                   "• `!imageprevent monitoradmins <on/off>` - Monitor admins\n"
                   "• `!imageprevent forumthreads <on/off>` - Auto-exclude forum threads\n"
                   "• `!imageprevent discordlinks <on/off>` - Count Discord CDN image links",
+            inline=False
+        )
+
+        )
+        
+        embed.add_field(
+            name="📝 whitelistrole",
+            value="• `!imageprevent whitelistrole` - adds a role which gets ignored even if the channel is monitored\n"
             inline=False
         )
         
@@ -602,6 +619,16 @@ class ImageSpam(commands.Cog):
         example = "Your message in {{channel}} was deleted for having {{image_count}}/{{max_images}} images."
         await ctx.send(f"📝 **Available Placeholders**\n```{placeholders}```\n\n**Example:**\n`{example}`")
 
+    @imageprevent.command(name="whitelistrole")
+    async def whitelist_role(self, ctx, role: discord.Role):
+    """Add a role that's exempt from image limits."""
+    if not await self.check_admin_or_role(ctx):
+        return
+    async with self.config.guild(ctx.guild).whitelisted_roles() as whitelist:
+        if role.id not in whitelist:
+            whitelist.append(role.id)
+    await ctx.send(f"✅ {role.mention} added to whitelist.")
+    
     @imageprevent.command(name="channel")
     async def set_log_channel(self, ctx, channel: discord.TextChannel):
         """Set the channel where violation logs are posted."""
@@ -668,6 +695,38 @@ class ImageSpam(commands.Cog):
             await ctx.send("✅ **Admin monitoring is now OFF.** Admin messages are ignored.")
         else:
             await ctx.send("❌ Please use `on` or `off`.")
+
+
+    @imageprevent.command(name="health")
+    async def health_check(self, ctx):
+    """Check system health and permissions."""
+    issues = []
+    
+    # Check bot permissions
+    if not ctx.guild.me.guild_permissions.manage_messages:
+        issues.append("❌ Missing 'Manage Messages' permission")
+    
+    if not ctx.guild.me.guild_permissions.manage_channels:
+        issues.append("⚠️ Missing 'Manage Channels' permission")
+    
+    # Check log channel
+    conf = await self.config.guild(ctx.guild).all()
+    if conf["log_channel_id"]:
+        log_channel = ctx.guild.get_channel(conf["log_channel_id"])
+        if not log_channel:
+            issues.append("⚠️ Log channel not found")
+    
+    embed = discord.Embed(
+        title="🔧 System Health Check",
+        color=discord.Color.green() if not issues else discord.Color.red()
+    )
+    
+    if issues:
+        embed.description = "\n".join(issues)
+    else:
+        embed.description = "✅ All systems operational"
+    
+    await ctx.send(embed=embed)
 
     @imageprevent.command(name="forumthreads")
     async def toggle_forum_threads(self, ctx, state: str):
@@ -905,4 +964,5 @@ class ImageSpam(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))
+
 
