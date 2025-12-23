@@ -174,7 +174,7 @@ class ImageSpam(commands.Cog):
             name="📝 health check",
             value="• `!imageprevent health` - checks if all required permissions are set\n"
             inline=False
-        )
+        
         
         )
         
@@ -214,7 +214,7 @@ class ImageSpam(commands.Cog):
                   "• `!imageprevent forumthreads <on/off>` - Auto-exclude forum threads\n"
                   "• `!imageprevent discordlinks <on/off>` - Count Discord CDN image links",
             inline=False
-        )
+        
 
         )
         
@@ -964,5 +964,6 @@ class ImageSpam(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))
+
 
 
