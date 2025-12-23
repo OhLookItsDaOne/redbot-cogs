@@ -178,68 +178,68 @@ class ImageSpam(commands.Cog):
         )
         embed.add_field(
             name="📝 health check",
-            value="• `!imageprevent health` - checks if all required permissions are set\n",
+            value="• `imageprevent health` - checks if all required permissions are set\n",
             inline=False
         )
         embed.add_field(
             name="⚙️ Configuration",
-            value="• `!imageprevent image <1-10>` - Max images (default: 3)\n"
-                  "• `!imageprevent channel <#channel>` - Set log channel\n"
-                  "• `!imageprevent logtoggle <on/off>` - Toggle log notifications",
+            value="• `imageprevent image <1-10>` - Max images (default: 3)\n"
+                  "• `imageprevent channel <#channel>` - Set log channel\n"
+                  "• `imageprevent logtoggle <on/off>` - Toggle log notifications",
             inline=False
         )
         embed.add_field(
             name="🔔 Channel Message Settings",
-            value="• `!imageprevent channelmessage <on/off>` - Toggle channel messages\n"
-                  "• `!imageprevent channeltext <text>` - Set channel message text\n"
-                  "• `!imageprevent channelduration <seconds>` - Set message display duration\n"
-                  "• `!imageprevent usermessage <text>` - Set log user message\n"
-                  "• `!imageprevent logmessage <text>` - Set log channel message\n"
-                  "• `!imageprevent timeoutmessage <text>` - Set timeout notification message\n"
-                  "• `!imageprevent placeholders` - Show available placeholders",
+            value="• `imageprevent channelmessage <on/off>` - Toggle channel messages\n"
+                  "• `imageprevent channeltext <text>` - Set channel message text\n"
+                  "• `imageprevent channelduration <seconds>` - Set message display duration\n"
+                  "• `imageprevent usermessage <text>` - Set log user message\n"
+                  "• `imageprevent logmessage <text>` - Set log channel message\n"
+                  "• `imageprevent timeoutmessage <text>` - Set timeout notification message\n"
+                  "• `imageprevent placeholders` - Show available placeholders",
             inline=False
         )
         embed.add_field(
             name="⏰ Timeout Settings",
-            value="• `!imageprevent timeouttoggle <on/off>` - Toggle repeated offense timeouts\n"
-                  "• `!imageprevent timeoutthreshold <number>` - Set violations needed for timeout\n"
-                  "• `!imageprevent timeoutduration <minutes>` - Set timeout duration\n"
-                  "• `!imageprevent timeoutwindow <seconds>` - Set timeout window (default: 300s = 5min)",
+            value="• `imageprevent timeouttoggle <on/off>` - Toggle repeated offense timeouts\n"
+                  "• `imageprevent timeoutthreshold <number>` - Set violations needed for timeout\n"
+                  "• `imageprevent timeoutduration <minutes>` - Set timeout duration\n"
+                  "• `imageprevent timeoutwindow <seconds>` - Set timeout window (default: 300s = 5min)",
             inline=False
         )
         embed.add_field(
             name="📋 Monitoring Settings",
-            value="• `!imageprevent monitorall <on/off>` - Monitor all non-excluded\n"
-                  "• `!imageprevent monitoradmins <on/off>` - Monitor admins\n"
-                  "• `!imageprevent forumthreads <on/off>` - Auto-exclude forum threads\n"
-                  "• `!imageprevent discordlinks <on/off>` - Count Discord CDN image links",
+            value="• `imageprevent monitorall <on/off>` - Monitor all non-excluded\n"
+                  "• `imageprevent monitoradmins <on/off>` - Monitor admins\n"
+                  "• `imageprevent forumthreads <on/off>` - Auto-exclude forum threads\n"
+                  "• `imageprevent discordlinks <on/off>` - Count Discord CDN image links",
             inline=False
         )
         embed.add_field(
             name="👥 Role Whitelist",
-            value="• `!imageprevent whitelistrole <@role>` - Add role to whitelist (ignored)\n"
-                  "• `!imageprevent removewhitelistrole <@role>` - Remove role from whitelist\n"
-                  "• `!imageprevent listwhitelistroles` - List all whitelisted roles",
+            value="• `imageprevent whitelistrole <@role>` - Add role to whitelist (ignored)\n"
+                  "• `imageprevent removewhitelistrole <@role>` - Remove role from whitelist\n"
+                  "• `imageprevent listwhitelistroles` - List all whitelisted roles",
             inline=False
         )
         embed.add_field(
             name="🚫 Channel Management",
-            value="• `!imageprevent exclude <#channel>` - Exclude channel from monitoring\n"
-                  "• `!imageprevent include <#channel>` - Remove channel from exclusion list",
+            value="• `imageprevent exclude <#channel>` - Exclude channel from monitoring\n"
+                  "• `imageprevent include <#channel>` - Remove channel from exclusion list",
             inline=False
         )
         embed.add_field(
             name="📊 Information",
-            value="• `!imageprevent list` - Show settings\n"
-                  "• `!imageprevent channels` - Show all text channels and their status\n"
-                  "• `!imageprevent status` - Check channel status\n"
-                  "• `!imageprevent test <message>` - Test image counting in a message",
+            value="• `imageprevent list` - Show settings\n"
+                  "• `imageprevent channels` - Show all text channels and their status\n"
+                  "• `imageprevent status` - Check channel status\n"
+                  "• `imageprevent test <message>` - Test image counting in a message",
             inline=False
         )
         embed.add_field(
             name="👑 Admin Role",
-            value="• `!imageprevent setadminrole <@role>` - Set admin role\n"
-                  "• `!imageprevent clearadminrole` - Clear admin role",
+            value="• `imageprevent setadminrole <@role>` - Set admin role\n"
+                  "• `imageprevent clearadminrole` - Clear admin role",
             inline=False
         )
         embed.set_footer(text="Use !imageprevent placeholders to see available message placeholders")
@@ -1011,3 +1011,4 @@ class ImageSpam(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))
+
