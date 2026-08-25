@@ -37,61 +37,26 @@ class D1AutoMod(commands.Cog):
         await self.config.guild(guild).shortnames.set(mapping)
         return mapping
 
-    @commands.group(name="automod", invoke_without_command=True)
-    @commands.guild_only()
-    async def automod(self, ctx, rule: str = None, action: str = None, *, rest: str = None):
-        """
-        • !automod <rule>                # show info
-        • !automod list                  # list all rules
-        • !automod roles                 # list allowed roles
-        • !automod allowrole <role>      # grant access
-        • !automod removerole <role>     # revoke access
-        • !automod <rule> enable         # enable rule
-        • !automod <rule> disable        # disable rule
-        • !automod <rule> add  w1,w2     # add to allow list
-        • !automod <rule> remove w1,w2   # remove from allow list
-        """
-        if not rule:
-            return await ctx.send_help()
-
-        cmd = rule.lower()
-        if cmd == "list":
-            return await self._list_rules(ctx)
-        if cmd == "roles":
-            return await self._list_roles(ctx)
-        if cmd in ("allowrole", "removerole"):
-            return await ctx.send_help()
-
-        # rule-specific
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-
+    async def resolve_rule(self, ctx, rule: str):
+        """Resolve a shortname or rule ID to an AutoMod rule."""
         sm = await self.get_shortname_mapping(ctx.guild)
         rid = sm.get(rule) if not rule.isdigit() else int(rule)
         if not rid:
-            return await ctx.send("❌ Rule not found. Use `!automod list`.")
-
+            return None, None
         try:
-            r = await ctx.guild.fetch_automod_rule(rid)
+            return await ctx.guild.fetch_automod_rule(rid), None
         except Exception as e:
-            return await ctx.send(f"❌ Could not fetch rule: {e}")
+            return None, e
 
-        sub = (action or "").lower()
-        if sub == "enable":
-            await r.edit(enabled=True)
-            return await ctx.send(f"✅ **{r.name}** enabled.")
-        if sub == "disable":
-            await r.edit(enabled=False)
-            return await ctx.send(f"❌ **{r.name}** disabled.")
-        if sub == "add":
-            return await self._add_words(ctx, r, rest or "")
-        if sub == "remove":
-            return await self._remove_words(ctx, r, rest or "")
+    @commands.hybrid_group(name="automod")
+    @commands.guild_only()
+    async def automod(self, ctx):
+        """Manage Discord AutoMod rules."""
+        pass
 
-        # default: show info
-        return await self._show_info(ctx, r)
-
-    async def _list_rules(self, ctx):
+    @automod.command(name="list")
+    async def list_rules(self, ctx):
+        """List all AutoMod rules."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
         try:
@@ -108,7 +73,9 @@ class D1AutoMod(commands.Cog):
         ]
         return await ctx.send("**AutoMod rules:**\n" + "\n".join(lines))
 
-    async def _list_roles(self, ctx):
+    @automod.command(name="roles")
+    async def list_roles(self, ctx):
+        """List roles allowed to manage AutoMod rules."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
         allowed = await self.config.guild(ctx.guild).allowed_roles()
@@ -120,6 +87,7 @@ class D1AutoMod(commands.Cog):
     @automod.command(name="allowrole")
     @commands.has_guild_permissions(administrator=True)
     async def allowrole(self, ctx, role: discord.Role):
+        """Grant a role access to automod commands."""
         lst = await self.config.guild(ctx.guild).allowed_roles()
         if role.id in lst:
             return await ctx.send("❌ That role is already allowed.")
@@ -130,12 +98,75 @@ class D1AutoMod(commands.Cog):
     @automod.command(name="removerole")
     @commands.has_guild_permissions(administrator=True)
     async def removerole(self, ctx, role: discord.Role):
+        """Revoke a role's access to automod commands."""
         lst = await self.config.guild(ctx.guild).allowed_roles()
         if role.id not in lst:
-            return await ctx.send("❌ That role wasn’t allowed.")
+            return await ctx.send("❌ That role wasn't allowed.")
         lst.remove(role.id)
         await self.config.guild(ctx.guild).allowed_roles.set(lst)
         await ctx.send(f"❌ {role.mention} can no longer use automod commands.")
+
+    @automod.command(name="info")
+    async def info(self, ctx, rule: str):
+        """Show information about an AutoMod rule."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        await self._show_info(ctx, r)
+
+    @automod.command(name="enable")
+    async def enable(self, ctx, rule: str):
+        """Enable an AutoMod rule."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        await r.edit(enabled=True)
+        return await ctx.send(f"✅ **{r.name}** enabled.")
+
+    @automod.command(name="disable")
+    async def disable(self, ctx, rule: str):
+        """Disable an AutoMod rule."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        await r.edit(enabled=False)
+        return await ctx.send(f"❌ **{r.name}** disabled.")
+
+    @automod.command(name="add")
+    async def add_words(self, ctx, rule: str, words: str):
+        """Add words to an AutoMod rule's allow list (comma separated)."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        await self._add_words(ctx, r, words)
+
+    @automod.command(name="remove")
+    async def remove_words(self, ctx, rule: str, words: str):
+        """Remove words from an AutoMod rule's allow list (comma separated)."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        await self._remove_words(ctx, r, words)
 
     async def _show_info(self, ctx, r):
         trig = r.trigger
@@ -190,7 +221,7 @@ class D1AutoMod(commands.Cog):
     async def _add_words(self, ctx, r, words: str):
         old = set(getattr(r.trigger, "allow_list", []))
         if old is None:
-            return await ctx.send("❌ Only keyword‐style rules support an allow list.")
+            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
         new = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         merged = old | new
 
@@ -213,7 +244,7 @@ class D1AutoMod(commands.Cog):
     async def _remove_words(self, ctx, r, words: str):
         old = set(getattr(r.trigger, "allow_list", []))
         if old is None:
-            return await ctx.send("❌ Only keyword‐style rules support an allow list.")
+            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
         rem = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         kept = old - rem
 

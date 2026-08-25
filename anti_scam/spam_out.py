@@ -24,21 +24,21 @@ class ChannelGuard(commands.Cog):
         self.config.register_global(**default_global)
         self.offenses = {}
 
-    @commands.command()
+    @commands.hybrid_command()
     @commands.has_permissions(administrator=True)
     async def setguardchannel(self, ctx, channel: discord.TextChannel):
         """Sets the channel to be guarded (Admin only)."""
         await self.config.guard_channel_id.set(channel.id)
         await ctx.send(f"Guard channel set to: {channel.mention}")
 
-    @commands.command()
+    @commands.hybrid_command()
     @commands.has_permissions(administrator=True)
     async def setkickchannel(self, ctx, channel: discord.TextChannel):
         """Sets the channel for logging kicks/timeouts (Admin only)."""
         await self.config.kick_channel_id.set(channel.id)
         await ctx.send(f"Kick log channel set to: {channel.mention}")
 
-    @commands.command()
+    @commands.hybrid_command()
     @commands.has_permissions(administrator=True)
     async def setpunishmenttime(self, ctx, minutes: int):
         """Sets the duration for timeouts and message deletion (Admin only)."""
@@ -48,7 +48,7 @@ class ChannelGuard(commands.Cog):
         await self.config.punishment_duration.set(minutes)
         await ctx.send(f"Punishment time set to {minutes} minutes.")
     
-    @commands.command()
+    @commands.hybrid_command()
     @commands.has_permissions(administrator=True)
     async def resetoffenses(self, ctx):
         """Resets all offense counts (Admin only)."""

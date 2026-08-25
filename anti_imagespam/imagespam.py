@@ -161,7 +161,7 @@ class ImageSpam(commands.Cog):
         except Exception as e:
             print(f"[ImagePrevent] Error sending channel message: {e}")
 
-    @commands.group(name="imageprevent", invoke_without_command=True)
+    @commands.hybrid_group(name="imageprevent", invoke_without_command=True)
     @commands.guild_only()
     async def imageprevent(self, ctx):
         """Manage image spam prevention system."""
