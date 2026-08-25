@@ -1,4 +1,5 @@
 import discord
+import io
 import logging
 from redbot.core import commands, Config, app_commands
 
@@ -102,12 +103,27 @@ class UnsupportedMessageForwarder(commands.Cog):
             name=f"{message.author} in #{message.channel.name}",
             icon_url=message.author.avatar.url if message.author.avatar else None
         )
-        if message.attachments:
-            attachments = "\n".join([attachment.url for attachment in message.attachments])
-            embed.add_field(name="Attachments", value=attachments, inline=False)
+        embed.add_field(
+            name="📎 Original Message",
+            value=f"[Click to view original]({message.jump_url})",
+            inline=False
+        )
+
+        # Lade alle Attachments herunter und hänge sie als echte Dateien an
+        files = []
+        for attachment in message.attachments:
+            try:
+                data = await attachment.read()
+                files.append(discord.File(io.BytesIO(data), filename=attachment.filename))
+            except Exception as e:
+                logging.error(f"Error downloading attachment {attachment.filename}: {e}")
 
         try:
-            await target_channel.send(embed=embed)
+            await target_channel.send(
+                content=message.author.mention,
+                embed=embed,
+                files=files if files else None
+            )
             await interaction.response.send_message(f"✅ Message has been forwarded to {target_channel.mention}.", ephemeral=True)
         except discord.Forbidden:
             logging.error("Bot lacks permissions to send messages in the target channel.")
