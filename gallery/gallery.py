@@ -36,7 +36,15 @@ class Gallery(commands.Cog):
         )
 
     # ─── Commands ─────────────────────────────────────────────────────────
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @commands.hybrid_group(name="gallery", invoke_without_command=True, extras={"red_force_enable": True})
+    @commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def gallery(self, ctx):
+        """Manage image gallery channels."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @gallery.command(name="add")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def setgallery(self, ctx, channel: discord.TextChannel):
@@ -48,7 +56,7 @@ class Gallery(commands.Cog):
             else:
                 await ctx.send(f"❌ {channel.mention} is already a gallery channel.")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="remove")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def removegallery(self, ctx, channel: discord.TextChannel):
@@ -60,7 +68,7 @@ class Gallery(commands.Cog):
             else:
                 await ctx.send(f"❌ {channel.mention} is not a gallery channel.")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="list")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def listgallery(self, ctx):
@@ -75,15 +83,15 @@ class Gallery(commands.Cog):
             names.append(ch.mention if ch else f"`{cid}` (deleted)")
         await ctx.send("Gallery channels:\n" + "\n".join(names))
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="threadname")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def setthreadname(self, ctx, *, name: str):
-        """Sets the thread name template. Use `{author}` for the poster's name (Admin only)."""
+        """Sets the thread name template. Use `{user}` for the poster's name (Admin only)."""
         await self.config.guild(ctx.guild).thread_name.set(name)
         await ctx.send(f"✅ Thread name template set to: `{name}`")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="hintduration")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def sethintduration(self, ctx, seconds: int):
@@ -94,7 +102,7 @@ class Gallery(commands.Cog):
         await self.config.guild(ctx.guild).hint_duration.set(seconds)
         await ctx.send(f"✅ Hint duration set to **{seconds} seconds**.")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="admins")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def toggleadmins(self, ctx, state: str):
@@ -108,7 +116,7 @@ class Gallery(commands.Cog):
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="togglemessage")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def togglethreadmessage(self, ctx, state: str):
@@ -122,7 +130,7 @@ class Gallery(commands.Cog):
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="message")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def setthreadmessage(self, ctx, *, text: str):
@@ -130,7 +138,7 @@ class Gallery(commands.Cog):
         await self.config.guild(ctx.guild).thread_message.set(text)
         await ctx.send(f"✅ Thread message set to:\n`{text}`")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @gallery.command(name="status")
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def gallerystatus(self, ctx):
