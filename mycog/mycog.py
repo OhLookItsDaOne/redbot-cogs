@@ -1,7 +1,7 @@
 import logging
 import discord
 import asyncio
-from redbot.core import commands, Config
+from redbot.core import commands, Config, app_commands
 
 logging.basicConfig(level=logging.INFO)
 
@@ -57,6 +57,7 @@ class ForumPostNotifier(commands.Cog):
     # Command to set the troubleshooting message (Admin only)
     @commands.hybrid_command()
     @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
     async def setmessage(self, ctx, *, message: str):
         """Sets the troubleshooting message."""
         if not message.strip():

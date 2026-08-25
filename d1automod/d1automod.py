@@ -1,5 +1,5 @@
 import discord
-from redbot.core import commands, Config
+from redbot.core import commands, Config, app_commands
 from typing import Set
 
 class D1AutoMod(commands.Cog):
@@ -50,6 +50,7 @@ class D1AutoMod(commands.Cog):
 
     @commands.hybrid_group(name="automod")
     @commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
     async def automod(self, ctx):
         """Manage Discord AutoMod rules."""
         pass

@@ -1,5 +1,5 @@
 import discord
-from redbot.core import commands, Config
+from redbot.core import commands, Config, app_commands
 from redbot.core.utils.chat_formatting import pagify, box
 import datetime
 from typing import Optional, List
@@ -163,6 +163,7 @@ class ImageSpam(commands.Cog):
 
     @commands.hybrid_group(name="imageprevent", invoke_without_command=True)
     @commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
     async def imageprevent(self, ctx):
         """Manage image spam prevention system."""
         if ctx.invoked_subcommand is None:
