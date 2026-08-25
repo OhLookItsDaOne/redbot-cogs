@@ -95,7 +95,12 @@ class CogUpdater(commands.Cog):
                 if name == self_ext or name in known:
                     continue
                 for repo_dir in repos_folder.iterdir():
-                    if repo_dir.is_dir() and (repo_dir / name).is_dir():
+                    # Only consider repos that are actual git repositories
+                    if (
+                        repo_dir.is_dir()
+                        and (repo_dir / ".git").exists()
+                        and (repo_dir / name).is_dir()
+                    ):
                         add(name, repo_dir)
                         break
 
@@ -109,6 +114,20 @@ class CogUpdater(commands.Cog):
             return None
         shutil.copytree(src, installed_dir, dirs_exist_ok=True)
         return installed_dir
+
+    async def _reload_cog(self, name: str) -> None:
+        """Reload a cog extension the way Red's own ``[p]reload`` does.
+
+        Red overrides ``load_extension`` to expect a ``ModuleSpec`` rather than a
+        package name, so ``bot.reload_extension(name)`` cannot be used directly.
+        """
+        await self.bot.unload_extension(name)
+        await self.bot.remove_loaded_package(name)
+        spec = await self.bot._cog_mgr.find_cog(name)
+        if spec is None:
+            raise RuntimeError(f"Could not find cog spec for {name!r}")
+        await self.bot.load_extension(spec)
+        await self.bot.add_loaded_package(name)
 
     @commands.hybrid_command(name="cogupdate", extras={"red_force_enable": True})
     @commands.is_owner()
@@ -144,7 +163,7 @@ class CogUpdater(commands.Cog):
         reloaded, failed = [], []
         for name in to_reload:
             try:
-                await self.bot.reload_extension(name)
+                await self._reload_cog(name)
                 reloaded.append(name)
             except Exception as e:
                 failed.append((name, str(e)))
