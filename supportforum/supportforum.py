@@ -5,8 +5,9 @@ from redbot.core import commands, Config, app_commands
 
 logging.basicConfig(level=logging.INFO)
 
-class ForumPostNotifier(commands.Cog):
-    """A cog to send troubleshooting steps in response to new forum posts."""
+
+class SupportForum(commands.Cog):
+    """Automatically posts a troubleshooting message in new forum posts."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -17,14 +18,21 @@ class ForumPostNotifier(commands.Cog):
         }
         self.config.register_global(**default_global)
 
-    # Command to set the parent channel ID (numeric)
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @commands.hybrid_group(name="forumhelp", invoke_without_command=True, extras={"red_force_enable": True})
+    @commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def forumhelp(self, ctx):
+        """Manage support forum troubleshooting settings."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @forumhelp.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def setthreadid(self, ctx, channel_id: int):
-        """Sets the parent channel ID dynamically via command."""
+    async def setchannel(self, ctx, channel_id: int):
+        """Sets the parent channel ID for tracked forum posts."""
         await self.config.parent_channel_id.set(channel_id)
-        # Versuche, den Kanal zuerst über den Cache zu holen
+        # Try to fetch the channel from cache first
         channel = ctx.guild.get_channel(channel_id)
         if not channel:
             try:
@@ -36,11 +44,10 @@ class ForumPostNotifier(commands.Cog):
         else:
             await ctx.send(f"Parent channel ID has been set to: {channel_id} (channel not found)")
 
-    # Command to display the currently tracked parent channel
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @forumhelp.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def getthreadid(self, ctx):
+    async def getchannel(self, ctx):
         """Displays the currently tracked parent channel ID."""
         channel_id = await self.config.parent_channel_id()
         if channel_id is None:
@@ -58,8 +65,7 @@ class ForumPostNotifier(commands.Cog):
         else:
             await ctx.send("The stored parent channel ID is invalid or no longer accessible.")
 
-    # Command to set the troubleshooting message (Admin only)
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @forumhelp.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def setmessage(self, ctx, *, message: str):
@@ -70,8 +76,7 @@ class ForumPostNotifier(commands.Cog):
         await self.config.troubleshooting_message.set(message)
         await ctx.send("Troubleshooting message has been updated.")
 
-    # Command to display the current troubleshooting message
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @forumhelp.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def getmessage(self, ctx):
@@ -93,7 +98,7 @@ class ForumPostNotifier(commands.Cog):
             await asyncio.sleep(3)  # Wait a bit for initialization
             message = await self.config.troubleshooting_message()
             if not message:
-                message = "No troubleshooting message set. Use !setmessage to configure it."
+                message = "No troubleshooting message set. Use !forumhelp setmessage to configure it."
             try:
                 await thread.send(message)
                 logging.info(f"Message sent successfully in thread: {thread.name}")
@@ -101,3 +106,7 @@ class ForumPostNotifier(commands.Cog):
                 logging.error(f"Bot lacks permissions to send messages in thread: {thread.name}")
             except discord.HTTPException as e:
                 logging.error(f"Failed to send message in thread {thread.name}: {e}")
+
+
+async def setup(bot):
+    await bot.add_cog(SupportForum(bot))

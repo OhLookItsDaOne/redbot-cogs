@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Instant-ban channel",
+    "description": "Any message posted in the configured channel results in an instant ban. The user is automatically unbanned after a configurable duration, and Discord deletes the user's messages from the last configurable period.",
+    "install_msg": "Cog installed. Configure it with `[p]banchannel`.",
+    "end_user_data_statement": "This cog stores only guild configuration (channel IDs and durations) and pending auto-unban timestamps. No end user data is stored."
+}

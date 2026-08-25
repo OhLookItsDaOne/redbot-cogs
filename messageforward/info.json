@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Forward messages via command or context menu",
+    "description": "Lets users with an allowed role forward a message to a configured target channel via the `forward` command or the message context menu. The forwarded message mentions the author, links back to the original and includes attachments.",
+    "install_msg": "Cog installed. Configure it with `[p]forward settarget` and `[p]forward addrole`.",
+    "end_user_data_statement": "This cog stores only guild configuration (target channel ID and allowed role IDs). No end user data is stored."
+}

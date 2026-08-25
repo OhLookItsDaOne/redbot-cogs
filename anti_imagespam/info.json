@@ -1,7 +1,0 @@
-{
-    "author": ["OhLookItsDaOne"],
-    "short": "Advanced anti-image-spam protection",
-    "description": "Scans messages in configured channels for image attachments and image links, deletes messages over the limit and optionally times out repeat offenders. Fully configurable per guild.",
-    "install_msg": "Cog installed. Configure it with `[p]imageprevent`.",
-    "end_user_data_statement": "This cog only stores the timestamps of image-spam violations in memory for the timeout feature. No end user data is stored persistently."
-}

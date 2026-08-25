@@ -10,12 +10,12 @@ MESSAGE_LINK_RE = re.compile(
 )
 
 
-class UnsupportedMessageForwarder(commands.Cog):
-    """A cog to forward messages to a configured target channel.
+class MessageForwarder(commands.Cog):
+    """Forward messages to a configured target channel.
 
-    Supports three ways to forward:
+    Supported ways to forward:
     - Message context menu (right click -> Apps -> Forward to Support)
-    - Slash/prefix command ``/forward <message link>`` (or ``!unsupported`` as a reply)
+    - Slash/prefix command ``/forward message <message link>`` (or as a reply)
     The forwarded message mentions the author, links back to the original message
     and includes attachments.
     """
@@ -29,71 +29,26 @@ class UnsupportedMessageForwarder(commands.Cog):
         }
         self.config.register_global(**default_global)
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    async def settarget(self, ctx, channel: discord.TextChannel):
-        """Sets the target channel where forwarded messages will be sent. (Admin only)"""
-        await self.config.target_channel_id.set(channel.id)
-        await ctx.send(f"Target channel has been set to: {channel.mention}")
-
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    async def addunsupportedrole(self, ctx, role: discord.Role):
-        """Adds a role allowed to use the Forward to Support command. (Admin only)"""
-        roles = await self.config.allowed_role_ids()
-        if role.id not in roles:
-            roles.append(role.id)
-            await self.config.allowed_role_ids.set(roles)
-            await ctx.send(f"Role **{role.name}** has been added to allowed roles.")
-        else:
-            await ctx.send(f"Role **{role.name}** is already allowed.")
-
-    @commands.hybrid_command(name="removeunsupportedrole", extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    async def _removeunsupportedrole(self, ctx, role: discord.Role):
-        """Removes a role from the allowed roles. (Admin only)"""
-        roles = await self.config.allowed_role_ids()
-        if role.id in roles:
-            roles.remove(role.id)
-            await self.config.allowed_role_ids.set(roles)
-            await ctx.send(f"Role **{role.name}** has been removed from allowed roles.")
-        else:
-            await ctx.send(f"Role **{role.name}** is not in the allowed roles.")
-
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    @app_commands.default_permissions(administrator=True)
-    async def listroles(self, ctx):
-        """Lists the roles allowed to use the Forward to Support command."""
-        roles = await self.config.allowed_role_ids()
-        if not roles:
-            await ctx.send("No roles have been set to use this command.")
-        else:
-            role_names = []
-            for role_id in roles:
-                role = ctx.guild.get_role(role_id)
-                if role:
-                    role_names.append(role.name)
-            await ctx.send("Allowed roles: " + ", ".join(role_names))
-
-    @commands.hybrid_command(
-        name="forward",
-        aliases=["unsupported"],
-        extras={"red_force_enable": True},
-    )
+    @commands.hybrid_group(name="forward", invoke_without_command=True, extras={"red_force_enable": True})
     @commands.guild_only()
-    async def forward(self, ctx, message_link: str = None):
+    async def forward(self, ctx):
+        """Forward messages to the configured target channel."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @forward.command(name="message", aliases=["unsupported"])
+    async def forward_message(self, ctx, message_link: str = None):
         """Forwards a message to the configured target channel.
 
         Provide a Discord message link, or use this command as a reply to a message.
 
         **Examples:**
-        - `/forward https://discord.com/channels/123/456/789`
-        - Reply to a message and type `!unsupported`
+        - `/forward message https://discord.com/channels/123/456/789`
+        - Reply to a message and type `!forward message` (or `!unsupported`)
         """
         respond = lambda msg: ctx.send(msg)
 
-        # Bestimme die Ziel-Nachricht: aus Link oder Reply
+        # Determine the target message: from link or reply
         target_message = None
         if message_link:
             target_message = await self._resolve_link(ctx, message_link, respond)
@@ -113,6 +68,56 @@ class UnsupportedMessageForwarder(commands.Cog):
             return
 
         await self._forward(ctx.author, ctx.guild, target_message, respond)
+
+    @forward.command(name="settarget")
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def settarget(self, ctx, channel: discord.TextChannel):
+        """Sets the target channel where forwarded messages will be sent (Admin only)."""
+        await self.config.target_channel_id.set(channel.id)
+        await ctx.send(f"Target channel has been set to: {channel.mention}")
+
+    @forward.command(name="addrole")
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def addrole(self, ctx, role: discord.Role):
+        """Adds a role allowed to use the forward command (Admin only)."""
+        roles = await self.config.allowed_role_ids()
+        if role.id not in roles:
+            roles.append(role.id)
+            await self.config.allowed_role_ids.set(roles)
+            await ctx.send(f"Role **{role.name}** has been added to allowed roles.")
+        else:
+            await ctx.send(f"Role **{role.name}** is already allowed.")
+
+    @forward.command(name="removerole")
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def removerole(self, ctx, role: discord.Role):
+        """Removes a role from the allowed roles (Admin only)."""
+        roles = await self.config.allowed_role_ids()
+        if role.id in roles:
+            roles.remove(role.id)
+            await self.config.allowed_role_ids.set(roles)
+            await ctx.send(f"Role **{role.name}** has been removed from allowed roles.")
+        else:
+            await ctx.send(f"Role **{role.name}** is not in the allowed roles.")
+
+    @forward.command(name="listroles")
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def listroles(self, ctx):
+        """Lists the roles allowed to use the forward command."""
+        roles = await self.config.allowed_role_ids()
+        if not roles:
+            await ctx.send("No roles have been set to use this command.")
+        else:
+            role_names = []
+            for role_id in roles:
+                role = ctx.guild.get_role(role_id)
+                if role:
+                    role_names.append(role.name)
+            await ctx.send("Allowed roles: " + ", ".join(role_names))
 
     async def _resolve_link(self, ctx, link: str, respond) -> discord.Message:
         """Parses a Discord message link and fetches the target message."""
@@ -156,7 +161,7 @@ class UnsupportedMessageForwarder(commands.Cog):
 
         target_channel_id = await self.config.target_channel_id()
         if target_channel_id is None:
-            await respond("❌ No target channel has been set. Use `/settarget` to configure one.")
+            await respond("❌ No target channel has been set. Use `/forward settarget` to configure one.")
             return
 
         target_channel = guild.get_channel(target_channel_id)
@@ -168,9 +173,9 @@ class UnsupportedMessageForwarder(commands.Cog):
                 await respond("❌ The target channel is invalid or not accessible.")
                 return
 
-        # Layout: Mention zuerst, dann Text, dann Original-Link, dann Attachments.
-        # Attachments werden als URLs eingefügt - Discord rendert Bilder automatisch
-        # als Embed (kein Download/Speicherverbrauch auf dem Server).
+        # Layout: Mention first, then text, then original link, then attachments.
+        # Attachments are inserted as URLs - Discord renders images automatically
+        # as embeds (no download/storage on the server).
         lines = [f"**Forwarded message from:** {message.author.mention}"]
         if message.content:
             lines.append(message.content)
@@ -192,7 +197,7 @@ class UnsupportedMessageForwarder(commands.Cog):
 
 @app_commands.context_menu(name="Forward to Support", extras={"red_force_enable": True})
 async def forward_to_support(interaction: discord.Interaction, message: discord.Message):
-    cog = interaction.client.get_cog("UnsupportedMessageForwarder")
+    cog = interaction.client.get_cog("MessageForwarder")
     if cog is None:
         await interaction.response.send_message("❌ Cog is not loaded.", ephemeral=True)
         return

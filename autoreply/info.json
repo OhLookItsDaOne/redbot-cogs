@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Keyword-based auto replies",
+    "description": "Scans messages in configured channels for configured keywords and automatically replies with the associated help information. Includes per-user cooldowns, ignored roles and thread scanning.",
+    "install_msg": "Cog installed. Configure it with `[p]autoreply`.",
+    "end_user_data_statement": "This cog stores the timestamp of the last help message sent per user per keyword to enforce cooldowns. This data can be cleared by an admin with `[p]autoreply cleartimeouts`."
+}

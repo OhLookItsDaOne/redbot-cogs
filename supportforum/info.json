@@ -2,6 +2,6 @@
     "author": ["OhLookItsDaOne"],
     "short": "Forum troubleshooting messages",
     "description": "Automatically posts a configured troubleshooting message when a new thread is created in a designated forum channel.",
-    "install_msg": "Cog installed. Configure it with `[p]setthreadid` and `[p]setmessage`.",
+    "install_msg": "Cog installed. Configure it with `[p]forumhelp`.",
     "end_user_data_statement": "This cog stores only guild configuration (forum channel ID and troubleshooting message). No end user data is stored."
 }

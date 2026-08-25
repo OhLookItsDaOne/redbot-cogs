@@ -2,7 +2,7 @@ import discord
 from redbot.core import commands, Config, app_commands
 from typing import Set
 
-class D1AutoMod(commands.Cog):
+class AutoMod(commands.Cog):
     """AutoMod: Manage Discord AutoMod rules via simple commands."""
 
     def __init__(self, bot):
@@ -265,4 +265,4 @@ class D1AutoMod(commands.Cog):
         )
 
 async def setup(bot):
-    await bot.add_cog(D1AutoMod(bot))
+    await bot.add_cog(AutoMod(bot))

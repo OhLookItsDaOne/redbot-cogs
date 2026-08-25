@@ -7,10 +7,10 @@ from redbot.core import commands, Config, app_commands
 logging.basicConfig(level=logging.INFO)
 
 
-class ChannelGuard(commands.Cog):
-    """Guard a channel against spammers.
+class BanChannel(commands.Cog):
+    """Ban anyone who posts in the configured channel.
 
-    Any message posted in the guarded channel instantly results in:
+    Any message posted in the ban channel instantly results in:
     - the user being banned (auto-unbanned after a configurable duration)
     - Discord deleting the user's messages from the last configurable period
       (``delete_message_seconds``) server-side, in a single API call.
@@ -20,8 +20,8 @@ class ChannelGuard(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=112233445566)
         default_global = {
-            "guard_channel_id": None,
-            "kick_channel_id": None,          # log channel
+            "ban_channel_id": None,
+            "log_channel_id": None,           # log channel
             "delete_message_seconds": 3600,   # how far back Discord deletes on ban (1 hour)
             "ban_duration_hours": 24,         # auto-unban after this many hours
             "scheduled_unbans": {},           # {guild_id: {user_id: unban_timestamp}}
@@ -81,7 +81,7 @@ class ChannelGuard(commands.Cog):
         await self.config.scheduled_unbans.set(scheduled)
 
     async def _send_log(self, guild, text: str):
-        log_channel_id = await self.config.kick_channel_id()
+        log_channel_id = await self.config.log_channel_id()
         if not log_channel_id:
             return
         channel = guild.get_channel(log_channel_id)
@@ -92,26 +92,34 @@ class ChannelGuard(commands.Cog):
                 logging.exception("Failed to send log message")
 
     # ─── Commands ─────────────────────────────────────────────────────────
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
+    @commands.hybrid_group(name="banchannel", invoke_without_command=True, extras={"red_force_enable": True})
+    @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    async def setguardchannel(self, ctx, channel: discord.TextChannel):
-        """Sets the channel to be guarded (Admin only)."""
-        await self.config.guard_channel_id.set(channel.id)
-        await ctx.send(f"Guard channel set to: {channel.mention}")
+    async def banchannel(self, ctx):
+        """Manage the instant-ban channel."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
 
-    @commands.hybrid_command(name="setlogchannel", aliases=["setkickchannel"], extras={"red_force_enable": True})
+    @banchannel.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def setlogchannel(self, ctx, channel: discord.TextChannel):
-        """Sets the channel for logging timeouts/bans (Admin only)."""
-        await self.config.kick_channel_id.set(channel.id)
+    async def setchannel(self, ctx, channel: discord.TextChannel):
+        """Sets the channel in which posting results in an instant ban (Admin only)."""
+        await self.config.ban_channel_id.set(channel.id)
+        await ctx.send(f"Ban channel set to: {channel.mention}")
+
+    @banchannel.command()
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def setlog(self, ctx, channel: discord.TextChannel):
+        """Sets the channel for logging bans (Admin only)."""
+        await self.config.log_channel_id.set(channel.id)
         await ctx.send(f"Log channel set to: {channel.mention}")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @banchannel.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def setdeleteseconds(self, ctx, seconds: int):
+    async def deleteseconds(self, ctx, seconds: int):
         """Sets how far back Discord deletes messages on ban, in seconds (Admin only).
 
         Examples: 3600 = 1 hour, 21600 = 6 hours, 86400 = 24 hours, up to 604800 (7 days).
@@ -130,10 +138,10 @@ class ChannelGuard(commands.Cog):
         label = f"**{seconds} seconds** ({hours:.1f} hours)" if seconds > 0 else "**0** (nothing)"
         await ctx.send(f"Ban message deletion set to {label}.")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @banchannel.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def setbanduration(self, ctx, hours: int):
+    async def banduration(self, ctx, hours: int):
         """Sets how long a ban lasts before auto-unban (Admin only)."""
         if hours <= 0:
             await ctx.send("❌ Duration must be greater than 0 hours.")
@@ -141,21 +149,21 @@ class ChannelGuard(commands.Cog):
         await self.config.ban_duration_hours.set(hours)
         await ctx.send(f"Ban duration set to **{hours} hour(s)** (auto-unban after that).")
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
+    @banchannel.command()
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def guardstatus(self, ctx):
-        """Shows the current guard configuration (Admin only)."""
-        guard_id = await self.config.guard_channel_id()
-        log_id = await self.config.kick_channel_id()
+    async def status(self, ctx):
+        """Shows the current ban channel configuration (Admin only)."""
+        ban_id = await self.config.ban_channel_id()
+        log_id = await self.config.log_channel_id()
         del_seconds = await self.config.delete_message_seconds()
         ban_h = await self.config.ban_duration_hours()
 
-        guard = ctx.guild.get_channel(guard_id) if guard_id else None
+        banch = ctx.guild.get_channel(ban_id) if ban_id else None
         logch = ctx.guild.get_channel(log_id) if log_id else None
 
         text = (
-            f"**Guard channel:** {guard.mention if guard else '❌ Not set'}\n"
+            f"**Ban channel:** {banch.mention if banch else '❌ Not set'}\n"
             f"**Log channel:** {logch.mention if logch else '❌ Not set'}\n"
             f"**Ban message deletion:** {del_seconds} seconds ({del_seconds/3600:.1f} hours)\n"
             f"**Ban duration:** {ban_h} hour(s) (auto-unban)"
@@ -168,19 +176,19 @@ class ChannelGuard(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
-        guard_channel_id = await self.config.guard_channel_id()
-        if guard_channel_id is None or message.channel.id != guard_channel_id:
+        ban_channel_id = await self.config.ban_channel_id()
+        if ban_channel_id is None or message.channel.id != ban_channel_id:
             return
 
         member = message.author
         user_id = member.id
 
-        # Sofortiger Ban für jede Nachricht im Guard-Channel
+        # Instant ban for any message in the ban channel
         try:
             del_seconds = await self.config.delete_message_seconds()
             ban_hours = await self.config.ban_duration_hours()
             await member.ban(
-                reason=f"Posted in guard channel; banned for {ban_hours} hours.",
+                reason=f"Posted in ban channel; banned for {ban_hours} hours.",
                 delete_message_seconds=del_seconds,
             )
             logging.info(
@@ -200,17 +208,17 @@ class ChannelGuard(commands.Cog):
 
         await self._send_log(
             message.guild,
-            f"🚫 {member.mention} banned (posted in guard channel). "
+            f"🚫 {member.mention} banned (posted in ban channel). "
             f"Auto-unban in {ban_hours} hour(s). "
             f"Discord deleting last {del_seconds} seconds of messages...",
         )
 
-        # Auto-Unban planen
+        # Schedule auto-unban
         await self._schedule_unban(message.guild.id, user_id, ban_hours)
         await self._send_log(
             message.guild, f"✅ Ban for {member.mention} scheduled for auto-unban."
         )
 
 
-def setup(bot):
-    bot.add_cog(ChannelGuard(bot))
+async def setup(bot):
+    await bot.add_cog(BanChannel(bot))

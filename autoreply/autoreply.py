@@ -5,7 +5,7 @@ from redbot.core import commands, Config, app_commands
 import re
 import logging
 
-class KeywordHelp(commands.Cog):
+class AutoReply(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=123456789)
@@ -145,33 +145,33 @@ class KeywordHelp(commands.Cog):
                         response_message += "\n".join(valid_responses)
                         await message.channel.send(response_message)
 
-    @commands.hybrid_group(name="kw", extras={"red_force_enable": True})
+    @commands.hybrid_group(name="autoreply", extras={"red_force_enable": True})
     @app_commands.default_permissions(administrator=True)
-    async def kw(self, ctx):
+    async def autoreply(self, ctx):
         """Manage keywords and settings."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
-    @kw.command()
+    @autoreply.command()
     async def list(self, ctx):
         """List all available commands for the keyword manager."""
         commands_list = """
         Here are the available commands for managing keywords:
 
-        **!kw addkeyword <keyword> <response>** - Add a new keyword and response
-        **!kw removekeyword <keyword>** - Remove a keyword
-        **!kw settimeout <minutes>** - Set the cooldown period for user responses
-        **!kw addchannel <channel>** - Add a channel to the monitored list
-        **!kw removechannel <channel>** - Remove a channel from the monitored list
-        **!kw setdebugchannel <channel>** - Set a debug channel for logging errors
-        **!kw addignoredrole <role>** - Add a role to the ignored roles list
-        **!kw removeignoredrole <role>** - Remove a role from the ignored roles list
+        **!autoreply addkeyword <keyword> <response>** - Add a new keyword and response
+        **!autoreply removekeyword <keyword>** - Remove a keyword
+        **!autoreply settimeout <minutes>** - Set the cooldown period for user responses
+        **!autoreply addchannel <channel>** - Add a channel to the monitored list
+        **!autoreply removechannel <channel>** - Remove a channel from the monitored list
+        **!autoreply setdebugchannel <channel>** - Set a debug channel for logging errors
+        **!autoreply addignoredrole <role>** - Add a role to the ignored roles list
+        **!autoreply removeignoredrole <role>** - Remove a role from the ignored roles list
 
-        Usage: Type `!kw <command>` to execute any of the above actions.
+        Usage: Type `!autoreply <command>` to execute any of the above actions.
         """
         await ctx.send(commands_list)
 
-    @kw.command()
+    @autoreply.command()
     async def conf(self, ctx):
         """Display the current configuration of keywords, monitored channels, and ignored roles."""
         keywords = await self.config.keywords()
@@ -210,7 +210,7 @@ class KeywordHelp(commands.Cog):
 
         await ctx.send(response_message)
 
-    @kw.command()
+    @autoreply.command()
     async def cleartimeouts(self, ctx):
         """Reset all user timeouts."""
         if not ctx.author.guild_permissions.administrator:
@@ -220,7 +220,7 @@ class KeywordHelp(commands.Cog):
         await self.config.user_help_times.set({})
         await ctx.send("All user timeouts have been reset.")
 
-    @kw.command()
+    @autoreply.command()
     async def addkeyword(self, ctx, keyword: str, response: str):
         """Add a keyword-response pair."""
         if not ctx.author.guild_permissions.administrator:
@@ -232,7 +232,7 @@ class KeywordHelp(commands.Cog):
         await self.config.keywords.set(keywords)
         await ctx.send(f"Added keyword: `{keyword}` with response: `{response}`")
 
-    @kw.command()
+    @autoreply.command()
     async def removekeyword(self, ctx, keyword: str):
         """Remove a keyword."""
         if not ctx.author.guild_permissions.administrator:
@@ -247,7 +247,7 @@ class KeywordHelp(commands.Cog):
         else:
             await ctx.send(f"Keyword `{keyword}` not found.")
 
-    @kw.command()
+    @autoreply.command()
     async def settimeout(self, ctx, minutes: int):
         """Set the cooldown duration in minutes."""
         if not ctx.author.guild_permissions.administrator:
@@ -257,7 +257,7 @@ class KeywordHelp(commands.Cog):
         await self.config.timeout_minutes.set(minutes)
         await ctx.send(f"Timeout set to {minutes} minutes.")
 
-    @kw.command()
+    @autoreply.command()
     async def addchannel(self, ctx, channel: discord.TextChannel):
         """Add a channel to the monitored list."""
         if not ctx.author.guild_permissions.administrator:
@@ -270,7 +270,7 @@ class KeywordHelp(commands.Cog):
             await self.config.channel_ids.set(channel_ids)
             await ctx.send(f"Added channel {channel.mention} to the monitored list.")
 
-    @kw.command()
+    @autoreply.command()
     async def removechannel(self, ctx, channel: discord.TextChannel):
         """Remove a channel from the monitored list."""
         if not ctx.author.guild_permissions.administrator:
@@ -283,7 +283,7 @@ class KeywordHelp(commands.Cog):
             await self.config.channel_ids.set(channel_ids)
             await ctx.send(f"Removed channel {channel.mention} from the monitored list.")
 
-    @kw.command()
+    @autoreply.command()
     async def setdebugchannel(self, ctx, channel: discord.TextChannel):
         """Set the debug log channel."""
         if not ctx.author.guild_permissions.administrator:
@@ -293,7 +293,7 @@ class KeywordHelp(commands.Cog):
         await self.config.debug_channel_id.set(channel.id)
         await ctx.send(f"Set debug channel to {channel.mention}.")
 
-    @kw.command()
+    @autoreply.command()
     async def addignoredrole(self, ctx, role: discord.Role):
         """Add a role to the ignored list."""
         if not ctx.author.guild_permissions.administrator:
@@ -306,7 +306,7 @@ class KeywordHelp(commands.Cog):
             await self.config.ignored_roles.set(ignored_roles)
             await ctx.send(f"Added role {role.name} to ignored list.")
 
-    @kw.command()
+    @autoreply.command()
     async def removeignoredrole(self, ctx, role: discord.Role):
         """Remove a role from the ignored list."""
         if not ctx.author.guild_permissions.administrator:
@@ -319,5 +319,5 @@ class KeywordHelp(commands.Cog):
             await self.config.ignored_roles.set(ignored_roles)
             await ctx.send(f"Removed role {role.name} from ignored list.")
 
-def setup(bot):
-    bot.add_cog(KeywordHelp(bot))
+async def setup(bot):
+    await bot.add_cog(AutoReply(bot))
