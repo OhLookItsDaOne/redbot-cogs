@@ -162,7 +162,7 @@ class ImageSpam(commands.Cog):
         except Exception as e:
             print(f"[ImagePrevent] Error sending channel message: {e}")
 
-    @commands.hybrid_group(name="imageprevent", invoke_without_command=True)
+    @commands.hybrid_group(name="imageprevent", invoke_without_command=True, extras={"red_force_enable": True})
     @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def imageprevent(self, ctx):
@@ -170,7 +170,7 @@ class ImageSpam(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send_help("imageprevent")
 
-    @commands.hybrid_group(name="imagepreventinfo", invoke_without_command=True)
+    @commands.hybrid_group(name="imagepreventinfo", invoke_without_command=True, extras={"red_force_enable": True})
     @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def imagepreventinfo(self, ctx):

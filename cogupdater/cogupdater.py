@@ -60,7 +60,7 @@ class CogUpdater(commands.Cog):
                 groups.setdefault(str(root), []).append(name)
         return groups
 
-    @commands.hybrid_command(name="cogupdate")
+    @commands.hybrid_command(name="cogupdate", extras={"red_force_enable": True})
     @commands.is_owner()
     @app_commands.default_permissions(administrator=True)
     async def cogupdate(self, ctx):

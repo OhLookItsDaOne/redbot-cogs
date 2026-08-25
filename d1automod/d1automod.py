@@ -48,7 +48,7 @@ class D1AutoMod(commands.Cog):
         except Exception as e:
             return None, e
 
-    @commands.hybrid_group(name="automod")
+    @commands.hybrid_group(name="automod", extras={"red_force_enable": True})
     @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def automod(self, ctx):

@@ -21,14 +21,14 @@ class UnsupportedMessageForwarder(commands.Cog):
         }
         self.config.register_global(**default_global)
 
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     async def settarget(self, ctx, channel: discord.TextChannel):
         """Sets the target channel where forwarded messages will be sent. (Admin only)"""
         await self.config.target_channel_id.set(channel.id)
         await ctx.send(f"Target channel has been set to: {channel.mention}")
 
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     async def addunsupportedrole(self, ctx, role: discord.Role):
         """Adds a role allowed to use the Forward to Support command. (Admin only)"""
@@ -40,7 +40,7 @@ class UnsupportedMessageForwarder(commands.Cog):
         else:
             await ctx.send(f"Role **{role.name}** is already allowed.")
 
-    @commands.hybrid_command(name="removeunsupportedrole")
+    @commands.hybrid_command(name="removeunsupportedrole", extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     async def _removeunsupportedrole(self, ctx, role: discord.Role):
         """Removes a role from the allowed roles. (Admin only)"""
@@ -52,7 +52,7 @@ class UnsupportedMessageForwarder(commands.Cog):
         else:
             await ctx.send(f"Role **{role.name}** is not in the allowed roles.")
 
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     async def listroles(self, ctx):
         """Lists the roles allowed to use the Forward to Support command."""
         roles = await self.config.allowed_role_ids()
@@ -117,7 +117,7 @@ class UnsupportedMessageForwarder(commands.Cog):
             await interaction.response.send_message("❌ Failed to forward the message.", ephemeral=True)
 
 
-@app_commands.context_menu(name="Forward to Support")
+@app_commands.context_menu(name="Forward to Support", extras={"red_force_enable": True})
 async def forward_to_support(interaction: discord.Interaction, message: discord.Message):
     cog = interaction.client.get_cog("UnsupportedMessageForwarder")
     if cog is None:

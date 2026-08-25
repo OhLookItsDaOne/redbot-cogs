@@ -18,7 +18,7 @@ class ForumPostNotifier(commands.Cog):
         self.config.register_global(**default_global)
 
     # Command to set the parent channel ID (numeric)
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     async def setthreadid(self, ctx, channel_id: int):
         """Sets the parent channel ID dynamically via command."""
         await self.config.parent_channel_id.set(channel_id)
@@ -35,7 +35,7 @@ class ForumPostNotifier(commands.Cog):
             await ctx.send(f"Parent channel ID has been set to: {channel_id} (channel not found)")
 
     # Command to display the currently tracked parent channel
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     async def getthreadid(self, ctx):
         """Displays the currently tracked parent channel ID."""
         channel_id = await self.config.parent_channel_id()
@@ -55,7 +55,7 @@ class ForumPostNotifier(commands.Cog):
             await ctx.send("The stored parent channel ID is invalid or no longer accessible.")
 
     # Command to set the troubleshooting message (Admin only)
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def setmessage(self, ctx, *, message: str):
@@ -67,7 +67,7 @@ class ForumPostNotifier(commands.Cog):
         await ctx.send("Troubleshooting message has been updated.")
 
     # Command to display the current troubleshooting message
-    @commands.hybrid_command()
+    @commands.hybrid_command(extras={"red_force_enable": True})
     async def getmessage(self, ctx):
         """Displays the currently set troubleshooting message."""
         message = await self.config.troubleshooting_message()

@@ -145,7 +145,7 @@ class KeywordHelp(commands.Cog):
                         response_message += "\n".join(valid_responses)
                         await message.channel.send(response_message)
 
-    @commands.hybrid_group(name="kw")
+    @commands.hybrid_group(name="kw", extras={"red_force_enable": True})
     async def kw(self, ctx):
         """Manage keywords and settings."""
         if ctx.invoked_subcommand is None:
