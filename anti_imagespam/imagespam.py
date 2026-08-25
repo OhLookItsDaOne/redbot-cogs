@@ -24,7 +24,8 @@ class ImageSpam(commands.Cog):
             "notification_on_delete": True,
             "channel_message_enabled": True,
             "channel_message_text": "⚠️ {user} - Too many images ({image_count}/{max_images})",
-            "channel_message_duration": 3.0,
+            "channel_message_duration": 15.0,
+            "short_timeout_seconds": 5,
             "user_message": "Your message in {channel} was deleted because it contained {image_count} images (maximum allowed: {max_images}).",
             "log_message": "🚫 **Image Spam Blocked**\nUser: {user_mention}\nChannel: {channel_mention}\nImages: {image_count}/{max_images}",
             "timeout_message": "⏰ **User Timed Out**\n{user_mention} has been timed out for 5 minutes due to repeated violations.",
@@ -203,6 +204,7 @@ class ImageSpam(commands.Cog):
         embed.add_field(
             name="⏰ Timeout Settings",
             value="• `imageprevent timeouttoggle <on/off>` - Toggle repeated offense timeouts\n"
+                  "• `imageprevent shorttimeout <seconds>` - Set short feedback timeout (0-60s, 0=off)\n"
                   "• `imageprevent timeoutthreshold <number>` - Set violations needed for timeout\n"
                   "• `imageprevent timeoutduration <minutes>` - Set timeout duration\n"
                   "• `imageprevent timeoutwindow <seconds>` - Set timeout window (default: 300s = 5min)",
@@ -549,6 +551,20 @@ class ImageSpam(commands.Cog):
         await self.config.guild(ctx.guild).timeout_duration.set(duration)
         await ctx.send(f"✅ Timeout duration set to **{duration} minutes**.")
 
+    @imageprevent.command(name="shorttimeout")
+    async def set_short_timeout(self, ctx, seconds: int):
+        """Set the short feedback timeout in seconds (0-60)."""
+        if not await self.check_admin_or_role(ctx):
+            return
+        
+        if seconds < 0 or seconds > 60:
+            await ctx.send("❌ Duration must be between 0 and 60 seconds (0 = disabled).")
+            return
+        
+        await self.config.guild(ctx.guild).short_timeout_seconds.set(seconds)
+        status = "disabled" if seconds == 0 else f"**{seconds} seconds**"
+        await ctx.send(f"✅ Short feedback timeout set to {status}.")
+
     @imageprevent.command(name="timeoutwindow")
     async def set_timeout_window(self, ctx, seconds: int):
         """Set timeout window in seconds (10-3600)."""
@@ -870,7 +886,8 @@ class ImageSpam(commands.Cog):
         )
         
         # Timeout Settings
-        timeout_text = f"Enabled: **{'ON 🟢' if conf['repeated_offense_timeout'] else 'OFF 🔴'}**\n"
+        timeout_text = f"Short feedback timeout: **{conf.get('short_timeout_seconds', 5)}s**\n"
+        timeout_text += f"Repeated-offense: **{'ON 🟢' if conf['repeated_offense_timeout'] else 'OFF 🔴'}**\n"
         timeout_text += f"Threshold: **{conf['timeout_threshold']}** violations\n"
         timeout_text += f"Duration: **{conf['timeout_duration']}** minutes\n"
         timeout_text += f"Window: **{conf['timeout_window']}** seconds"
@@ -942,6 +959,20 @@ class ImageSpam(commands.Cog):
         # Channel-Nachricht senden
         if delete_success:
             await self.send_channel_message(message, conf, img_count)
+        
+        # Kurzer Timeout als natives Feedback (Discord zeigt Popup beim Senden)
+        short_timeout = conf.get("short_timeout_seconds", 5)
+        if delete_success and short_timeout > 0:
+            try:
+                await message.author.timeout(
+                    until=datetime.datetime.utcnow() + datetime.timedelta(seconds=short_timeout),
+                    reason=f"Image spam: {img_count} images (max {conf['max_images']})"
+                )
+                print(f"[ImagePrevent] Short timeout {short_timeout}s applied to {message.author}")
+            except discord.Forbidden:
+                print(f"[ImagePrevent] No permission to timeout {message.author} (needs Moderate Members)")
+            except Exception as e:
+                print(f"[ImagePrevent] Error applying short timeout: {e}")
         
         # Logge in Log-Channel
         if conf["log_channel_id"] and conf["notification_on_delete"]:
