@@ -2,7 +2,7 @@
 
 **Effective date:** 2026-08-25
 
-This Privacy Policy explains what data the bot ("Overseer", operated for the FUS SkyrimVR community server) collects, stores, and processes, and how it is handled.
+This Privacy Policy explains what data the bot ("Community Overseer#6370", operated for the FUS SkyrimVR community server) collects, stores, and processes, and how it is handled.
 
 ## 1. Data collected and stored
 
