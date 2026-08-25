@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "name": "redbot-cogs",
+    "short": "Custom moderation and support cogs",
+    "description": "Custom Red-DiscordBot cogs for the D1 support server: image spam protection, channel guard, AutoMod management, keyword help, forum troubleshooting and message forwarding.",
+    "install_msg": "Repo added. Use `[p]cog list d1` to see available cogs and `[p]cog install d1 <cog>` to install them."
+}

@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Forward messages via context menu",
+    "description": "Lets users with an allowed role forward a message to a configured target channel using the message context menu (right click -> Apps -> Forward to Support). Works without the Message Content intent.",
+    "install_msg": "Cog installed. Configure it with `[p]settarget` and `[p]addunsupportedrole`.",
+    "end_user_data_statement": "This cog stores only guild configuration (target channel ID and allowed role IDs). No end user data is stored."
+}

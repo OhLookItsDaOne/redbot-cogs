@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Manage Discord AutoMod rules",
+    "description": "Manage Discord AutoMod rules via simple commands: list, enable, disable rules and add/remove words from allow lists.",
+    "install_msg": "Cog installed. Use `[p]automod` to manage AutoMod rules.",
+    "end_user_data_statement": "This cog stores guild configuration (allowed roles and rule shortname mappings). No end user data is stored."
+}

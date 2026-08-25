@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Update cog repos and reload cogs",
+    "description": "Pulls the git repositories of all loaded cogs and reloads them (excluding itself). Sends a status embed with the result of each repository and reload.",
+    "install_msg": "Cog installed. Use `[p]cogupdate` (owner only) to update and reload all cogs.",
+    "end_user_data_statement": "This cog does not store any end user data."
+}

@@ -1,0 +1,7 @@
+{
+    "author": ["OhLookItsDaOne"],
+    "short": "Guard a channel against spammers",
+    "description": "Protects a designated channel: first offense times out the user and deletes their messages, a second offense kicks them. Admin configurable.",
+    "install_msg": "Cog installed. Configure it with `[p]setguardchannel`, `[p]setkickchannel` and `[p]setpunishmenttime`.",
+    "end_user_data_statement": "This cog only stores offense counts in memory. No end user data is stored persistently."
+}
