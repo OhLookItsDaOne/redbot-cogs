@@ -8,7 +8,7 @@ class AutoMod(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=2468101214)
-        self.config.register_guild(allowed_roles=[], shortnames={})
+        self.config.register_guild(allowed_roles=[], shortnames={}, default_rule=None)
 
     async def has_automod_permission(self, ctx):
         if ctx.author.guild_permissions.administrator:
@@ -47,6 +47,17 @@ class AutoMod(commands.Cog):
             return await ctx.guild.fetch_automod_rule(rid), None
         except Exception as e:
             return None, e
+
+    async def resolve_effective_rule(self, ctx, rule: str = None):
+        """Resolve the given rule, or fall back to the configured default rule."""
+        if rule:
+            r, err = await self.resolve_rule(ctx, rule)
+            return r, err, rule
+        default = await self.config.guild(ctx.guild).default_rule()
+        if not default:
+            return None, None, None
+        r, err = await self.resolve_rule(ctx, default)
+        return r, err, default
 
     @staticmethod
     def _normalize_entry(entry: str) -> str:
@@ -87,16 +98,34 @@ class AutoMod(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
-    @siteallow.command(name="add")
-    async def siteallow_add(self, ctx, rule: str, domains: str):
-        """Add domains to the allow list (comma separated)."""
+    @siteallow.command(name="default")
+    async def siteallow_default(self, ctx, rule: str = None):
+        """Set the default rule used when none is given."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
+        if rule is None:
+            default = await self.config.guild(ctx.guild).default_rule()
+            if default:
+                return await ctx.send(f"Default rule is currently: `{default}`")
+            return await ctx.send("No default rule is set.")
         r, err = await self.resolve_rule(ctx, rule)
         if err:
             return await ctx.send(f"❌ Could not fetch rule: {err}")
         if not r:
-            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+            return await ctx.send("❌ Rule not found. Use `/siteallow list`.")
+        await self.config.guild(ctx.guild).default_rule.set(rule)
+        return await ctx.send(f"✅ Default rule set to `{rule}`.")
+
+    @siteallow.command(name="add")
+    async def siteallow_add(self, ctx, domains: str, rule: str = None):
+        """Add domains to a rule's allow list (comma separated)."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err, used = await self.resolve_effective_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ No rule given and no default rule set. Use `/siteallow default`.")
         old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
@@ -105,20 +134,20 @@ class AutoMod(commands.Cog):
         await self._set_allow_list(ctx, r, merged)
         added = sorted(new - old)
         return await ctx.send(
-            f"✅ Added: {', '.join(added) or '— none —'}\n"
+            f"✅ Rule `{used}` — Added: {', '.join(added) or '— none —'}\n"
             f"Current allow list: {', '.join(sorted(merged)) or '— empty —'}"
         )
 
     @siteallow.command(name="remove")
-    async def siteallow_remove(self, ctx, rule: str, domains: str):
-        """Remove domains from the allow list (comma separated)."""
+    async def siteallow_remove(self, ctx, domains: str, rule: str = None):
+        """Remove domains from a rule's allow list (comma separated)."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
-        r, err = await self.resolve_rule(ctx, rule)
+        r, err, used = await self.resolve_effective_rule(ctx, rule)
         if err:
             return await ctx.send(f"❌ Could not fetch rule: {err}")
         if not r:
-            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+            return await ctx.send("❌ No rule given and no default rule set. Use `/siteallow default`.")
         old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
@@ -127,20 +156,20 @@ class AutoMod(commands.Cog):
         await self._set_allow_list(ctx, r, kept)
         gone = sorted(old & rem)
         return await ctx.send(
-            f"✅ Removed: {', '.join(gone) or '— none —'}\n"
+            f"✅ Rule `{used}` — Removed: {', '.join(gone) or '— none —'}\n"
             f"Current allow list: {', '.join(sorted(kept)) or '— empty —'}"
         )
 
     @siteallow.command(name="edit")
-    async def siteallow_edit(self, ctx, rule: str, old: str, new: str):
-        """Replace one domain with another in the allow list."""
+    async def siteallow_edit(self, ctx, old: str, new: str, rule: str = None):
+        """Replace one domain with another in a rule's allow list."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
-        r, err = await self.resolve_rule(ctx, rule)
+        r, err, used = await self.resolve_effective_rule(ctx, rule)
         if err:
             return await ctx.send(f"❌ Could not fetch rule: {err}")
         if not r:
-            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+            return await ctx.send("❌ No rule given and no default rule set. Use `/siteallow default`.")
         current = await self._get_allow_list(r)
         if current is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
@@ -152,27 +181,47 @@ class AutoMod(commands.Cog):
         current.add(new_n)
         await self._set_allow_list(ctx, r, current)
         return await ctx.send(
-            f"✅ Replaced `{old_n}` with `{new_n}`.\n"
+            f"✅ Rule `{used}` — Replaced `{old_n}` with `{new_n}`.\n"
             f"Current allow list: {', '.join(sorted(current)) or '— empty —'}"
         )
 
     @siteallow.command(name="list")
-    async def siteallow_list(self, ctx, rule: str):
-        """Show the current allow list of a rule."""
+    async def siteallow_list(self, ctx, rule: str = None):
+        """Show allow lists (all rules, or a specific rule)."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
-        r, err = await self.resolve_rule(ctx, rule)
-        if err:
-            return await ctx.send(f"❌ Could not fetch rule: {err}")
-        if not r:
-            return await ctx.send("❌ Rule not found. Use `/automod list`.")
-        current = await self._get_allow_list(r)
-        if current is None:
-            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
-        return await ctx.send(
-            f"**Allow list for `{r.name}`:**\n" +
-            ("\n".join(f"• `{e}`" for e in sorted(current)) if current else "— empty —")
-        )
+        if rule:
+            r, err = await self.resolve_rule(ctx, rule)
+            if err:
+                return await ctx.send(f"❌ Could not fetch rule: {err}")
+            if not r:
+                return await ctx.send("❌ Rule not found. Use `/siteallow list`.")
+            current = await self._get_allow_list(r)
+            if current is None:
+                return await ctx.send("❌ Only keyword‑style rules support an allow list.")
+            return await ctx.send(
+                f"**Allow list for `{r.name}`:**\n" +
+                ("\n".join(f"• `{e}`" for e in sorted(current)) if current else "— empty —")
+            )
+
+        # No rule: show all rule names and their shortnames
+        sm = await self.get_shortname_mapping(ctx.guild)
+        try:
+            rules = await ctx.guild.fetch_automod_rules()
+        except Exception as e:
+            return await ctx.send(f"❌ Failed to fetch rules: {e}")
+        default = await self.config.guild(ctx.guild).default_rule()
+        lines = []
+        for short, rid in sm.items():
+            rule_obj = discord.utils.get(rules, id=rid)
+            if rule_obj:
+                marker = "⭐" if short == default else ""
+                lines.append(f"{marker} **{short}** — {rule_obj.name} (`{rid}`)")
+        if default:
+            lines.append(f"\nDefault rule: `{default}` (⭐)")
+        else:
+            lines.append("\nNo default rule set. Use `/siteallow default <rule>`.")
+        return await ctx.send("**AutoMod rules:**\n" + "\n".join(lines))
 
     @commands.hybrid_group(name="automod", extras={"red_force_enable": True})
     @commands.guild_only()
