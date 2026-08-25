@@ -170,7 +170,15 @@ class ImageSpam(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send_help("imageprevent")
 
-    @imageprevent.command(name="help")
+    @commands.hybrid_group(name="imagepreventinfo", invoke_without_command=True)
+    @commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def imagepreventinfo(self, ctx):
+        """Show image prevention information and diagnostics."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help("imagepreventinfo")
+
+    @imagepreventinfo.command(name="help")
     async def imageprevent_help(self, ctx):
         """Show help for image prevention commands."""
         embed = discord.Embed(
@@ -180,7 +188,7 @@ class ImageSpam(commands.Cog):
         )
         embed.add_field(
             name="📝 health check",
-            value="• `imageprevent health` - checks if all required permissions are set\n",
+            value="• `imagepreventinfo health` - checks if all required permissions are set\n",
             inline=False
         )
         embed.add_field(
@@ -198,7 +206,7 @@ class ImageSpam(commands.Cog):
                   "• `imageprevent usermessage <text>` - Set log user message\n"
                   "• `imageprevent logmessage <text>` - Set log channel message\n"
                   "• `imageprevent timeoutmessage <text>` - Set timeout notification message\n"
-                  "• `imageprevent placeholders` - Show available placeholders",
+                  "• `imagepreventinfo placeholders` - Show available placeholders",
             inline=False
         )
         embed.add_field(
@@ -233,10 +241,10 @@ class ImageSpam(commands.Cog):
         )
         embed.add_field(
             name="📊 Information",
-            value="• `imageprevent list` - Show settings\n"
-                  "• `imageprevent channels` - Show all text channels and their status\n"
-                  "• `imageprevent status` - Check channel status\n"
-                  "• `imageprevent test <message>` - Test image counting in a message",
+            value="• `imagepreventinfo list` - Show settings\n"
+                  "• `imagepreventinfo channels` - Show all text channels and their status\n"
+                  "• `imagepreventinfo status` - Check channel status\n"
+                  "• `imagepreventinfo test <message>` - Test image counting in a message",
             inline=False
         )
         embed.add_field(
@@ -245,7 +253,7 @@ class ImageSpam(commands.Cog):
                   "• `imageprevent clearadminrole` - Clear admin role",
             inline=False
         )
-        embed.set_footer(text="Use !imageprevent placeholders to see available message placeholders")
+        embed.set_footer(text="Use !imagepreventinfo placeholders to see available message placeholders")
         await ctx.send(embed=embed)
 
     async def check_admin_or_role(self, ctx):
@@ -345,7 +353,7 @@ class ImageSpam(commands.Cog):
         await self.config.guild(ctx.guild).channel_message_text.set(text)
         await ctx.send(f"✅ Channel message text set to:\n```{text}```")
 
-    @imageprevent.command(name="channels")
+    @imagepreventinfo.command(name="channels")
     async def list_all_channels(self, ctx):
         """Show all text channels and their monitoring status."""
         conf = await self.config.guild(ctx.guild).all()
@@ -440,10 +448,10 @@ class ImageSpam(commands.Cog):
             inline=True
         )
         
-        embed.set_footer(text=f"Total text channels: {len(text_channels)} | Use !imageprevent status to check a specific channel")
+        embed.set_footer(text=f"Total text channels: {len(text_channels)} | Use !imagepreventinfo status to check a specific channel")
         await ctx.send(embed=embed)
 
-    @imageprevent.command(name="status")
+    @imagepreventinfo.command(name="status")
     async def channel_status(self, ctx, channel: Optional[discord.TextChannel] = None):
         """Check monitoring status of a specific channel."""
         channel = channel or ctx.channel
@@ -593,7 +601,7 @@ class ImageSpam(commands.Cog):
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
-    @imageprevent.command(name="test")
+    @imagepreventinfo.command(name="test")
     async def test_image_counting(self, ctx, *, message: str):
         """Test how many images would be counted in a message."""
         conf = await self.config.guild(ctx.guild).all()
@@ -678,7 +686,7 @@ class ImageSpam(commands.Cog):
         await self.config.guild(ctx.guild).timeout_message.set(message)
         await ctx.send(f"✅ Timeout message set to:\n```{message}```")
 
-    @imageprevent.command(name="placeholders")
+    @imagepreventinfo.command(name="placeholders")
     async def show_placeholders(self, ctx):
         """Show available placeholders for custom messages."""
         placeholders = await self.config.guild(ctx.guild).placeholder_info()
@@ -752,7 +760,7 @@ class ImageSpam(commands.Cog):
         else:
             await ctx.send("❌ Please use `on` or `off`.")
 
-    @imageprevent.command(name="health")
+    @imagepreventinfo.command(name="health")
     async def health_check(self, ctx):
         """Check system health and permissions."""
         issues = []
@@ -852,7 +860,7 @@ class ImageSpam(commands.Cog):
         await self.config.guild(ctx.guild).admin_role_id.set(None)
         await ctx.send("✅ Admin role cleared. Only server admins can use imageprevent commands.")
 
-    @imageprevent.command(name="list")
+    @imagepreventinfo.command(name="list")
     async def list_settings(self, ctx):
         """Show current image prevention settings."""
         conf = await self.config.guild(ctx.guild).all()
