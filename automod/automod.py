@@ -79,16 +79,16 @@ class AutoMod(commands.Cog):
             )
         )
 
-    @commands.hybrid_group(name="allowlist", extras={"red_force_enable": True})
+    @commands.hybrid_group(name="siteallow", extras={"red_force_enable": True})
     @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    async def allowlist(self, ctx):
-        """Manage a rule's allow list (whitelist)."""
+    async def siteallow(self, ctx):
+        """Manage which sites are allowed by a rule."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
-    @allowlist.command(name="add")
-    async def whitelist_add(self, ctx, rule: str, domains: str):
+    @siteallow.command(name="add")
+    async def siteallow_add(self, ctx, rule: str, domains: str):
         """Add domains to the allow list (comma separated)."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
@@ -109,8 +109,8 @@ class AutoMod(commands.Cog):
             f"Current allow list: {', '.join(sorted(merged)) or '— empty —'}"
         )
 
-    @allowlist.command(name="remove")
-    async def whitelist_remove(self, ctx, rule: str, domains: str):
+    @siteallow.command(name="remove")
+    async def siteallow_remove(self, ctx, rule: str, domains: str):
         """Remove domains from the allow list (comma separated)."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
@@ -131,8 +131,8 @@ class AutoMod(commands.Cog):
             f"Current allow list: {', '.join(sorted(kept)) or '— empty —'}"
         )
 
-    @allowlist.command(name="edit")
-    async def whitelist_edit(self, ctx, rule: str, old: str, new: str):
+    @siteallow.command(name="edit")
+    async def siteallow_edit(self, ctx, rule: str, old: str, new: str):
         """Replace one domain with another in the allow list."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
@@ -156,8 +156,8 @@ class AutoMod(commands.Cog):
             f"Current allow list: {', '.join(sorted(current)) or '— empty —'}"
         )
 
-    @allowlist.command(name="list")
-    async def whitelist_list(self, ctx, rule: str):
+    @siteallow.command(name="list")
+    async def siteallow_list(self, ctx, rule: str):
         """Show the current allow list of a rule."""
         if not await self.has_automod_permission(ctx):
             return await ctx.send("❌ You do not have permission.")
