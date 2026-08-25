@@ -48,6 +48,132 @@ class AutoMod(commands.Cog):
         except Exception as e:
             return None, e
 
+    @staticmethod
+    def _normalize_entry(entry: str) -> str:
+        """Normalize a whitelist entry to the AutoMod wildcard format.
+
+        ``bestbuy.ca`` becomes ``*bestbuy.ca*`` so it matches any message
+        containing the domain. Existing wildcards are preserved.
+        """
+        e = entry.strip().lower()
+        if not e:
+            return ""
+        if "*" not in e:
+            e = f"*{e}*"
+        return e
+
+    async def _get_allow_list(self, r) -> set:
+        old = getattr(r.trigger, "allow_list", None)
+        if old is None:
+            return None
+        return set(old)
+
+    async def _set_allow_list(self, ctx, r, entries: set):
+        kt = r.trigger.keyword_filter if hasattr(r.trigger, "keyword_filter") else None
+        rp = r.trigger.regex_patterns if hasattr(r.trigger, "regex_patterns") else None
+        await r.edit(
+            trigger=discord.AutoModTrigger(
+                keyword_filter=kt,
+                allow_list=sorted(entries),
+                regex_patterns=rp
+            )
+        )
+
+    @commands.hybrid_group(name="whitelist", extras={"red_force_enable": True})
+    @commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def whitelist(self, ctx):
+        """Manage a rule's allow list (whitelist)."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @whitelist.command(name="add")
+    async def whitelist_add(self, ctx, rule: str, domains: str):
+        """Add domains to the allow list (comma separated)."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        old = await self._get_allow_list(r)
+        if old is None:
+            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
+        new = {self._normalize_entry(w) for w in domains.replace("\n", ",").split(",") if self._normalize_entry(w)}
+        merged = old | new
+        await self._set_allow_list(ctx, r, merged)
+        added = sorted(new - old)
+        return await ctx.send(
+            f"✅ Added: {', '.join(added) or '— none —'}\n"
+            f"Current allow list: {', '.join(sorted(merged)) or '— empty —'}"
+        )
+
+    @whitelist.command(name="remove")
+    async def whitelist_remove(self, ctx, rule: str, domains: str):
+        """Remove domains from the allow list (comma separated)."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        old = await self._get_allow_list(r)
+        if old is None:
+            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
+        rem = {self._normalize_entry(w) for w in domains.replace("\n", ",").split(",") if self._normalize_entry(w)}
+        kept = old - rem
+        await self._set_allow_list(ctx, r, kept)
+        gone = sorted(old & rem)
+        return await ctx.send(
+            f"✅ Removed: {', '.join(gone) or '— none —'}\n"
+            f"Current allow list: {', '.join(sorted(kept)) or '— empty —'}"
+        )
+
+    @whitelist.command(name="edit")
+    async def whitelist_edit(self, ctx, rule: str, old: str, new: str):
+        """Replace one domain with another in the allow list."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        current = await self._get_allow_list(r)
+        if current is None:
+            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
+        old_n = self._normalize_entry(old)
+        new_n = self._normalize_entry(new)
+        if old_n not in current:
+            return await ctx.send(f"❌ `{old_n}` is not in the allow list.")
+        current.remove(old_n)
+        current.add(new_n)
+        await self._set_allow_list(ctx, r, current)
+        return await ctx.send(
+            f"✅ Replaced `{old_n}` with `{new_n}`.\n"
+            f"Current allow list: {', '.join(sorted(current)) or '— empty —'}"
+        )
+
+    @whitelist.command(name="list")
+    async def whitelist_list(self, ctx, rule: str):
+        """Show the current allow list of a rule."""
+        if not await self.has_automod_permission(ctx):
+            return await ctx.send("❌ You do not have permission.")
+        r, err = await self.resolve_rule(ctx, rule)
+        if err:
+            return await ctx.send(f"❌ Could not fetch rule: {err}")
+        if not r:
+            return await ctx.send("❌ Rule not found. Use `/automod list`.")
+        current = await self._get_allow_list(r)
+        if current is None:
+            return await ctx.send("❌ Only keyword‑style rules support an allow list.")
+        return await ctx.send(
+            f"**Allow list for `{r.name}`:**\n" +
+            ("\n".join(f"• `{e}`" for e in sorted(current)) if current else "— empty —")
+        )
+
     @commands.hybrid_group(name="automod", extras={"red_force_enable": True})
     @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
