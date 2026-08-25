@@ -14,7 +14,8 @@ class SupportForum(commands.Cog):
         self.config = Config.get_conf(self, identifier=1234567890)
         default_global = {
             "parent_channel_id": None,
-            "troubleshooting_message": "Default troubleshooting message."
+            "troubleshooting_message": "Default troubleshooting message.",
+            "privacy_policy_url": "https://github.com/OhLookItsDaOne/redbot-cogs/blob/main/PRIVACY.md",
         }
         self.config.register_global(**default_global)
 
@@ -83,6 +84,33 @@ class SupportForum(commands.Cog):
         """Displays the currently set troubleshooting message."""
         message = await self.config.troubleshooting_message()
         await ctx.send(f"Current troubleshooting message: {message}")
+
+    @commands.hybrid_command(extras={"red_force_enable": True})
+    async def privacy(self, ctx):
+        """Shows the bot's privacy policy."""
+        url = await self.config.privacy_policy_url()
+        embed = discord.Embed(
+            title="Privacy Policy",
+            description=(
+                "This bot processes message content in memory only for moderation "
+                "and help features. It does not store message content, transmit it "
+                "off-platform, or use it to train AI models.\n\n"
+                f"Full policy: {url}"
+            ),
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="setprivacypolicy", extras={"red_force_enable": True})
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def setprivacypolicy(self, ctx, url: str):
+        """Sets the privacy policy URL shown by /privacy (Admin only)."""
+        if not url.startswith("http://") and not url.startswith("https://"):
+            await ctx.send("❌ The URL must start with http:// or https://")
+            return
+        await self.config.privacy_policy_url.set(url)
+        await ctx.send(f"✅ Privacy policy URL set to: {url}")
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
