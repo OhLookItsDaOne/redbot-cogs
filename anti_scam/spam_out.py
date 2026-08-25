@@ -10,12 +10,10 @@ logging.basicConfig(level=logging.INFO)
 class ChannelGuard(commands.Cog):
     """Guard a channel against spammers.
 
-    - First offense: Timeout for a configurable duration.
-    - Second offense: User is banned (with Discord's native message deletion)
-      and automatically unbanned after a configurable duration.
-
-    Recent messages of the user can be purged for the last N minutes using
-    bulk deletion (rate-limit friendly).
+    - First offense: deletes the offending message.
+    - Second offense: user is banned (with Discord's native message history
+      deletion via ``delete_message_seconds``) and automatically unbanned
+      after a configurable duration.
     """
 
     def __init__(self, bot):
@@ -23,12 +21,11 @@ class ChannelGuard(commands.Cog):
         self.config = Config.get_conf(self, identifier=112233445566)
         default_global = {
             "guard_channel_id": None,
-            "kick_channel_id": None,       # log channel
-            "punishment_duration": 10,     # first offense timeout in minutes
-            "delete_message_days": 0,      # Discord ban delete_days (0-7)
-            "recent_minutes": 5,           # purge recent messages within this window
-            "ban_duration_hours": 24,      # auto-unban after this many hours
-            "scheduled_unbans": {},        # {guild_id: {user_id: unban_timestamp}}
+            "kick_channel_id": None,          # log channel
+            "delete_message_seconds": 3600,   # how far back Discord deletes on ban (1 hour)
+            "recent_minutes": 5,              # purge recent messages within this window
+            "ban_duration_hours": 24,         # auto-unban after this many hours
+            "scheduled_unbans": {},           # {guild_id: {user_id: unban_timestamp}}
         }
         self.config.register_global(**default_global)
         self.offenses = {}
@@ -116,32 +113,24 @@ class ChannelGuard(commands.Cog):
     @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def setpunishmenttime(self, ctx, minutes: int):
-        """Sets the first-offense timeout duration in minutes (Admin only)."""
-        if minutes <= 0:
-            await ctx.send("Time must be greater than 0 minutes.")
-            return
-        await self.config.punishment_duration.set(minutes)
-        await ctx.send(f"First-offense timeout set to {minutes} minutes.")
+    async def setdeleteseconds(self, ctx, seconds: int):
+        """Sets how far back Discord deletes messages on ban, in seconds (Admin only).
 
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    @app_commands.default_permissions(administrator=True)
-    async def setdeletedays(self, ctx, days: int):
-        """Sets how many days of the user's messages Discord deletes on ban (0-7)."""
-        if days < 0 or days > 7:
-            await ctx.send("❌ Choose a value between 0 and 7 days:\n"
+        Examples: 3600 = 1 hour, 21600 = 6 hours, 86400 = 24 hours, up to 604800 (7 days).
+        """
+        if seconds < 0 or seconds > 604800:
+            await ctx.send("❌ Choose a value between 0 and 604800 seconds (7 days).\n"
                            "`0` - delete nothing\n"
-                           "`1` - last 1 day\n"
-                           "`2` - last 2 days\n"
-                           "`3` - last 3 days\n"
-                           "`4` - last 4 days\n"
-                           "`5` - last 5 days\n"
-                           "`6` - last 6 days\n"
-                           "`7` - last 7 days")
+                           "`3600` - previous hour\n"
+                           "`21600` - previous 6 hours\n"
+                           "`86400` - previous 24 hours\n"
+                           "`259200` - previous 3 days\n"
+                           "`604800` - previous 7 days")
             return
-        await self.config.delete_message_days.set(days)
-        await ctx.send(f"Ban message deletion set to **{days} day(s)**.")
+        await self.config.delete_message_seconds.set(seconds)
+        hours = seconds / 3600
+        label = f"**{seconds} seconds** ({hours:.1f} hours)" if seconds > 0 else "**0** (nothing)"
+        await ctx.send(f"Ban message deletion set to {label}.")
 
     @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
@@ -180,8 +169,7 @@ class ChannelGuard(commands.Cog):
         """Shows the current guard configuration (Admin only)."""
         guard_id = await self.config.guard_channel_id()
         log_id = await self.config.kick_channel_id()
-        punish = await self.config.punishment_duration()
-        days = await self.config.delete_message_days()
+        del_seconds = await self.config.delete_message_seconds()
         recent = await self.config.recent_minutes()
         ban_h = await self.config.ban_duration_hours()
 
@@ -191,8 +179,7 @@ class ChannelGuard(commands.Cog):
         text = (
             f"**Guard channel:** {guard.mention if guard else '❌ Not set'}\n"
             f"**Log channel:** {logch.mention if logch else '❌ Not set'}\n"
-            f"**First-offense timeout:** {punish} min\n"
-            f"**Ban message deletion:** {days} day(s)\n"
+            f"**Ban message deletion:** {del_seconds} seconds ({del_seconds/3600:.1f} hours)\n"
             f"**Recent purge window:** {recent} min\n"
             f"**Ban duration:** {ban_h} hour(s) (auto-unban)"
         )
@@ -219,31 +206,33 @@ class ChannelGuard(commands.Cog):
         offense_count = len(prev)
 
         if offense_count == 0:
-            # First offense: timeout only, delete nothing (no nuke)
+            # First offense: delete only the offending message (no timeout, no nuke)
             self.offenses[user_id] = prev + [now]
-            punishment_minutes = await self.config.punishment_duration()
-            until = now + datetime.timedelta(minutes=punishment_minutes)
             try:
-                await member.timeout(until, reason="First offense: Timeout applied.")
+                await message.delete()
                 await self._send_log(
                     message.guild,
-                    f"⏰ {member.mention} timed out for {punishment_minutes} min (first offense).",
+                    f"🗑️ Deleted a message from {member.mention} in the guard channel (first offense).",
                 )
             except discord.Forbidden:
-                logging.warning("Missing permission to timeout %s", member)
+                logging.warning("Missing Manage Messages permission to delete in guard channel.")
+            except discord.NotFound:
+                pass
             except Exception as e:
-                logging.error("Error timing out %s: %s", member, e)
+                logging.error("Error deleting first-offense message: %s", e)
             return
 
         # Second offense: ban + purge + auto-unban
         try:
-            delete_days = await self.config.delete_message_days()
+            del_seconds = await self.config.delete_message_seconds()
             ban_hours = await self.config.ban_duration_hours()
             await member.ban(
                 reason=f"Second offense: banned for {ban_hours} hours.",
-                delete_message_days=delete_days,
+                delete_message_seconds=del_seconds,
             )
-            logging.info("Banned %s in guild %s (delete %s days)", member, message.guild.id, delete_days)
+            logging.info(
+                "Banned %s in guild %s (delete %s seconds)", member, message.guild.id, del_seconds
+            )
         except discord.Forbidden:
             logging.warning("Missing permission to ban %s", member)
             await self._send_log(message.guild, f"❌ Missing Ban Members permission for {member.mention}.")
@@ -256,7 +245,7 @@ class ChannelGuard(commands.Cog):
         await self._send_log(
             message.guild,
             f"🚫 {member.mention} banned (2nd offense). Auto-unban in {ban_hours} hour(s). "
-            f"Deleted {delete_days} day(s) via Discord, purging recent messages...",
+            f"Discord deleting last {del_seconds} seconds of messages...",
         )
 
         # Purge recent messages using bulk deletion (rate-limit friendly)
