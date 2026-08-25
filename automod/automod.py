@@ -3,17 +3,9 @@ import re
 from redbot.core import commands, Config, app_commands
 from typing import Set
 
-# Common country and generic TLDs used to expand bare domains like "amazon".
-# Multi-part TLDs must come first so co.uk etc. match before "uk".
-COMMON_TLDS = [
-    "co.uk", "com.au", "org.uk", "co.jp", "com.br", "co.nz", "com.mx",
-    "com.cn", "com.tr", "com.ar", "com.sg", "com.my",
-    "com", "net", "org", "io", "me", "tv", "info", "biz", "app", "dev",
-    "de", "ca", "fr", "es", "it", "nl", "pl", "se", "no", "fi", "dk",
-    "at", "ch", "be", "pt", "gr", "cz", "sk", "hu", "ro", "bg", "hr",
-    "si", "lt", "lv", "ee", "ru", "ua", "tr", "in", "cn", "jp", "kr",
-    "au", "nz", "za", "br", "mx", "ar", "cl", "co", "us", "uk",
-]
+# Discord limit for an AutoMod rule's allow_list.
+ALLOW_LIST_LIMIT = 100
+
 
 class AutoMod(commands.Cog):
     """AutoMod: Manage Discord AutoMod rules via simple commands."""
@@ -21,31 +13,7 @@ class AutoMod(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=2468101214)
-        self.config.register_global(tlds=COMMON_TLDS)
         self.config.register_guild(allowed_roles=[], shortnames={}, default_rule=None)
-
-    @classmethod
-    def _has_tld(cls, domain: str, tlds: list) -> bool:
-        """Check whether the given domain already ends in a known TLD."""
-        d = domain.strip().lower()
-        for tld in tlds:
-            if d.endswith("." + tld):
-                return True
-        return False
-
-    @classmethod
-    def _expand_entries(cls, domain: str, tlds: list) -> set:
-        """Expand a bare domain (e.g. ``amazon``) into wildcard entries for the given TLDs.
-
-        ``amazon`` -> {*amazon.com*, *amazon.de*, *amazon.co.uk*, ...}
-        ``amazon.de`` -> {*amazon.de*} (already has a TLD, unchanged)
-        """
-        bare = cls._bare(domain)
-        if not bare:
-            return set()
-        if cls._has_tld(bare, tlds):
-            return {f"*{bare}*"}
-        return {f"*{bare}.{tld}*" for tld in tlds}
 
     async def has_automod_permission(self, ctx):
         if ctx.author.guild_permissions.administrator:
@@ -174,43 +142,6 @@ class AutoMod(commands.Cog):
         await self.config.guild(ctx.guild).default_rule.set(rule)
         return await ctx.send(f"✅ Default rule set to `{rule}`.")
 
-    @siteallow.command(name="tlds")
-    async def siteallow_tlds(self, ctx):
-        """Show the configured TLDs used for domain expansion."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        tlds = await self.config.tlds()
-        return await ctx.send(
-            f"**Configured TLDs ({len(tlds)}):**\n" + ", ".join(f"`{t}`" for t in tlds)
-        )
-
-    @siteallow.command(name="tldadd")
-    async def siteallow_tldadd(self, ctx, tlds: str):
-        """Add TLDs to the expansion list (comma separated)."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        to_add = {t.strip().lower().lstrip(".") for t in tlds.split(",") if t.strip()}
-        current = await self.config.tlds()
-        added = sorted(to_add - set(current))
-        if not added:
-            return await ctx.send("❌ Those TLDs are already configured.")
-        await self.config.tlds.set(current + added)
-        return await ctx.send(f"✅ Added TLDs: {', '.join(f'`{t}`' for t in added)}")
-
-    @siteallow.command(name="tldremove")
-    async def siteallow_tldremove(self, ctx, tlds: str):
-        """Remove TLDs from the expansion list (comma separated)."""
-        if not await self.has_automod_permission(ctx):
-            return await ctx.send("❌ You do not have permission.")
-        to_remove = {t.strip().lower().lstrip(".") for t in tlds.split(",") if t.strip()}
-        current = await self.config.tlds()
-        kept = [t for t in current if t not in to_remove]
-        removed = sorted(set(current) - set(kept))
-        if not removed:
-            return await ctx.send("❌ None of those TLDs are configured.")
-        await self.config.tlds.set(kept)
-        return await ctx.send(f"✅ Removed TLDs: {', '.join(f'`{t}`' for t in removed)}")
-
     @siteallow.command(name="add")
     async def siteallow_add(self, ctx, domains: str, rule: str = None):
         """Add domains to a rule's allow list (comma separated)."""
@@ -224,14 +155,13 @@ class AutoMod(commands.Cog):
         old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
-        # Expand bare domains (e.g. "amazon") into configured TLD variants
-        tlds = await self.config.tlds()
-        new = set()
-        for w in domains.replace("\n", ",").split(","):
-            if not w.strip():
-                continue
-            new |= self._expand_entries(w, tlds)
+        new = {self._normalize_entry(w) for w in domains.replace("\n", ",").split(",") if self._normalize_entry(w)}
         merged = old | new
+        if len(merged) > ALLOW_LIST_LIMIT:
+            return await ctx.send(
+                f"❌ Cannot add: the allow list would exceed Discord's limit of "
+                f"**{ALLOW_LIST_LIMIT}** entries (currently {len(old)}, adding {len(new - old)})."
+            )
         await self._set_allow_list(ctx, r, merged)
         added = sorted(new - old)
         return await ctx.send(
