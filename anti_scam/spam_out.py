@@ -10,10 +10,10 @@ logging.basicConfig(level=logging.INFO)
 class ChannelGuard(commands.Cog):
     """Guard a channel against spammers.
 
-    - First offense: deletes the offending message.
-    - Second offense: user is banned (with Discord's native message history
-      deletion via ``delete_message_seconds``) and automatically unbanned
-      after a configurable duration.
+    Any message posted in the guarded channel instantly results in:
+    - the user being banned (auto-unbanned after a configurable duration)
+    - Discord deleting the user's messages from the last configurable period
+      (``delete_message_seconds``) server-side, in a single API call.
     """
 
     def __init__(self, bot):
@@ -23,12 +23,10 @@ class ChannelGuard(commands.Cog):
             "guard_channel_id": None,
             "kick_channel_id": None,          # log channel
             "delete_message_seconds": 3600,   # how far back Discord deletes on ban (1 hour)
-            "recent_minutes": 5,              # purge recent messages within this window
             "ban_duration_hours": 24,         # auto-unban after this many hours
             "scheduled_unbans": {},           # {guild_id: {user_id: unban_timestamp}}
         }
         self.config.register_global(**default_global)
-        self.offenses = {}
         self._unban_task = None
 
     async def cog_load(self):
@@ -135,17 +133,6 @@ class ChannelGuard(commands.Cog):
     @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def setrecentminutes(self, ctx, minutes: int):
-        """Sets how many recent minutes of the user's messages get purged (Admin only)."""
-        if minutes < 0:
-            await ctx.send("❌ Minutes must be 0 or greater (0 = no purge).")
-            return
-        await self.config.recent_minutes.set(minutes)
-        await ctx.send(f"Recent message purge window set to **{minutes} minute(s)**.")
-
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    @app_commands.default_permissions(administrator=True)
     async def setbanduration(self, ctx, hours: int):
         """Sets how long a ban lasts before auto-unban (Admin only)."""
         if hours <= 0:
@@ -157,20 +144,11 @@ class ChannelGuard(commands.Cog):
     @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
-    async def resetoffenses(self, ctx):
-        """Resets all offense counts (Admin only)."""
-        self.offenses = {}
-        await ctx.send("All offense counts have been reset.")
-
-    @commands.hybrid_command(extras={"red_force_enable": True})
-    @commands.has_permissions(administrator=True)
-    @app_commands.default_permissions(administrator=True)
     async def guardstatus(self, ctx):
         """Shows the current guard configuration (Admin only)."""
         guard_id = await self.config.guard_channel_id()
         log_id = await self.config.kick_channel_id()
         del_seconds = await self.config.delete_message_seconds()
-        recent = await self.config.recent_minutes()
         ban_h = await self.config.ban_duration_hours()
 
         guard = ctx.guild.get_channel(guard_id) if guard_id else None
@@ -180,7 +158,6 @@ class ChannelGuard(commands.Cog):
             f"**Guard channel:** {guard.mention if guard else '❌ Not set'}\n"
             f"**Log channel:** {logch.mention if logch else '❌ Not set'}\n"
             f"**Ban message deletion:** {del_seconds} seconds ({del_seconds/3600:.1f} hours)\n"
-            f"**Recent purge window:** {recent} min\n"
             f"**Ban duration:** {ban_h} hour(s) (auto-unban)"
         )
         await ctx.send(text)
@@ -198,44 +175,23 @@ class ChannelGuard(commands.Cog):
         member = message.author
         user_id = member.id
 
-        # Keep offense counts fresh within a reasonable window (e.g. 24h)
-        now = discord.utils.utcnow()
-        offense_window = datetime.timedelta(hours=24)
-        prev = self.offenses.get(user_id, [])
-        prev = [t for t in prev if (now - t) <= offense_window]
-        offense_count = len(prev)
-
-        if offense_count == 0:
-            # First offense: delete only the offending message (no timeout, no nuke)
-            self.offenses[user_id] = prev + [now]
-            try:
-                await message.delete()
-                await self._send_log(
-                    message.guild,
-                    f"🗑️ Deleted a message from {member.mention} in the guard channel (first offense).",
-                )
-            except discord.Forbidden:
-                logging.warning("Missing Manage Messages permission to delete in guard channel.")
-            except discord.NotFound:
-                pass
-            except Exception as e:
-                logging.error("Error deleting first-offense message: %s", e)
-            return
-
-        # Second offense: ban + purge + auto-unban
+        # Sofortiger Ban für jede Nachricht im Guard-Channel
         try:
             del_seconds = await self.config.delete_message_seconds()
             ban_hours = await self.config.ban_duration_hours()
             await member.ban(
-                reason=f"Second offense: banned for {ban_hours} hours.",
+                reason=f"Posted in guard channel; banned for {ban_hours} hours.",
                 delete_message_seconds=del_seconds,
             )
             logging.info(
-                "Banned %s in guild %s (delete %s seconds)", member, message.guild.id, del_seconds
+                "Banned %s in guild %s (delete %s seconds)",
+                member, message.guild.id, del_seconds,
             )
         except discord.Forbidden:
             logging.warning("Missing permission to ban %s", member)
-            await self._send_log(message.guild, f"❌ Missing Ban Members permission for {member.mention}.")
+            await self._send_log(
+                message.guild, f"❌ Missing Ban Members permission for {member.mention}."
+            )
             return
         except Exception as e:
             logging.error("Error banning %s: %s", member, e)
@@ -244,36 +200,16 @@ class ChannelGuard(commands.Cog):
 
         await self._send_log(
             message.guild,
-            f"🚫 {member.mention} banned (2nd offense). Auto-unban in {ban_hours} hour(s). "
+            f"🚫 {member.mention} banned (posted in guard channel). "
+            f"Auto-unban in {ban_hours} hour(s). "
             f"Discord deleting last {del_seconds} seconds of messages...",
         )
 
-        # Purge recent messages using bulk deletion (rate-limit friendly)
-        recent_minutes = await self.config.recent_minutes()
-        if recent_minutes > 0:
-            threshold = now - datetime.timedelta(minutes=recent_minutes)
-            for channel in message.guild.text_channels:
-                try:
-                    # bulk=True deletes in batches of 100 -> 1 API call per 100 messages.
-                    # limit bounds how many messages we scan per channel.
-                    await channel.purge(
-                        after=threshold,
-                        limit=500,
-                        check=lambda m, uid=user_id: m.author.id == uid,
-                        bulk=True,
-                    )
-                except discord.Forbidden:
-                    pass
-                except discord.HTTPException as e:
-                    logging.warning("Purge rate-limited/error in #%s: %s", channel.name, e)
-                except Exception as e:
-                    logging.error("Error purging #%s: %s", channel.name, e)
-
-        # Schedule auto-unban
+        # Auto-Unban planen
         await self._schedule_unban(message.guild.id, user_id, ban_hours)
-        self.offenses.pop(user_id, None)
-
-        await self._send_log(message.guild, f"✅ Purge complete. Ban for {member.mention} scheduled for auto-unban.")
+        await self._send_log(
+            message.guild, f"✅ Ban for {member.mention} scheduled for auto-unban."
+        )
 
 
 def setup(bot):
