@@ -3,6 +3,18 @@ import re
 from redbot.core import commands, Config, app_commands
 from typing import Set
 
+# Common country and generic TLDs used to expand bare domains like "amazon".
+# Multi-part TLDs must come first so co.uk etc. match before "uk".
+COMMON_TLDS = [
+    "co.uk", "com.au", "org.uk", "co.jp", "com.br", "co.nz", "com.mx",
+    "com.cn", "com.tr", "com.ar", "com.sg", "com.my",
+    "com", "net", "org", "io", "me", "tv", "info", "biz", "app", "dev",
+    "de", "ca", "fr", "es", "it", "nl", "pl", "se", "no", "fi", "dk",
+    "at", "ch", "be", "pt", "gr", "cz", "sk", "hu", "ro", "bg", "hr",
+    "si", "lt", "lv", "ee", "ru", "ua", "tr", "in", "cn", "jp", "kr",
+    "au", "nz", "za", "br", "mx", "ar", "cl", "co", "us", "uk",
+]
+
 class AutoMod(commands.Cog):
     """AutoMod: Manage Discord AutoMod rules via simple commands."""
 
@@ -10,6 +22,29 @@ class AutoMod(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=2468101214)
         self.config.register_guild(allowed_roles=[], shortnames={}, default_rule=None)
+
+    @classmethod
+    def _has_tld(cls, domain: str) -> bool:
+        """Check whether the given domain already ends in a known TLD."""
+        d = domain.strip().lower()
+        for tld in COMMON_TLDS:
+            if d.endswith("." + tld):
+                return True
+        return False
+
+    @classmethod
+    def _expand_entries(cls, domain: str) -> set:
+        """Expand a bare domain (e.g. ``amazon``) into wildcard entries for all TLDs.
+
+        ``amazon`` -> {*amazon.com*, *amazon.de*, *amazon.co.uk*, ...}
+        ``amazon.de`` -> {*amazon.de*} (already has a TLD, unchanged)
+        """
+        bare = cls._bare(domain)
+        if not bare:
+            return set()
+        if cls._has_tld(bare):
+            return {f"*{bare}*"}
+        return {f"*{bare}.{tld}*" for tld in COMMON_TLDS}
 
     async def has_automod_permission(self, ctx):
         if ctx.author.guild_permissions.administrator:
@@ -151,7 +186,12 @@ class AutoMod(commands.Cog):
         old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
-        new = {self._normalize_entry(w) for w in domains.replace("\n", ",").split(",") if self._normalize_entry(w)}
+        # Expand bare domains (e.g. "amazon") into all TLD variants
+        new = set()
+        for w in domains.replace("\n", ",").split(","):
+            if not w.strip():
+                continue
+            new |= self._expand_entries(w)
         merged = old | new
         await self._set_allow_list(ctx, r, merged)
         added = sorted(new - old)
@@ -173,13 +213,20 @@ class AutoMod(commands.Cog):
         old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
-        # Build bare forms of requested domains for robust matching
-        wanted = {self._bare(w) for w in domains.replace("\n", ",").split(",") if self._bare(w)}
-        # Remove any entry whose bare form matches a requested domain
+        # Build bare roots of requested domains; removing "amazon" also removes
+        # every "*amazon.*" expansion.
+        requested = [self._bare(w) for w in domains.replace("\n", ",").split(",") if self._bare(w)]
         kept = set()
         gone = []
         for entry in old:
-            if self._bare(entry) in wanted:
+            bare = self._bare(entry)
+            # Remove if the bare domain matches exactly, or is an expansion of it
+            removed = False
+            for req in requested:
+                if bare == req or bare.startswith(req + "."):
+                    removed = True
+                    break
+            if removed:
                 gone.append(entry)
             else:
                 kept.add(entry)
