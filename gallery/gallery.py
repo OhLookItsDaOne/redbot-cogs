@@ -19,11 +19,21 @@ class Gallery(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=8675309)
         default_guild = {
-            "gallery_channels": [],        # list of channel IDs
-            "thread_name": "Screenshot from {author}",
-            "hint_duration": 30,           # seconds before hint is deleted
+            "gallery_channels": [],          # list of channel IDs
+            "thread_name": "Screenshot from {user}",
+            "hint_duration": 30,             # seconds before hint is deleted
+            "exempt_admins": False,          # whether admins are exempt from rules
+            "thread_message_enabled": True,  # whether to post a message in the thread
+            "thread_message": "Feel free to comment on this image or post more images here.",
         }
         self.config.register_guild(**default_guild)
+
+    @staticmethod
+    def _format(text: str, author: discord.Member) -> str:
+        """Replace placeholders with the author's info."""
+        return text.replace("{user}", author.display_name).replace(
+            "{user_mention}", author.mention
+        )
 
     # ─── Commands ─────────────────────────────────────────────────────────
     @commands.hybrid_command(extras={"red_force_enable": True})
@@ -87,11 +97,50 @@ class Gallery(commands.Cog):
     @commands.hybrid_command(extras={"red_force_enable": True})
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
+    async def toggleadmins(self, ctx, state: str):
+        """Toggles whether admins are exempt from the gallery rules (Admin only)."""
+        if state.lower() in ["on", "true", "yes", "enable"]:
+            await self.config.guild(ctx.guild).exempt_admins.set(True)
+            await ctx.send("✅ Admins are now **exempt** from the gallery rules.")
+        elif state.lower() in ["off", "false", "no", "disable"]:
+            await self.config.guild(ctx.guild).exempt_admins.set(False)
+            await ctx.send("✅ Admins are now **NOT exempt** from the gallery rules.")
+        else:
+            await ctx.send("❌ Please use `on` or `off`.")
+
+    @commands.hybrid_command(extras={"red_force_enable": True})
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def togglethreadmessage(self, ctx, state: str):
+        """Toggles whether a message is posted in newly created threads (Admin only)."""
+        if state.lower() in ["on", "true", "yes", "enable"]:
+            await self.config.guild(ctx.guild).thread_message_enabled.set(True)
+            await ctx.send("✅ Thread messages are now **ON**.")
+        elif state.lower() in ["off", "false", "no", "disable"]:
+            await self.config.guild(ctx.guild).thread_message_enabled.set(False)
+            await ctx.send("✅ Thread messages are now **OFF**.")
+        else:
+            await ctx.send("❌ Please use `on` or `off`.")
+
+    @commands.hybrid_command(extras={"red_force_enable": True})
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    async def setthreadmessage(self, ctx, *, text: str):
+        """Sets the message posted in new threads. Use `{user}` (name) or `{user_mention}` (mention) (Admin only)."""
+        await self.config.guild(ctx.guild).thread_message.set(text)
+        await ctx.send(f"✅ Thread message set to:\n`{text}`")
+
+    @commands.hybrid_command(extras={"red_force_enable": True})
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
     async def gallerystatus(self, ctx):
         """Shows the gallery configuration (Admin only)."""
         channels = await self.config.guild(ctx.guild).gallery_channels()
         thread_name = await self.config.guild(ctx.guild).thread_name()
         hint = await self.config.guild(ctx.guild).hint_duration()
+        exempt = await self.config.guild(ctx.guild).exempt_admins()
+        msg_enabled = await self.config.guild(ctx.guild).thread_message_enabled()
+        msg = await self.config.guild(ctx.guild).thread_message()
         names = []
         for cid in channels:
             ch = ctx.guild.get_channel(cid)
@@ -99,7 +148,10 @@ class Gallery(commands.Cog):
         await ctx.send(
             "**Gallery channels:**\n" + ("\n".join(names) if names else "None") +
             f"\n**Thread name:** `{thread_name}`\n"
-            f"**Hint duration:** {hint}s"
+            f"**Hint duration:** {hint}s\n"
+            f"**Admins exempt:** {'ON' if exempt else 'OFF'}\n"
+            f"**Thread message:** {'ON' if msg_enabled else 'OFF'}"
+            + (f"\n**Message:** `{msg}`" if msg_enabled else "")
         )
 
     # ─── Listener ─────────────────────────────────────────────────────────
@@ -115,6 +167,11 @@ class Gallery(commands.Cog):
         if message.channel.id not in gallery_channels:
             return
 
+        # Admin exemption
+        exempt = await self.config.guild(message.guild).exempt_admins()
+        if exempt and message.author.guild_permissions.administrator:
+            return
+
         # Count image attachments
         pictures = [
             a for a in message.attachments
@@ -125,15 +182,19 @@ class Gallery(commands.Cog):
             # Create a thread for this image message
             thread_name = await self.config.guild(message.guild).thread_name()
             try:
-                name = thread_name.format(author=message.author.display_name)
-            except (KeyError, IndexError):
+                name = self._format(thread_name, message.author)
+            except Exception:
                 name = f"Screenshot from {message.author.display_name}"
             try:
-                await message.channel.create_thread(
+                thread = await message.channel.create_thread(
                     name=name[:100],
                     message=message,
                     auto_archive_duration=10080,
                 )
+                # Optional message in the thread
+                if await self.config.guild(message.guild).thread_message_enabled():
+                    msg_text = await self.config.guild(message.guild).thread_message()
+                    await thread.send(self._format(msg_text, message.author))
             except discord.Forbidden:
                 log.warning("Missing permission to create thread in %s", message.channel)
             except Exception as e:
