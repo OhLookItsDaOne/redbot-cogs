@@ -1,5 +1,4 @@
 import discord
-import io
 import logging
 import re
 from redbot.core import commands, Config, app_commands
@@ -167,37 +166,19 @@ class UnsupportedMessageForwarder(commands.Cog):
                 await respond("❌ The target channel is invalid or not accessible.")
                 return
 
-        embed = discord.Embed(
-            title="Forwarded Message",
-            description=message.content or "[No text content]",
-            color=discord.Color.blue(),
-            timestamp=message.created_at
-        )
-        embed.set_author(
-            name=f"{message.author} in #{message.channel.name}",
-            icon_url=message.author.avatar.url if message.author.avatar else None
-        )
-        embed.add_field(
-            name="📎 Original Message",
-            value=f"[Click to view original]({message.jump_url})",
-            inline=False
-        )
-
-        # Lade alle Attachments herunter und hänge sie als echte Dateien an
-        files = []
+        # Layout: Mention zuerst, dann Text, dann Original-Link, dann Attachments.
+        # Attachments werden als URLs eingefügt - Discord rendert Bilder automatisch
+        # als Embed (kein Download/Speicherverbrauch auf dem Server).
+        lines = [f"**Forwarded message from:** {message.author.mention}"]
+        if message.content:
+            lines.append(message.content)
+        lines.append(f"🔗 [Original message]({message.jump_url})")
         for attachment in message.attachments:
-            try:
-                data = await attachment.read()
-                files.append(discord.File(io.BytesIO(data), filename=attachment.filename))
-            except Exception as e:
-                logging.error(f"Error downloading attachment {attachment.filename}: {e}")
+            lines.append(attachment.url)
+        content = "\n".join(lines)
 
         try:
-            await target_channel.send(
-                content=message.author.mention,
-                embed=embed,
-                files=files if files else None
-            )
+            await target_channel.send(content=content)
             await respond(f"✅ Message has been forwarded to {target_channel.mention}.")
         except discord.Forbidden:
             logging.error("Bot lacks permissions to send messages in the target channel.")
