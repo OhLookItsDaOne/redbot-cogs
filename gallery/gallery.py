@@ -126,7 +126,7 @@ class Gallery(commands.Cog):
     @commands.has_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def setthreadmessage(self, ctx, *, text: str):
-        """Sets the message posted in new threads. Use `{user}` (name) or `{user_mention}` (mention) (Admin only)."""
+        """Sets the message posted in new threads (Admin only). Use {user} or {user_mention}."""
         await self.config.guild(ctx.guild).thread_message.set(text)
         await ctx.send(f"✅ Thread message set to:\n`{text}`")
 
