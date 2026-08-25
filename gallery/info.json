@@ -1,7 +1,7 @@
 {
     "author": ["OhLookItsDaOne"],
     "short": "Image gallery channels with threads",
-    "description": "Configures channels where only images are allowed. Each image message creates a thread for comments and further images. Plain text messages are deleted with a temporary warning.",
+    "description": "Configures channels where only images are allowed. Each image message creates a thread for comments and further images. Plain text messages are deleted with a temporary warning.\n\nThis cog is based on the original bot code and idea provided by Kat and Vee, who granted permission to modify and reuse it.",
     "install_msg": "Cog installed. Use `[p]setgallery <#channel>` to configure a gallery channel.",
     "end_user_data_statement": "This cog stores only guild configuration (gallery channel IDs, thread name template, hint duration). No end user data is stored."
 }
