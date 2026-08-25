@@ -61,6 +61,20 @@ class AutoMod(commands.Cog):
         return r, err, default
 
     @staticmethod
+    def _bare(entry: str) -> str:
+        """Return a bare domain form (no scheme, www, port) for comparison.
+
+        ``*https://www.dlink.com*`` and ``dlink.com`` both become ``dlink.com``.
+        """
+        e = entry.strip().lower()
+        e = e.strip("*")
+        e = re.sub(r"^https?://", "", e)
+        e = re.sub(r"^www\.", "", e)
+        e = e.rstrip("/")
+        e = re.sub(r":\d+$", "", e)
+        return e
+
+    @staticmethod
     def _normalize_entry(entry: str) -> str:
         """Normalize a whitelist entry to the AutoMod wildcard format.
 
@@ -159,12 +173,19 @@ class AutoMod(commands.Cog):
         old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
-        rem = {self._normalize_entry(w) for w in domains.replace("\n", ",").split(",") if self._normalize_entry(w)}
-        kept = old - rem
+        # Build bare forms of requested domains for robust matching
+        wanted = {self._bare(w) for w in domains.replace("\n", ",").split(",") if self._bare(w)}
+        # Remove any entry whose bare form matches a requested domain
+        kept = set()
+        gone = []
+        for entry in old:
+            if self._bare(entry) in wanted:
+                gone.append(entry)
+            else:
+                kept.add(entry)
         await self._set_allow_list(ctx, r, kept)
-        gone = sorted(old & rem)
         return await ctx.send(
-            f"✅ Rule `{used}` — Removed: {', '.join(gone) or '— none —'}\n"
+            f"✅ Rule `{used}` — Removed: {', '.join(sorted(gone)) or '— none —'}\n"
             f"Current allow list: {', '.join(sorted(kept)) or '— empty —'}"
         )
 
