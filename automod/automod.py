@@ -1,4 +1,5 @@
 import discord
+import re
 from redbot.core import commands, Config, app_commands
 from typing import Set
 
@@ -63,14 +64,21 @@ class AutoMod(commands.Cog):
     def _normalize_entry(entry: str) -> str:
         """Normalize a whitelist entry to the AutoMod wildcard format.
 
-        ``bestbuy.ca`` becomes ``*bestbuy.ca*`` so it matches any message
-        containing the domain. Existing wildcards are preserved.
+        ``https://www.bestbuy.ca`` becomes ``*bestbuy.ca*`` so it matches any
+        message containing the domain. Scheme, port and ``www.`` are stripped,
+        existing wildcards are preserved.
         """
         e = entry.strip().lower()
         if not e:
             return ""
         if "*" not in e:
-            e = f"*{e}*"
+            # strip scheme, www., trailing slash and port
+            e = re.sub(r"^https?://", "", e)
+            e = re.sub(r"^www\.", "", e)
+            e = e.rstrip("/")
+            e = re.sub(r":\d+$", "", e)
+            if e:
+                e = f"*{e}*"
         return e
 
     async def _get_allow_list(self, r) -> set:
