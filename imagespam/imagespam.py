@@ -2,8 +2,11 @@ import discord
 from redbot.core import commands, Config, app_commands
 from redbot.core.utils.chat_formatting import pagify, box
 import datetime
+import logging
 from typing import Optional, List
 import re
+
+log = logging.getLogger("red.imagespam")
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff")
 
@@ -49,11 +52,11 @@ class ImageSpam(commands.Cog):
             re.IGNORECASE
         )
 
-    def is_admin_or_role(self, ctx):
+    async def is_admin_or_role(self, ctx):
         """Check if user has admin permissions or the configured admin role."""
         if ctx.author.guild_permissions.administrator:
             return True
-        admin_role_id = self.config.guild(ctx.guild).admin_role_id()
+        admin_role_id = await self.config.guild(ctx.guild).admin_role_id()
         if admin_role_id:
             admin_role = ctx.guild.get_role(admin_role_id)
             if admin_role and admin_role in ctx.author.roles:
@@ -160,7 +163,7 @@ class ImageSpam(commands.Cog):
             # Send the message and delete it after specified duration
             await message.channel.send(channel_msg, delete_after=conf["channel_message_duration"])
         except Exception as e:
-            print(f"[ImagePrevent] Error sending channel message: {e}")
+            log.error("Error sending channel message: %s", e)
 
     @commands.hybrid_group(name="imagespam", invoke_without_command=True, extras={"red_force_enable": True})
     @commands.guild_only()
@@ -168,7 +171,7 @@ class ImageSpam(commands.Cog):
     async def imagespam(self, ctx):
         """Manage image spam prevention system."""
         if ctx.invoked_subcommand is None:
-            await ctx.send_help("imagespam")
+            await ctx.send_help(ctx.command)
 
     @commands.hybrid_group(name="imagespaminfo", invoke_without_command=True, extras={"red_force_enable": True})
     @commands.guild_only()
@@ -176,7 +179,7 @@ class ImageSpam(commands.Cog):
     async def imagespaminfo(self, ctx):
         """Show image prevention information and diagnostics."""
         if ctx.invoked_subcommand is None:
-            await ctx.send_help("imagespaminfo")
+            await ctx.send_help(ctx.command)
 
     @imagespaminfo.command(name="help")
     async def imagespam_help(self, ctx):
@@ -258,7 +261,7 @@ class ImageSpam(commands.Cog):
 
     async def check_admin_or_role(self, ctx):
         """Check if user has permission to use admin commands."""
-        if not self.is_admin_or_role(ctx):
+        if not await self.is_admin_or_role(ctx):
             try:
                 await ctx.author.send("❌ You need administrator permissions or the configured admin role to use this command.")
             except discord.Forbidden:
@@ -872,7 +875,7 @@ class ImageSpam(commands.Cog):
         embed = discord.Embed(
             title="🛡️ Image Prevention Settings",
             color=discord.Color.blue(),
-            timestamp=datetime.datetime.utcnow()
+            timestamp=discord.utils.utcnow()
         )
         
         embed.add_field(name="Max Images", value=f"**{conf['max_images']}** per message", inline=True)
@@ -949,19 +952,19 @@ class ImageSpam(commands.Cog):
             return
         
         # Debug-Ausgabe
-        print(f"[ImagePrevent] Detected {img_count} images in message from {message.author} in #{message.channel.name}")
+        log.info("Detected %s images in message from %s in #%s", img_count, message.author, message.channel.name)
         
         # Nachricht löschen
         delete_success = False
         try:
             await message.delete()
             delete_success = True
-            print(f"[ImagePrevent] Deleted message with {img_count} images (max: {conf['max_images']})")
+            log.info("Deleted message with %s images (max: %s)", img_count, conf['max_images'])
         except (discord.Forbidden, discord.NotFound) as e:
             delete_success = False
-            print(f"[ImagePrevent] Failed to delete message: {e}")
+            log.warning("Failed to delete message: %s", e)
         except Exception as e:
-            print(f"[ImagePrevent] Error deleting message: {e}")
+            log.error("Error deleting message: %s", e)
             delete_success = False
         
         # Channel-Nachricht senden
@@ -973,14 +976,14 @@ class ImageSpam(commands.Cog):
         if delete_success and short_timeout > 0:
             try:
                 await message.author.timeout(
-                    until=datetime.datetime.utcnow() + datetime.timedelta(seconds=short_timeout),
+                    until=discord.utils.utcnow() + datetime.timedelta(seconds=short_timeout),
                     reason=f"Image spam: {img_count} images (max {conf['max_images']})"
                 )
-                print(f"[ImagePrevent] Short timeout {short_timeout}s applied to {message.author}")
+                log.info("Short timeout %ss applied to %s", short_timeout, message.author)
             except discord.Forbidden:
-                print(f"[ImagePrevent] No permission to timeout {message.author} (needs Moderate Members)")
+                log.warning("No permission to timeout %s (needs Moderate Members)", message.author)
             except Exception as e:
-                print(f"[ImagePrevent] Error applying short timeout: {e}")
+                log.error("Error applying short timeout: %s", e)
         
         # Logge in Log-Channel
         if conf["log_channel_id"] and conf["notification_on_delete"]:
@@ -995,11 +998,11 @@ class ImageSpam(commands.Cog):
                     )
                     await log_channel.send(log_msg)
                 except Exception as e:
-                    print(f"[ImagePrevent] Error sending log: {e}")
+                    log.error("Error sending log: %s", e)
         
         # Timeout-Logik für wiederholte Verstöße (5 Minuten Fenster)
         if conf["repeated_offense_timeout"] and delete_success:
-            now = datetime.datetime.utcnow()
+            now = discord.utils.utcnow()
             guild_id = message.guild.id
             user_id = message.author.id
             
@@ -1024,10 +1027,10 @@ class ImageSpam(commands.Cog):
                 try:
                     timeout_duration = datetime.timedelta(minutes=conf.get("timeout_duration", 5))
                     await message.author.timeout(
-                        until=datetime.datetime.utcnow() + timeout_duration,
+                        until=discord.utils.utcnow() + timeout_duration,
                         reason=f"Repeated image spam violations ({len(user_offenses)} in {window_seconds}s)"
                     )
-                    print(f"[ImagePrevent] Timed out {message.author} for {conf['timeout_duration']} minutes (repeated violations)")
+                    log.info("Timed out %s for %s minutes (repeated violations)", message.author, conf['timeout_duration'])
                     
                     # Logge Timeout im Log-Channel
                     if conf["log_channel_id"] and conf["notification_on_delete"]:
@@ -1045,9 +1048,9 @@ class ImageSpam(commands.Cog):
                     self.offenses[guild_id][user_id] = []
                     
                 except discord.Forbidden:
-                    print(f"[ImagePrevent] No permission to timeout {message.author}")
+                    log.warning("No permission to timeout %s", message.author)
                 except Exception as e:
-                    print(f"[ImagePrevent] Error applying timeout: {e}")
+                    log.error("Error applying timeout: %s", e)
 
 async def setup(bot):
     await bot.add_cog(ImageSpam(bot))

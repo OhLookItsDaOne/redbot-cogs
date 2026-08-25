@@ -3,8 +3,6 @@ import logging
 import re
 from redbot.core import commands, Config, app_commands
 
-logging.basicConfig(level=logging.INFO)
-
 MESSAGE_LINK_RE = re.compile(
     r"https?://(?:canary|ptb|www\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)"
 )
@@ -201,5 +199,6 @@ async def forward_to_support(interaction: discord.Interaction, message: discord.
     if cog is None:
         await interaction.response.send_message("❌ Cog is not loaded.", ephemeral=True)
         return
-    respond = lambda msg: interaction.response.send_message(msg, ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    respond = lambda msg: interaction.followup.send(msg, ephemeral=True)
     await cog._forward(interaction.user, interaction.guild, message, respond)

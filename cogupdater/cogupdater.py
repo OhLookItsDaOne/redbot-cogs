@@ -67,7 +67,11 @@ class CogUpdater(commands.Cog):
         - the cog's file is inside a git checkout, OR
         - the cog name matches a folder inside a Downloader repo.
         """
-        self_ext = self.__class__.__module__.split(".")[0]
+        self_mod = self.__class__.__module__
+
+        def skip(name):
+            return name == self_mod or name == self_mod.split(".")[0]
+
         groups = {}
 
         def add(name, repo_path):
@@ -76,7 +80,7 @@ class CogUpdater(commands.Cog):
                 groups[str(repo_path)].append(name)
 
         for name, ext in self.bot.extensions.items():
-            if name == self_ext:
+            if skip(name):
                 continue
             f = getattr(ext, "__file__", None)
             if not f:
@@ -92,7 +96,7 @@ class CogUpdater(commands.Cog):
             for exts in groups.values():
                 known.update(exts)
             for name, ext in self.bot.extensions.items():
-                if name == self_ext or name in known:
+                if skip(name) or name in known:
                     continue
                 for repo_dir in repos_folder.iterdir():
                     # Only consider repos that are actual git repositories
@@ -170,21 +174,21 @@ class CogUpdater(commands.Cog):
                 log.exception("Failed to reload %s", name)
 
         embed = discord.Embed(
-            title="🔄 Cog Update abgeschlossen",
+            title="🔄 Cog Update Finished",
             colour=discord.Colour.green() if not (failed_pulls or failed) else discord.Colour.red(),
-            timestamp=ctx.message.created_at,
+            timestamp=discord.utils.utcnow(),
         )
         embed.add_field(name="Repos", value="\n".join(repo_lines) or "—", inline=False)
         embed.add_field(name="Reloaded", value=", ".join(f"`{n}`" for n in reloaded) or "—", inline=False)
         if failed_pulls:
             embed.add_field(
-                name="Pull fehlgeschlagen",
+                name="Pull failed",
                 value=", ".join(f"`{n}`" for n in failed_pulls),
                 inline=False,
             )
         if failed:
             embed.add_field(
-                name="Reload fehlgeschlagen",
+                name="Reload failed",
                 value="\n".join(f"`{n}` — {e}" for n, e in failed),
                 inline=False,
             )

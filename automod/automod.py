@@ -363,7 +363,7 @@ class AutoMod(commands.Cog):
         if not r:
             return await ctx.send("❌ Rule not found. Use `/automod list`.")
         await r.edit(enabled=False)
-        return await ctx.send(f"❌ **{r.name}** disabled.")
+        return await ctx.send(f"✅ **{r.name}** disabled.")
 
     @automod.command(name="add")
     async def add_words(self, ctx, rule: str, words: str):
@@ -440,22 +440,17 @@ class AutoMod(commands.Cog):
         return await ctx.send(embed=em)
 
     async def _add_words(self, ctx, r, words: str):
-        old = set(getattr(r.trigger, "allow_list", []))
+        old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
         new = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         merged = old | new
-
-        # rebuild just the keyword fields
-        kt = r.trigger.keyword_filter if hasattr(r.trigger, "keyword_filter") else None
-        rp = r.trigger.regex_patterns if hasattr(r.trigger, "regex_patterns") else None
-        await r.edit(
-            trigger=discord.AutoModTrigger(
-                keyword_filter=kt,
-                allow_list=list(merged),
-                regex_patterns=rp
+        if len(merged) > ALLOW_LIST_LIMIT:
+            return await ctx.send(
+                f"❌ Cannot add: the allow list would exceed Discord's limit of "
+                f"**{ALLOW_LIST_LIMIT}** entries (currently {len(old)}, adding {len(new - old)})."
             )
-        )
+        await self._set_allow_list(ctx, r, merged)
         added = sorted(new - old)
         return await ctx.send(
             f"✅ Added: {', '.join(added) or '— none —'}\n"
@@ -463,21 +458,13 @@ class AutoMod(commands.Cog):
         )
 
     async def _remove_words(self, ctx, r, words: str):
-        old = set(getattr(r.trigger, "allow_list", []))
+        old = await self._get_allow_list(r)
         if old is None:
             return await ctx.send("❌ Only keyword‑style rules support an allow list.")
         rem = {w.strip() for w in words.replace("\n", ",").split(",") if w.strip()}
         kept = old - rem
 
-        kt = r.trigger.keyword_filter if hasattr(r.trigger, "keyword_filter") else None
-        rp = r.trigger.regex_patterns if hasattr(r.trigger, "regex_patterns") else None
-        await r.edit(
-            trigger=discord.AutoModTrigger(
-                keyword_filter=kt,
-                allow_list=list(kept),
-                regex_patterns=rp
-            )
-        )
+        await self._set_allow_list(ctx, r, kept)
         gone = sorted(old & rem)
         return await ctx.send(
             f"✅ Removed: {', '.join(gone) or '— none —'}\n"

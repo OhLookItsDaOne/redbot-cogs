@@ -3,8 +3,6 @@ import discord
 import asyncio
 from redbot.core import commands, Config, app_commands
 
-logging.basicConfig(level=logging.INFO)
-
 
 class SupportForum(commands.Cog):
     """Automatically posts a troubleshooting message in new forum posts."""

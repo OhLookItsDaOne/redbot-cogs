@@ -116,6 +116,11 @@ class AutoReply(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
         """Handles new thread creation and scans the first 3 messages for keywords."""
+        # Only act on threads whose parent channel is monitored (e.g. forum posts)
+        channel_ids = await self.config.channel_ids()
+        if not channel_ids or thread.parent_id not in channel_ids:
+            return
+
         # Get the creator of the thread
         creator = thread.owner
 
@@ -146,6 +151,7 @@ class AutoReply(commands.Cog):
                         await message.channel.send(response_message)
 
     @commands.hybrid_group(name="autoreply", extras={"red_force_enable": True})
+    @commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def autoreply(self, ctx):
         """Manage keywords and settings."""
@@ -180,7 +186,11 @@ class AutoReply(commands.Cog):
         timeout_minutes = await self.config.timeout_minutes()
 
         # Get the channel names for the IDs
-        channel_mentions = [self.bot.get_channel(channel_id).mention for channel_id in channel_ids]
+        channel_mentions = [
+            self.bot.get_channel(channel_id).mention
+            for channel_id in channel_ids
+            if self.bot.get_channel(channel_id)
+        ]
         # Get the role names for the ignored role IDs
         ignored_role_names = []
         for role_id in ignored_roles:

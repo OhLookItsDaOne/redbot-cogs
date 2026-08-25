@@ -4,8 +4,6 @@ import logging
 import discord
 from redbot.core import commands, Config, app_commands
 
-logging.basicConfig(level=logging.INFO)
-
 
 class BanChannel(commands.Cog):
     """Ban anyone who posts in the configured channel.
