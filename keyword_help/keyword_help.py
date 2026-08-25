@@ -1,7 +1,7 @@
 import discord
 import time
 import difflib
-from redbot.core import commands, Config
+from redbot.core import commands, Config, app_commands
 import re
 import logging
 
@@ -146,6 +146,7 @@ class KeywordHelp(commands.Cog):
                         await message.channel.send(response_message)
 
     @commands.hybrid_group(name="kw", extras={"red_force_enable": True})
+    @app_commands.default_permissions(administrator=True)
     async def kw(self, ctx):
         """Manage keywords and settings."""
         if ctx.invoked_subcommand is None:

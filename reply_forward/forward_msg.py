@@ -61,6 +61,8 @@ class UnsupportedMessageForwarder(commands.Cog):
             await ctx.send(f"Role **{role.name}** is not in the allowed roles.")
 
     @commands.hybrid_command(extras={"red_force_enable": True})
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
     async def listroles(self, ctx):
         """Lists the roles allowed to use the Forward to Support command."""
         roles = await self.config.allowed_role_ids()
