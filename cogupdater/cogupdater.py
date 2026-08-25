@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 import discord
@@ -9,11 +10,15 @@ log = logging.getLogger("red.cogupdater")
 
 
 class CogUpdater(commands.Cog):
-    """Updates the git repos of all loaded cogs and reloads them.
+    """Updates the repos of all loaded cogs and reloads them.
 
-    The command ``cogupdate`` pulls every git repository that contains at
-    least one loaded cog, then reloads those cogs so the new code is used.
-    The cog running this command is never reloaded by itself.
+    The command ``cogupdate``:
+    1. Finds the git repositories that contain the loaded cogs
+       (via the Downloader repos folder and/or git roots).
+    2. Runs ``git pull`` in each repo.
+    3. Copies the updated cog files from the repo into the installed
+       cog locations, so the running cogs actually use the new code.
+    4. Reloads those cogs (except this cog, which cannot reload itself).
     """
 
     def __init__(self, bot):
@@ -30,6 +35,16 @@ class CogUpdater(commands.Cog):
                 return None
             current = current.parent
 
+    def _get_repos_folder(self) -> Path | None:
+        """Return the Downloader repos folder if available."""
+        downloader = self.bot.get_cog("Downloader")
+        if downloader is None:
+            return None
+        try:
+            return Path(downloader._repo_manager.repos_folder)
+        except Exception:
+            return None
+
     @staticmethod
     async def _git_pull(repo: Path):
         """Run ``git pull --ff-only`` in *repo* and return (returncode, output)."""
@@ -45,10 +60,21 @@ class CogUpdater(commands.Cog):
         out, err = await proc.communicate()
         return proc.returncode, (out + err).decode("utf-8", errors="replace")
 
-    def _extension_groups(self):
-        """Map git repo path -> list of loaded extensions in that repo (excluding self)."""
+    def _extension_groups(self) -> dict:
+        """Map git repo path -> list of loaded extensions in that repo (excluding self).
+
+        A loaded cog belongs to a repo if:
+        - the cog's file is inside a git checkout, OR
+        - the cog name matches a folder inside a Downloader repo.
+        """
         self_ext = self.__class__.__module__.split(".")[0]
         groups = {}
+
+        def add(name, repo_path):
+            groups.setdefault(str(repo_path), [])
+            if name not in groups[str(repo_path)]:
+                groups[str(repo_path)].append(name)
+
         for name, ext in self.bot.extensions.items():
             if name == self_ext:
                 continue
@@ -57,14 +83,38 @@ class CogUpdater(commands.Cog):
                 continue
             root = self._git_root(Path(f).resolve())
             if root is not None:
-                groups.setdefault(str(root), []).append(name)
+                add(name, root)
+
+        # Map remaining loaded cogs to Downloader repos by folder name
+        repos_folder = self._get_repos_folder()
+        if repos_folder is not None and repos_folder.exists():
+            known = set()
+            for exts in groups.values():
+                known.update(exts)
+            for name, ext in self.bot.extensions.items():
+                if name == self_ext or name in known:
+                    continue
+                for repo_dir in repos_folder.iterdir():
+                    if repo_dir.is_dir() and (repo_dir / name).is_dir():
+                        add(name, repo_dir)
+                        break
+
         return groups
+
+    @staticmethod
+    def _sync_cog_files(repo: Path, name: str, installed_dir: Path) -> Path | None:
+        """Copy the cog files from the repo folder into the installed location."""
+        src = repo / name
+        if not src.is_dir() or not installed_dir.is_dir():
+            return None
+        shutil.copytree(src, installed_dir, dirs_exist_ok=True)
+        return installed_dir
 
     @commands.hybrid_command(name="cogupdate", extras={"red_force_enable": True})
     @commands.is_owner()
     @app_commands.default_permissions(administrator=True)
     async def cogupdate(self, ctx):
-        """Pulls the git repos of all loaded cogs and reloads them (except this cog)."""
+        """Pulls the git repos of all loaded cogs, syncs and reloads them (except this cog)."""
         groups = self._extension_groups()
         if not groups:
             await ctx.send("❌ No git repos found for the loaded cogs.")
@@ -79,7 +129,14 @@ class CogUpdater(commands.Cog):
             code, output = await self._git_pull(Path(repo))
             if code == 0:
                 repo_lines.append(f"✅ `{repo}`\n```\n{output.strip()}\n```")
-                to_reload.extend(exts)
+                for name in exts:
+                    ext = self.bot.extensions.get(name)
+                    if ext is None or not getattr(ext, "__file__", None):
+                        continue
+                    installed_dir = Path(ext.__file__).resolve().parent
+                    synced = self._sync_cog_files(Path(repo), name, installed_dir)
+                    if synced is not None:
+                        to_reload.append(name)
             else:
                 repo_lines.append(f"❌ `{repo}` (exit {code})\n```\n{output.strip()}\n```")
                 failed_pulls.extend(exts)
