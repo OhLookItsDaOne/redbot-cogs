@@ -1,16 +1,24 @@
 import discord
 import io
 import logging
+import re
 from redbot.core import commands, Config, app_commands
 
 logging.basicConfig(level=logging.INFO)
 
-class UnsupportedMessageForwarder(commands.Cog):
-    """A cog to forward messages using Discord's message context menu.
+MESSAGE_LINK_RE = re.compile(
+    r"https?://(?:canary|ptb|www\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)"
+)
 
-    Users with allowed roles (set via command) can right-click a message,
-    open Apps and choose "Forward to Support" to forward it to the configured
-    target channel. This works without the Message Content intent.
+
+class UnsupportedMessageForwarder(commands.Cog):
+    """A cog to forward messages to a configured target channel.
+
+    Supports three ways to forward:
+    - Message context menu (right click -> Apps -> Forward to Support)
+    - Slash/prefix command ``/forward <message link>`` (or ``!unsupported`` as a reply)
+    The forwarded message mentions the author, links back to the original message
+    and includes attachments.
     """
 
     def __init__(self, bot):
@@ -67,30 +75,96 @@ class UnsupportedMessageForwarder(commands.Cog):
                     role_names.append(role.name)
             await ctx.send("Allowed roles: " + ", ".join(role_names))
 
-    async def forward_message(self, interaction: discord.Interaction, message: discord.Message):
-        """Shared implementation for the Forward to Support context menu."""
-        if interaction.guild is None:
-            await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+    @commands.hybrid_command(
+        name="forward",
+        aliases=["unsupported"],
+        extras={"red_force_enable": True},
+    )
+    @commands.guild_only()
+    async def forward(self, ctx, message_link: str = None):
+        """Forwards a message to the configured target channel.
+
+        Provide a Discord message link, or use this command as a reply to a message.
+
+        **Examples:**
+        - `/forward https://discord.com/channels/123/456/789`
+        - Reply to a message and type `!unsupported`
+        """
+        respond = lambda msg: ctx.send(msg)
+
+        # Bestimme die Ziel-Nachricht: aus Link oder Reply
+        target_message = None
+        if message_link:
+            target_message = await self._resolve_link(ctx, message_link, respond)
+            if target_message is None:
+                return
+        elif ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                target_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            except Exception as e:
+                logging.error(f"Error fetching replied message: {e}")
+                await respond("❌ Could not retrieve the replied message.")
+                return
+        else:
+            await respond(
+                "❌ Please provide a Discord message link, or use this command as a reply to a message."
+            )
+            return
+
+        await self._forward(ctx.author, ctx.guild, target_message, respond)
+
+    async def _resolve_link(self, ctx, link: str, respond) -> discord.Message:
+        """Parses a Discord message link and fetches the target message."""
+        match = MESSAGE_LINK_RE.search(link)
+        if not match:
+            await respond("❌ That doesn't look like a valid Discord message link.")
+            return None
+        guild_id, channel_id, message_id = (int(g) for g in match.groups())
+
+        if ctx.guild.id != guild_id:
+            await respond("❌ The message link is not from this server.")
+            return None
+
+        channel = ctx.guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await ctx.guild.fetch_channel(channel_id)
+            except Exception as e:
+                logging.error(f"Error fetching channel from link: {e}")
+                await respond("❌ Could not access the channel from the link.")
+                return None
+
+        try:
+            return await channel.fetch_message(message_id)
+        except Exception as e:
+            logging.error(f"Error fetching message from link: {e}")
+            await respond("❌ Could not fetch the message from the link.")
+            return None
+
+    async def _forward(self, author, guild, message: discord.Message, respond) -> None:
+        """Shared implementation: forwards a message to the configured target channel."""
+        if guild is None:
+            await respond("❌ This command must be used in a server.")
             return
 
         allowed_roles = await self.config.allowed_role_ids()
         if allowed_roles:
-            if not any(role.id in allowed_roles for role in interaction.user.roles):
-                await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
+            if not any(role.id in allowed_roles for role in author.roles):
+                await respond("❌ You do not have permission to use this command.")
                 return
 
         target_channel_id = await self.config.target_channel_id()
         if target_channel_id is None:
-            await interaction.response.send_message("❌ No target channel has been set. Use `/settarget` to configure one.", ephemeral=True)
+            await respond("❌ No target channel has been set. Use `/settarget` to configure one.")
             return
 
-        target_channel = interaction.guild.get_channel(target_channel_id)
+        target_channel = guild.get_channel(target_channel_id)
         if target_channel is None:
             try:
-                target_channel = await interaction.guild.fetch_channel(target_channel_id)
+                target_channel = await guild.fetch_channel(target_channel_id)
             except Exception as e:
                 logging.error(f"Error fetching target channel: {e}")
-                await interaction.response.send_message("❌ The target channel is invalid or not accessible.", ephemeral=True)
+                await respond("❌ The target channel is invalid or not accessible.")
                 return
 
         embed = discord.Embed(
@@ -124,13 +198,13 @@ class UnsupportedMessageForwarder(commands.Cog):
                 embed=embed,
                 files=files if files else None
             )
-            await interaction.response.send_message(f"✅ Message has been forwarded to {target_channel.mention}.", ephemeral=True)
+            await respond(f"✅ Message has been forwarded to {target_channel.mention}.")
         except discord.Forbidden:
             logging.error("Bot lacks permissions to send messages in the target channel.")
-            await interaction.response.send_message("❌ Bot lacks permissions to send messages in the target channel.", ephemeral=True)
+            await respond("❌ Bot lacks permissions to send messages in the target channel.")
         except Exception as e:
             logging.error(f"Error sending forwarded message: {e}")
-            await interaction.response.send_message("❌ Failed to forward the message.", ephemeral=True)
+            await respond("❌ Failed to forward the message.")
 
 
 @app_commands.context_menu(name="Forward to Support", extras={"red_force_enable": True})
@@ -139,4 +213,5 @@ async def forward_to_support(interaction: discord.Interaction, message: discord.
     if cog is None:
         await interaction.response.send_message("❌ Cog is not loaded.", ephemeral=True)
         return
-    await cog.forward_message(interaction, message)
+    respond = lambda msg: interaction.response.send_message(msg, ephemeral=True)
+    await cog._forward(interaction.user, interaction.guild, message, respond)
