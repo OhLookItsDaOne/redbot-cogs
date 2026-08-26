@@ -2,6 +2,6 @@
     "author": ["OhLookItsDaOne"],
     "name": "redbot-cogs",
     "short": "Custom moderation and support cogs",
-    "description": "Custom Red-DiscordBot cogs for the D1 support server: AutoMod allow-list management, keyword auto replies, image spam protection, instant-ban channel, image gallery channels, forum troubleshooting with privacy commands and message forwarding to support.",
+    "description": "Custom Red-DiscordBot cogs for the SkyrimVR FUS server, used as a help and moderation tool: AutoMod allow-list management, keyword auto replies, image spam protection, instant-ban channel, image gallery channels, forum troubleshooting with privacy commands and message forwarding to support.",
     "install_msg": "Repo added. Use `[p]cog list d1` to see available cogs and `[p]cog install d1 <cog>` to install them."
 }
